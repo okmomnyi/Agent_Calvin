@@ -1,0 +1,179 @@
+# AgentOS configuration — non-secret, safe to commit. Secrets live in .env.
+# Principle 2 (§0): model routing, never hardcoding. Every LLM call declares a task
+# class and the router maps class -> model here. Edit models freely; no code change needed.
+
+llm:
+  base_url: "https://integrate.api.nvidia.com/v1"   # default NIM endpoint
+  default_api_key_env: NVIDIA_API_KEY               # default key env var (fallback for every task)
+
+  # task class -> route. The best model is chosen PER TASK (coder model for code, reasoning
+  # model for research, cheap model for high-volume classify). Each route may ALSO declare:
+  #   api_key_env: <ENV_VAR>   — a task-specific key, so concurrent work (scheduler + bot +
+  #                              voice, all at once) spreads across separate rate-limit buckets
+  #   base_url:    <URL>       — a task-specific endpoint (still NIM-compatible; free-first §0)
+  #   temperature / max_tokens — per-task generation defaults
+  # Any unset field falls back to the defaults, so a SINGLE NVIDIA_API_KEY still works everywhere.
+  # A route may be a bare model string OR a dict as below. Add a class = add a line; the kernel
+  # never changes (Principle 2: routing, never hardcoding).
+  routes:
+    default:     { model: "meta/llama-3.1-8b-instruct" }
+    classify:    { model: "meta/llama-3.1-8b-instruct", api_key_env: NVIDIA_API_KEY_FAST,     temperature: 0.0 }
+    write:       { model: "mistralai/mistral-medium-3.5-128b", api_key_env: NVIDIA_API_KEY_WRITE }
+    persona:     { model: "mistralai/mistral-medium-3.5-128b", api_key_env: NVIDIA_API_KEY_WRITE }
+    code_review: { model: "deepseek-ai/deepseek-v4-pro", api_key_env: NVIDIA_API_KEY_CODE }
+    research:    { model: "nvidia/nemotron-3-super-120b-a12b", api_key_env: NVIDIA_API_KEY_RESEARCH, max_tokens: 1500 }
+    voice_chat:  { model: "meta/llama-3.1-8b-instruct", api_key_env: NVIDIA_API_KEY_FAST }
+
+  # generation defaults (used when a route/call doesn't override them)
+  defaults:
+    temperature: 0.4
+    max_tokens: 1024
+  request:
+    timeout_seconds: 60
+    max_retries: 4
+    backoff_base_seconds: 1.5   # exponential: base * 2**attempt, honouring Retry-After on 429
+
+# --- Job hunter target profile (Phase 3) — editable ---
+jobs:
+  primary:
+    - remote transcription (general, Swahili/English bilingual, audio QC, subtitling, captioning, audio data annotation)
+  secondary:
+    - cloud computing & DevOps (junior/associate cloud engineer, DevOps engineer, cloud support, SRE, Linux sysadmin, NOC, IT support)
+  also:
+    - paid internships (software, data, cloud/DevOps, localization/transcription) — remote or Nairobi
+  score_threshold: 60
+  skip_unpaid: true
+  max_score_per_run: 40        # cap LLM scoring per hunt; overflow deferred (never silently dropped)
+  # cybersecurity/pentesting may surface & score normally but has no dedicated source
+
+  # Generic RSS/Atom feeds — add a line and it works (parsed by sources/rss.py).
+  rss_feeds:
+    weworkremotely:
+      url: "https://weworkremotely.com/remote-jobs.rss"
+    wwr_devops:
+      url: "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss"
+      category: cloud_devops
+    himalayas:
+      url: "https://himalayas.app/jobs/rss"
+    myjobmag_kenya:
+      url: "https://www.myjobmag.co.ke/jobsxml.xml"
+    cncf:
+      url: "https://jobs.cncf.io/jobs.rss"
+      category: cloud_devops
+
+  # Transcription portals — notify-only signup links (no email apply path).
+  transcription_portals:
+    - { name: Rev,            url: "https://www.rev.com/freelancers" }
+    - { name: TranscribeMe,   url: "https://www.transcribeme.com/careers/" }
+    - { name: GoTranscript,   url: "https://gotranscript.com/transcription-jobs" }
+    - { name: Scribie,        url: "https://scribie.com/jobs" }
+    - { name: Verbit,         url: "https://verbit.ai/careers/" }
+    - { name: Way With Words, url: "https://waywithwords.net/careers/" }
+    - { name: Athreon,        url: "https://www.athreon.com/careers/" }
+
+# --- Event Scout interest tags (Phase 14) — /tags add|remove <tag> edits these ---
+events:
+  interest_tags:
+    - cloud computing
+    - DevOps
+    - cybersecurity / CTF competitions
+    - hackathons & tech meetups
+    - retro gaming
+  free_only: true
+  physical_bias:
+    cities: [Nairobi, Mombasa]
+  # CTFtime is built in. Add RSS/ICS community calendars here (Meetup group feeds,
+  # DevOpsDays pages, Luma calendars, GDG Nairobi, AWS UG Kenya, Swahilipot, …).
+  feeds: {}
+  #   nairobi_devops: { url: "https://www.meetup.com/nairobi-devops/events/rss/", tags: [devops], format: physical }
+  #   gdg_nairobi:    { url: "https://gdg.community.dev/gdg-nairobi/events.ics", kind: ics, tags: [hackathons & tech meetups], format: physical }
+
+# --- Flash-flip deal broker (Phase 16) ---
+# Capital-risk rules are enforced in code, not config: AgentOS never spends money (purchase
+# needs an approved purchase gate) and never messages sellers/buyers (it drafts, Calvin sends).
+flip:
+  min_price_gap_pct: 0.20      # must be >=20% below the comp median to pursue
+  min_listing_age_days: 14     # staleness proxy — unnoticed listings won't sell mid-negotiation
+  max_velocity_days: 7         # flash-sale filter: slow categories never enter the pipeline
+  min_score: 60
+  flash_window_hours: 48       # no buyer in the window -> price-drop tier, then expire
+  price_drop_tiers: [0.9, 0.8] # successive resale multipliers before expiring
+  opening_offer_pct: 0.85      # opening offer vs. min(asking, comp)
+
+  # Phase 17: an item is cross-posted to ALL of these at once, under ONE flash window.
+  # first-committed-buyer-wins delisting is a hard rule in code, not a setting here.
+  resale_platforms: [jiji, pigiame]
+
+  # Phase 18: platform/transaction fees deducted when the margin ledger closes a position.
+  platform_fee_pct: 0.0        # e.g. 0.05 for a 5% marketplace fee
+
+  # Historical time-to-sale per category (Phase 18's margin ledger refines these).
+  category_velocity_days:
+    default: 7
+    phones: 3
+    laptops: 5
+    electronics: 5
+    furniture: 21              # > max_velocity_days -> rejected at sourcing
+    vehicles: 45
+
+  # Lower-risk marketplaces only. Facebook Marketplace is deliberately NOT scraped:
+  # Meta actively pursues scrapers (§16 trust & compliance).
+  sources:
+    jiji:    { enabled: false, url: "https://jiji.co.ke/api_web/v1/listing?slug=electronics" }
+    pigiame: { enabled: false, url: "https://www.pigiame.co.ke/electronics" }
+
+# --- Study Vault (Phase 9) — RAG over course materials ---
+vault:
+  embedder: auto          # auto | sentence-transformers | hashing
+  min_score: 0.18         # retrieval confidence floor; below this -> "not in your notes"
+
+# --- Spaced repetition (Phase 11) ---
+srs:
+  daily_hour: 18          # local hour to send the "cards due" reminder
+
+# --- Semester planner (Phase 13) ---
+planner:
+  briefing_hour: 7        # local hour for the unified morning briefing
+  # Ongoing freelance/client/volunteer commitments surfaced in the briefing. Examples —
+  # replace with your own. Naming a real client here publishes that relationship if this
+  # repo is public, which is theirs to disclose, not yours.
+  commitments:
+    - "Example Co — client web app"
+    - "Local tech hub — volunteer"
+
+# --- Self-audit / infra recon (Phase 21) — REPORT ONLY, enrolled targets only ---
+infra:
+  tls_warn_days: 21           # warn this far ahead of certificate expiry
+  probe_ports: [22, 80, 443, 3000, 5432, 8000, 8080]
+  # Enroll hosts you own via `manage.py infra enroll <host> --ports 80,443`.
+  # Anything open that isn't listed as expected becomes a finding.
+  targets: {}
+  #   agent.example.com: [80, 443]
+
+# --- Desktop app control (Phase 23) — laptop-side, voice-triggered ---
+# App KEYS only. The droplet never learns an executable path: it just names one of these, and
+# the laptop (client/apps.yaml) decides what it means and can refuse. That file is the real
+# allowlist — this list only lets the server say "I don't know that app" nicely.
+# Keys here must exist in client/apps.yaml or the laptop will (correctly) refuse them.
+desktop:
+  apps: [spotify, code, chrome, telegram, terminal]
+
+# --- Music companion (Phase 22) ---
+# Spotify removed Recommendations/Audio-Features/Related-Artists for new apps, and the Web
+# API cannot mix audio — so "DJ mode" is sequencing + narration, never beatmatching.
+music:
+  dj_narration: true          # speak a short line to open a set (stock voice only, §0 P9)
+
+# --- Adaptive behavior layer (Phase 20) ---
+adaptive:
+  threshold: 4        # times a pattern must repeat (with NO contradicting instance) to propose
+
+# --- Voice registry (Phase 7) — pre-built neural voices ONLY (Principle 9, §0) ---
+voice:
+  default: guy
+  registry:
+    guy:    "en-US-GuyNeural"
+    aria:   "en-US-AriaNeural"
+    ryan:   "en-GB-RyanNeural"
+    rafiki: "sw-KE-RafikiNeural"
+    zuri:   "sw-KE-ZuriNeural"

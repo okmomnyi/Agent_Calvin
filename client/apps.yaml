@@ -1,0 +1,69 @@
+# Desktop allowlist (Phase 23) — THIS FILE IS THE SECURITY BOUNDARY.
+#
+# The droplet can only ever name a key from this file ("spotify"), never a command. If a key
+# isn't here, the laptop refuses it — so a leaked AGENT_WS_TOKEN can't run arbitrary programs
+# on your machine, only the apps you listed here yourself.
+#
+# Rules:
+#   * Commands are argv LISTS, never strings — nothing is passed through a shell.
+#   * `launch`  — how to start it, per OS.
+#   * `process` — the process name, used to close it gracefully when there's no `close`.
+#   * `close`   — optional, only if the default graceful close is wrong for this app.
+#     The default is `taskkill /IM <process>` (no /F), `osascript quit`, or SIGTERM — all of
+#     which let the app prompt about unsaved work. Don't put /F or -9 here.
+#   * `focus`   — optional; without it, focusing re-runs `launch` (raises the window for most
+#     single-instance apps).
+#
+# Keys should match config.yaml's `desktop.apps` on the droplet, or the server won't name them.
+# Edit freely: adding an app here is you granting permission.
+
+apps:
+  spotify:
+    launch:
+      windows: ["cmd", "/c", "start", "", "spotify:"]
+      darwin: ["open", "-a", "Spotify"]
+      linux: ["spotify"]
+    process:
+      windows: "Spotify.exe"
+      darwin: "Spotify"
+      linux: "spotify"
+
+  code:                       # VS Code — "open code" / "close vs code"
+    launch:
+      windows: ["cmd", "/c", "code"]
+      darwin: ["open", "-a", "Visual Studio Code"]
+      linux: ["code"]
+    process:
+      windows: "Code.exe"
+      darwin: "Visual Studio Code"
+      linux: "code"
+
+  chrome:
+    launch:
+      windows: ["cmd", "/c", "start", "", "chrome"]
+      darwin: ["open", "-a", "Google Chrome"]
+      linux: ["google-chrome"]
+    process:
+      windows: "chrome.exe"
+      darwin: "Google Chrome"
+      linux: "chrome"
+
+  telegram:
+    launch:
+      windows: ["cmd", "/c", "start", "", "telegram"]
+      darwin: ["open", "-a", "Telegram"]
+      linux: ["telegram-desktop"]
+    process:
+      windows: "Telegram.exe"
+      darwin: "Telegram"
+      linux: "telegram-desktop"
+
+  terminal:
+    launch:
+      windows: ["cmd", "/c", "start", "", "wt"]
+      darwin: ["open", "-a", "Terminal"]
+      linux: ["x-terminal-emulator"]
+    process:
+      windows: "WindowsTerminal.exe"
+      darwin: "Terminal"
+      linux: "x-terminal-emulator"

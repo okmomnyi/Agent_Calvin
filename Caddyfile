@@ -1,0 +1,11 @@
+# TLS termination for AgentOS. Used by the `tls` compose profile; Caddy provisions and renews
+# certificates automatically. Point your DNS A/AAAA record at the droplet first, or the ACME
+# challenge fails.
+#
+# `api` is the compose service name — Docker's internal DNS resolves it on the compose network,
+# which is why the api container publishes only to loopback and never to 0.0.0.0.
+
+{$AGENTOS_DOMAIN} {
+	# Handles the /ws/voice WebSocket upgrade too — Caddy proxies it without extra config.
+	reverse_proxy api:8000
+}

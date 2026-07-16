@@ -1,0 +1,36 @@
+# Weekly class timetable (Phase 13) — EXAMPLE. Times are local (see AGENTOS_TZ).
+#
+# Copy this to config/timetable.yaml and put your real schedule there:
+#
+#     cp config/timetable.example.yaml config/timetable.yaml
+#
+# timetable.yaml is gitignored, for the same reason .env is: a real timetable says where you
+# physically are, all week, to anyone who reads the repo. A missing file is handled — the
+# briefing simply reports no classes (core/timetable.py returns {}).
+#
+# `units` maps a code to a full name (used in briefings and study planning).
+
+units:
+  CS301: Data Structures & Algorithms
+  CS305: Automata Theory
+  CS310: Systems Analysis & Design
+  CS320: Cloud Computing & DevOps
+
+weekly:
+  monday:
+    - { start: "08:00", end: "10:00", unit: CS301, title: Data Structures, location: LR2 }
+    - { start: "11:00", end: "13:00", unit: CS320, title: Cloud & DevOps Lab, location: Lab 4 }
+  tuesday:
+    - { start: "10:00", end: "12:00", unit: CS305, title: Automata Theory, location: LR1 }
+  wednesday:
+    - { start: "08:00", end: "10:00", unit: CS310, title: Systems Analysis, location: LR3 }
+  thursday:
+    - { start: "11:00", end: "13:00", unit: CS320, title: DevOps Practical, location: Lab 4 }
+  friday:
+    - { start: "09:00", end: "11:00", unit: CS305, title: Automata Tutorial, location: LR1 }
+  saturday: []
+  sunday: []
+
+# One-off events (override/augment the weekly grid on a specific date).
+one_off:
+  # - { date: "2026-07-20", start: "14:00", end: "16:00", title: "Guest lecture: Kubernetes", location: Auditorium }

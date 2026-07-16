@@ -1,0 +1,117 @@
+# AgentOS — the whole stack.
+#
+#   docker compose up -d --build          api + bot + postgres
+#   docker compose --profile tls up -d    ... plus Caddy (TLS termination, needs a domain)
+#   docker compose --profile test run --rm tests    the suite, against a throwaway database
+#
+# `api` and `bot` are the same image with different commands, mirroring the two PM2 processes:
+# neither depends on the other, so `docker compose restart api` never takes the bot down.
+
+x-agentos-base: &agentos-base
+  build:
+    context: .
+    args:
+      # 1 adds sentence-transformers + faster-whisper (~2GB of torch). See the Dockerfile.
+      WITH_ML: ${WITH_ML:-0}
+  image: agentos:latest
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    # MUST override whatever .env says. .env holds a host DSN (localhost:5433) and inside a
+    # container `localhost` is the container itself — the app would dial itself and hang.
+    # Compose resolves `environment` after `env_file`, so this wins.
+    DATABASE_URL: postgresql://${POSTGRES_USER:-agentos}:${POSTGRES_PASSWORD:-agentos}@db:5432/${POSTGRES_DB:-agentos}
+    # On a volume, not in the image: the Gmail client rewrites it on every token refresh.
+    GOOGLE_TOKEN_PATH: /app/secrets/token.json
+    TZ: ${AGENTOS_TZ:-Africa/Nairobi}
+  volumes:
+    # Calvin's actual content: the vault, CV variants, lecture audio, generated PDFs. Bind-
+    # mounted rather than baked in, so a rebuild never touches it (§0 P4: never delete data).
+    - ./data:/app/data
+    - ./logs:/app/logs
+    # Gmail token (minted on the laptop via `manage.py auth`, copied to secrets/). See
+    # secrets/README.md for why this is a directory mount and why it isn't read-only.
+    - ./secrets:/app/secrets
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agentos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentos}
+      POSTGRES_DB: ${POSTGRES_DB:-agentos}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates agentos_test alongside agentos on first init, so the test profile has a
+      # database to point at. Runs only when pgdata is empty.
+      - ./scripts/init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh:ro
+    ports:
+      # Bound to LOOPBACK deliberately. A bare "5433:5432" listens on 0.0.0.0 and would put
+      # Postgres on the public internet the moment this runs on the droplet — which is exactly
+      # the finding Phase 21's recon scan exists to catch. This is for local psql only.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+    healthcheck:
+      # `api`/`bot` wait on this: the schema self-creates on first connect, and a container
+      # that starts before Postgres accepts connections would just crash-loop.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentos} -d ${POSTGRES_DB:-agentos}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    <<: *agentos-base
+    container_name: agentos-api
+    # Kernel + APScheduler (email cleanup, hunts, the 07:00 briefing, watchers, flip scans,
+    # the Sunday recon pass). Published on loopback; Caddy or an SSH tunnel fronts it.
+    ports:
+      - "127.0.0.1:${AGENTOS_PORT:-8000}:8000"
+
+  bot:
+    <<: *agentos-base
+    container_name: agentos-bot
+    command: ["python", "manage.py", "telegram"]
+    # Long-polls Telegram; serves no HTTP, so it gets no port and no healthcheck.
+    healthcheck:
+      disable: true
+
+  # ---------------------------------------------------------------- optional: TLS
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # ACME certs — losing this re-issues and can hit rate limits
+      - caddy_config:/config
+    environment:
+      AGENTOS_DOMAIN: ${AGENTOS_DOMAIN:-agent.example.com}
+    depends_on:
+      - api
+
+  # ---------------------------------------------------------------- optional: tests
+  tests:
+    profiles: ["test"]
+    <<: *agentos-base
+    container_name: agentos-tests
+    restart: "no"
+    environment:
+      # Overrides the base DSN. Points at agentos_test (created by the db init script), NOT at
+      # the real database — the suite truncates between tests.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agentos}:${POSTGRES_PASSWORD:-agentos}@db:5432/${POSTGRES_DB:-agentos}_test
+      TEST_DATABASE_URL: postgresql://${POSTGRES_USER:-agentos}:${POSTGRES_PASSWORD:-agentos}@db:5432/${POSTGRES_DB:-agentos}_test
+      TZ: ${AGENTOS_TZ:-Africa/Nairobi}
+    ports: !reset []
+    command: ["python", "-m", "pytest"]
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

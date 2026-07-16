@@ -1,0 +1,38 @@
+# Keep the build context small and secret-free. Anything here is invisible to `docker build`.
+
+# --- Secrets: these reach the container as env/mounts at RUN time, never baked into a layer ---
+.env
+token.json
+credentials.json
+
+# --- Local state (mounted as volumes instead — baking it in would ship Calvin's notes) ---
+data/
+logs/
+agentos-backup-*.tar.gz
+
+# --- Local Python env (wrong platform: a Windows venv is useless in a Linux image) ---
+.venv/
+venv/
+.python/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.test-tmp-*/
+
+# --- VCS / tooling ---
+.git/
+.gitignore
+.agents/
+.claude/
+
+# NOTE: client/ is deliberately NOT excluded. The voice client runs on Calvin's laptop and the
+# containers never execute it, but tests/test_voice.py imports client.voice_utils (pure stdlib),
+# and the §0 anti-cloning guardrail scans client/ among its target dirs — leaving it out let the
+# guardrail pass while silently scanning one directory fewer. It's a few KB of source.
+
+# --- Docs & OS cruft ---
+docs/
+README.md
+.DS_Store
+Thumbs.db

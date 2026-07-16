@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────── secrets
+# §0: credentials never touch the repo. .env.example is the committed template.
+# `.env.*` catches .env.local / .env.prod / .env.bak too — a stray backup of a filled-in
+# .env is the usual way a token reaches a public repo.
+.env
+.env.*
+!.env.example
+token.json
+credentials.json
+
+# Your real class timetable: it says where you physically are, every week. Ship the example,
+# keep the real one local (cp config/timetable.example.yaml config/timetable.yaml).
+config/timetable.yaml
+
+# The Gmail token lives here on the droplet (see secrets/README.md). Ignore the contents but
+# keep the README, so the directory — and the instructions — survive a clone.
+secrets/*
+!secrets/README.md
+
+# ──────────────────────────────────────────────────────── runtime data
+# Calvin's actual content: master CV and tailored variants, course notes, lecture audio,
+# generated prep/cram PDFs, and the pre-migration SQLite file. Personal, and none of it
+# belongs in git. Ignoring the whole directory is safe: every path under it is re-created
+# on demand (core/config.py, core/pdf.py, skills/lecture_capture.py, ...), so a fresh clone
+# builds what it needs.
+data/
+logs/
+*.log
+agentos-backup-*.tar.gz
+agentos.sql
+
+# ─────────────────────────────────────────────────────────────── python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.python/
+.test-tmp-*/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ─────────────────────────────────────────────────────────────── docker
+# Local-only compose overrides (ports, mounts) — every box differs.
+docker-compose.override.yml
+
+# ───────────────────────────────────────────────────────────── tooling
+.agents/
+.claude/
+.kilo/
+.idea/
+.vscode/
+
+# ─────────────────────────────────────────────────────────────────── os
+.DS_Store
+Thumbs.db

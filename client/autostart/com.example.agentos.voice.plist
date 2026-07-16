@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS launchd agent. Install:
+     cp client/autostart/com.example.agentos.voice.plist ~/Library/LaunchAgents/
+     edit paths/token below, then:
+     launchctl load ~/Library/LaunchAgents/com.example.agentos.voice.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.agentos.voice</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USERNAME/AgentOS/.venv/bin/python</string>
+    <string>/Users/USERNAME/AgentOS/client/voice_client.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/USERNAME/AgentOS/client</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AGENT_WS_URL</key><string>wss://agent.example.com/ws/voice</string>
+    <key>AGENT_WS_TOKEN</key><string>CHANGE_ME</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>

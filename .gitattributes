@@ -1,0 +1,25 @@
+# Line endings. This repo is authored on Windows and RUNS ON LINUX (droplet + containers), so
+# the working tree is normalised to LF rather than left to core.autocrlf.
+#
+# Without this, a clone on a machine with `core.autocrlf=true` gets CRLF on disk, Docker
+# bind-mounts scripts/init-test-db.sh into the postgres container, and Linux fails with
+# `#!/bin/sh^M: bad interpreter`. The file is fine in the repo — it breaks on checkout, which
+# is the sort of bug that only ever appears on someone else's fresh clone.
+* text=auto eol=lf
+
+# Windows-only launchers: these are read by cmd.exe, so leave them CRLF.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Never touch these — normalisation would corrupt them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.mp3 binary
+*.wav binary
+*.onnx binary
+*.tflite binary
+*.db binary

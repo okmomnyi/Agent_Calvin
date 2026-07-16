@@ -1,0 +1,48 @@
+# AgentOS dependencies
+# Phase 1 (kernel & core) needs only the lines above the marker; later phases add the rest.
+
+# --- Phase 1: kernel & core ---
+psycopg[binary]>=3.1        # PostgreSQL driver (raw SQL, no ORM)
+fastapi>=0.110
+uvicorn[standard]>=0.27
+apscheduler>=3.10
+requests>=2.31
+pyyaml>=6.0
+python-dotenv>=1.0
+tzdata>=2024.1             # IANA tz db (Windows lacks one; user-timezone rules depend on it)
+
+# --- Phase 2: email agent (Gmail + Telegram notify) ---
+google-api-python-client>=2.0
+google-auth-oauthlib>=1.0
+google-auth-httplib2>=0.2
+# Telegram digests use plain requests (above); python-telegram-bot arrives in Phase 8.
+
+# --- Phase 3: job hunter (scraping) ---
+feedparser>=6.0
+beautifulsoup4>=4.12
+
+# --- Phase 6: research + interview prep ---
+reportlab>=4.0
+
+# --- Phase 8: Telegram bot ---
+python-telegram-bot>=21
+
+# --- Phase 9: study vault (RAG over course materials) ---
+pypdf>=4.0
+python-docx>=1.1
+python-pptx>=0.6
+pillow>=10.0
+# OCR for note images is optional: `pip install pytesseract` + the tesseract binary.
+# Semantic embeddings are optional but recommended on the droplet:
+#   pip install sentence-transformers      # (config vault.embedder=auto uses it if present,
+#                                             else falls back to the dependency-free hashing embedder)
+
+# --- Test tooling ---
+pytest>=8.0
+httpx>=0.27            # python-telegram-bot transport
+httpx2>=2.0            # current Starlette/FastAPI TestClient transport
+
+# --- Notes ---
+# Phase 7 voice deps (faster-whisper, sounddevice, openwakeword, edge-tts) live in
+# client/requirements.txt — laptop-side. faster-whisper is also needed droplet-side for
+# Telegram voice-note transcription (Phase 8) and lecture capture (Phase 10).

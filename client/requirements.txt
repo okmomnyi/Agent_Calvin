@@ -1,0 +1,12 @@
+# AgentOS laptop voice client — install on Calvin's laptop, NOT the droplet.
+# CPU-only; no GPU required.
+
+faster-whisper>=1.0      # local STT (small int8)
+openwakeword>=0.6        # wake-word detection
+sounddevice>=0.4         # mic capture + playback
+soundfile>=0.12          # decode edge-tts mp3 for playback
+edge-tts>=6.1            # pre-built neural voices ONLY (§0 Principle 9 — no cloning)
+numpy>=1.24
+websockets>=12.0         # authed link to the droplet /ws/voice
+# NOTE: no hotkey library — push-to-talk uses stdin so the client installs
+# identically on Ubuntu / other Linux / macOS with no root (Phase 19).
