@@ -178,7 +178,16 @@ def run_actions(actions) -> list:
         return []
     global _controller
     if _controller is None:
-        from client.apps import AppController
+        # Two import styles have to work. Run the documented way — `python
+        # client/voice_client.py` — Python puts client/ on sys.path, so it's `apps`, exactly
+        # like the `voice_utils` import at the top. Imported as a package (pytest, tooling),
+        # the project root is on sys.path instead and it's `client.apps`. Hard-coding the
+        # package form passed every test and then died on the first "open spotify" a real
+        # user asked for, because the tests import client.apps themselves and never reach here.
+        try:
+            from apps import AppController
+        except ImportError:
+            from client.apps import AppController
 
         _controller = AppController()
     outcomes = _controller.execute_all(actions)

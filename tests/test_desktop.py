@@ -296,3 +296,36 @@ def test_routing(text, intent, app):
 ])
 def test_desktop_rules_do_not_hijack_other_skills(text, expected_skill):
     assert IntentRouter(llm=None).route(text, use_llm=False).skill == expected_skill
+
+
+# ============================================================ the client as it really runs
+def test_voice_client_resolves_apps_the_way_it_is_actually_launched():
+    """`python client/voice_client.py` puts client/ on sys.path — not the project root.
+
+    Regression test for a bug that passed the whole suite and still broke the first real
+    "open spotify": voice_client imported `client.apps`, which only resolves when the project
+    root is on sys.path (as pytest arranges). Launched the documented way it must be `apps`.
+    Importing under the script's own sys.path is the only way to see it.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    client_dir = Path(__file__).resolve().parents[1] / "client"
+    code = (
+        "import sys; sys.path.insert(0, r'%s')\n"
+        "import importlib.util\n"
+        "spec = importlib.util.spec_from_file_location('vc', r'%s')\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "m.run_actions([{'op': 'open', 'app': 'definitely-not-allowlisted'}])\n"
+        "print('OK')\n" % (client_dir, client_dir / "voice_client.py")
+    )
+    # -P is what makes this a real test. Without it, `python -c` prepends the CWD to sys.path,
+    # so `client.apps` resolves from the project root and the buggy import passes — the first
+    # version of this test did exactly that and proved nothing. `python client/voice_client.py`
+    # prepends the SCRIPT's directory and never the cwd, which -P reproduces.
+    out = subprocess.run([sys.executable, "-P", "-c", code], capture_output=True, text=True,
+                         cwd=str(client_dir.parent))
+    assert "No module named" not in out.stderr, (
+        "voice_client cannot import its own modules the way it is launched:\n" + out.stderr)
+    assert "OK" in out.stdout, out.stderr

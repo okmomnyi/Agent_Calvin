@@ -13,8 +13,22 @@ credentials.json
 vps-paste.txt
 
 # Your real class timetable: it says where you physically are, every week. Ship the example,
-# keep the real one local (cp config/timetable.example.yaml config/timetable.yaml).
+# keep the real one local (cp config/timetable.example.yaml config/timetable.yaml
+
+# Stray CVs/resumes/certificates dropped in the project ROOT. The master CV belongs in
+# data/cv/ (already ignored) — this is belt-and-braces, because `git add -A` on a public
+# repo would otherwise publish your phone number and address. Root-only: docs/ is unaffected.
+/*.pdf
+/*.docx
+/*.doc).
 config/timetable.yaml
+
+# Stray CVs/resumes/certificates dropped in the project ROOT. The master CV belongs in
+# data/cv/ (already ignored) — this is belt-and-braces, because `git add -A` on a public
+# repo would otherwise publish your phone number and address. Root-only: docs/ is unaffected.
+/*.pdf
+/*.docx
+/*.doc
 
 # The Gmail token lives here on the droplet (see secrets/README.md). Ignore the contents but
 # keep the README, so the directory — and the instructions — survive a clone.
