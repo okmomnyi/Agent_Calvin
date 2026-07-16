@@ -500,7 +500,9 @@ def cmd_auth(_: argparse.Namespace) -> int:
     except GmailAuthError as exc:
         log.error("%s", exc)
         return 1
-    print(f"Authorized. Token written to {path}. Copy it to the droplet's project root.")
+    print(f"Authorized. Token written to {path}.\n"
+          f"Copy it to the droplet:  scp {path.name} agentos@<droplet>:~/AgentOS/secrets/\n"
+          f"(secrets/, not the project root — that's where the containers read it from.)")
     return 0
 
 

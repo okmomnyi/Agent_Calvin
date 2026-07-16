@@ -68,7 +68,7 @@ def run_oauth_flow() -> Path:
     creds = flow.run_local_server(port=0)
     token_file = _token_path()
     token_file.write_text(creds.to_json(), encoding="utf-8")
-    log.info("Wrote %s — copy this to the droplet's project root.", token_file)
+    log.info("Wrote %s — copy it to the droplet's secrets/ directory.", token_file)
     return token_file
 
 
