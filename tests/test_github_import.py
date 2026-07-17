@@ -67,7 +67,7 @@ class _GhLLM:
     """LLM that returns whatever facts the test wants."""
 
     def __init__(self, facts):
-        self.routes, self.defaults = {"research": "m"}, {}
+        self.routes, self.defaults = {"write": "m", "research": "m"}, {}
         self._facts = facts
         self.saw = None
 

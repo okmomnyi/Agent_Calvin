@@ -86,7 +86,11 @@ class PersonaSkill(BaseSkill):
 
         try:
             data = self.llm.chat_json(
-                "research",
+                # 'write', not 'research'. This is structured extraction from text we already
+                # have, not reasoning that needs a 120B model -- and the research route
+                # (nemotron-3-super-120b) answered this prompt with "We need to output" followed
+                # by a wall of <unk> tokens. The write route has been consistently sane and fast.
+                "write",
                 [{"role": "system", "content":
                     "From this GitHub evidence, extract factual, defensible statements about the "
                     "developer for use in job applications. Rules: state ONLY what the evidence "
