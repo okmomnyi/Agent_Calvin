@@ -381,6 +381,28 @@ def cmd_persona_init(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_persona_github(args: argparse.Namespace) -> int:
+    """Derive CANDIDATE persona facts from Calvin's public repos (he confirms each)."""
+    from skills.persona import SKILL
+
+    res = SKILL.import_github(user=args.user or "", notify=not args.no_send)
+    print(res.text)
+    return 0 if res.ok else 1
+
+
+def cmd_persona_facts(args: argparse.Namespace) -> int:
+    """List candidate facts awaiting confirmation, or confirm/reject one."""
+    from skills.persona import SKILL
+
+    if args.verify:
+        cat, _, key = args.verify.partition(".")
+        res = SKILL.verify(category=cat, key=key, accept=not args.reject)
+    else:
+        res = SKILL.candidates()
+    print(res.text)
+    return 0 if res.ok else 1
+
+
 def cmd_form(args: argparse.Namespace) -> int:
     """Build a review-ready answer sheet from pasted questions or a form URL (never submits)."""
     from skills.form_assist import SKILL
@@ -703,6 +725,16 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_persona_init)
 
     # --- Phase 5: form assistant ---
+    p_pg = sub.add_parser("persona-github", help="import CANDIDATE facts from public GitHub repos")
+    p_pg.add_argument("user", nargs="?", help="GitHub username (default: $GITHUB_USER)")
+    p_pg.add_argument("--no-send", action="store_true", help="don't push a Telegram summary")
+    p_pg.set_defaults(func=cmd_persona_github)
+
+    p_pf = sub.add_parser("persona-facts", help="review/confirm candidate persona facts")
+    p_pf.add_argument("--verify", help="confirm one, as category.key (e.g. skills.typescript)")
+    p_pf.add_argument("--reject", action="store_true", help="with --verify: reject instead")
+    p_pf.set_defaults(func=cmd_persona_facts)
+
     p_form = sub.add_parser("form", help="build an answer sheet from questions (never submits)")
     p_form.add_argument("text", nargs="?", default="", help="pasted questions")
     p_form.add_argument("--url", default=None, help="form URL to fetch")
