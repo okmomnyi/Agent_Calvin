@@ -57,7 +57,7 @@ class AgentWindow:
         self.core = AssistantCore(
             recorder=self._record, open_mic=self._open_mic, close_mic=self._close_mic,
             transcribe=self._transcribe, send=self._send, speak=self._speak,
-            run_actions=self._run_actions,
+            run_actions=self._run_actions, flush_input=self._flush,
             # The core runs on a worker thread; tkinter is not thread-safe, so changes are
             # queued and drained on the UI thread. Touching widgets from the mic thread
             # deadlocks Tk in ways that look like random freezes.
@@ -182,6 +182,24 @@ class AgentWindow:
                 s.close()
             except Exception:  # noqa: BLE001 - already gone is fine
                 pass
+
+    def _flush(self) -> None:
+        """Throw away everything captured since we stopped listening.
+
+        The stream fills continuously through THINKING and SPEAKING, so those frames are both
+        stale and contaminated -- during SPEAKING the mic is literally recording the agent's
+        own reply out of the speakers. Handing them to whisper produces the "queued audio"
+        Calvin saw: every turn answering the previous sentence, plus the assistant talking to
+        itself.
+        """
+        q = getattr(self, "_frames", None)
+        if q is None:
+            return
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                return
 
     def _record(self) -> bytes | None:
         """One utterance: wait for speech, capture until it stops. None if the mic went away."""

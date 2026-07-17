@@ -228,7 +228,7 @@ def test_transcription_failure_keeps_listening():
 # ================================================================= status
 @pytest.mark.parametrize("state,expect", [
     (MicState.OFF, "nothing is listening"),
-    (MicState.LISTENING, "Listening"),
+    (MicState.LISTENING, "no wake word"),
     (MicState.THINKING, "Thinking"),
 ])
 def test_status_line_tells_the_truth(state, expect):
@@ -247,3 +247,44 @@ def test_state_never_claims_to_listen_while_the_device_is_shut():
         assert core.state is MicState.OFF, f"claimed {core.state} after typing with mic off"
         assert core.mic_on is False
         assert mic.open_count == 0
+
+
+# ================================================================= real-time, not a backlog
+def test_audio_captured_while_busy_is_discarded_not_queued():
+    """Calvin: "Its queing my audio instead of listening and responding in real time".
+
+    The device buffer keeps filling through THINKING and SPEAKING. Without a flush, every
+    turn answers the PREVIOUS sentence and the backlog grows -- he said "Hi Javis" three
+    times and got three late replies. Worse, while speaking, the mic picks up the agent's
+    own TTS through the speakers and transcribes it straight back.
+    """
+    flushes, order = [], []
+    mic = _Mic(utterances=[b"\x01", b"\x02"])
+
+    def record():
+        order.append("record")
+        return mic.record()
+
+    core = AssistantCore(
+        recorder=record, open_mic=mic.open, close_mic=mic.close,
+        transcribe=lambda pcm: "hi",
+        send=lambda t: {"text": "hello"},
+        flush_input=lambda: (flushes.append(1), order.append("flush")))
+    core.mic_on_()
+    for _ in range(100):
+        if len(flushes) >= 2:
+            break
+        threading.Event().wait(0.02)
+    core.shutdown()
+    assert flushes, "stale audio was never discarded -- the backlog is back"
+    # every capture must be preceded by a flush, never the other way round
+    assert order[0] == "flush"
+    for a, b in zip(order, order[1:]):
+        assert not (a == "record" and b == "record"), "two captures with no flush between"
+
+
+def test_flush_is_optional():
+    """A caller that passes no flush still works (it just keeps the old behaviour)."""
+    core, _ = _core()
+    core.submit("hello")
+    assert any(t.who == "agent" for t in core.turns)

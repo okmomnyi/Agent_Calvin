@@ -96,3 +96,29 @@ def test_real_classify_normalizes_offmenu():
     assert _C("Chit_Chat.").classify("x", ["find_jobs", "chit_chat"]) == "chit_chat"
     # completely off-menu -> first label
     assert _C("banana").classify("x", ["find_jobs", "chit_chat"]) == "find_jobs"
+
+
+# ============================================================ speech, not typing
+@pytest.mark.parametrize("said,skill", [
+    # Whisper's punctuation is its own opinion: identical audio comes back with a straight
+    # apostrophe, a curly one, or none at all. Calvin said "Whats due this week" and got a
+    # list of CTF events, because the rule needed U+0027 and the LLM fallback guessed.
+    ("Whats due this week", "semester_planner"),
+    ("what's due this week", "semester_planner"),
+    ("what’s due this week", "semester_planner"),      # curly, whisper's favourite
+    ("what is due this week", "semester_planner"),
+    ("whats due", "semester_planner"),
+    ("my deadlines", "semester_planner"),
+    ("whats my session", "session"),
+    ("what’s my session", "session"),
+    ("whats waiting on me", "session"),
+])
+def test_apostrophes_never_decide_the_intent(said, skill):
+    assert IntentRouter(llm=None).route(said, use_llm=False).skill == skill
+
+
+def test_due_is_not_confused_with_events():
+    """The exact misroute Calvin hit: deadlines -> a list of CTFs."""
+    r = IntentRouter(llm=None)
+    assert r.route("Whats due this week", use_llm=False).skill == "semester_planner"
+    assert r.route("any free events", use_llm=False).skill == "event_scout"

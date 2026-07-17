@@ -61,10 +61,17 @@ class AssistantCore:
                  send: Callable[[str], dict],
                  speak: Callable[[str, str, str], None] | None = None,
                  run_actions: Callable[[list], list] | None = None,
+                 flush_input: Callable[[], None] | None = None,
                  on_change: Callable[[], None] | None = None) -> None:
         self._recorder = recorder
         self._open_mic = open_mic
         self._close_mic = close_mic
+        # Drop audio captured while we were NOT listening. The device keeps filling its buffer
+        # through THINKING and SPEAKING, so without this you are always answering the previous
+        # sentence -- and worse, the mic hears the agent's own TTS through the speakers and
+        # dutifully transcribes it back. Calvin hit both: three "Hi Javis" in a row, each
+        # answered late.
+        self._flush_input = flush_input or (lambda: None)
         self._transcribe = transcribe
         self._send = send
         self._speak = speak
@@ -148,6 +155,9 @@ class AssistantCore:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
+                # Everything captured while thinking/speaking is stale by now (and may be our
+                # own voice). Start each turn from silence.
+                self._flush_input()
                 pcm = self._recorder()
             except Exception as exc:  # noqa: BLE001 - a mic glitch must not kill the session
                 self._say("system", f"microphone error: {exc}")
@@ -219,8 +229,11 @@ class AssistantCore:
     def status_line(self) -> str:
         return {
             MicState.OFF: "Mic off - nothing is listening",
-            MicState.LISTENING: "Listening...",
+            # "just talk" is not filler. Calvin opened the window and said "Hi Javis" three
+            # times, because every assistant he has met needs a wake word. This one does not,
+            # and the UI should say so rather than let him guess.
+            MicState.LISTENING: "Listening - just talk, no wake word",
             MicState.RECORDING: "Hearing you...",
             MicState.THINKING: "Thinking...",
-            MicState.SPEAKING: "Speaking...",
+            MicState.SPEAKING: "Speaking... (mic paused)",
         }[self.state]

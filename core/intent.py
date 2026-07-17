@@ -75,9 +75,9 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
         r"(?P<t>phone|telegram|laptop|desktop|dashboard|browser|voice|where i left off)",
         re.I), "channel"),
     ("session_status", re.compile(
-        r"\b(?:session status|what(?:'s| is) my session|where was i)\b", re.I), None),
+        r"\b(?:session status|what(?:'?s| is) my session|where was i)\b", re.I), None),
     ("approvals_list", re.compile(
-        r"\b(?:approvals|what(?:'s| is) waiting(?: on me)?|what needs my approval)\b", re.I), None),
+        r"\b(?:approvals|what(?:'?s| is) waiting(?: on me)?|what needs my approval)\b", re.I), None),
     ("change_voice", re.compile(r"\bchange voice to (?P<v>[\w-]+)", re.I), "voice"),
     ("change_voice", re.compile(r"\b(?:switch|set) (?:the )?voice (?:to )?(?P<v>[\w-]+)", re.I), "voice"),
     ("speak_rate", re.compile(r"\bspeak (?P<t>slower|faster|quicker)\b", re.I), "direction"),
@@ -92,7 +92,7 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     ("mock_interview", re.compile(r"\bmock (?:interview|me)\b(?: for)?\s*(?P<t>.+)?", re.I), "company"),
     ("prep_pack", re.compile(r"\b(?:prep|prepare)(?: me)?(?: for)?\s+(?P<t>.+)", re.I), "company"),
     ("plan_week", re.compile(r"\bplan (?:my )?week\b", re.I), None),
-    ("whats_due", re.compile(r"\bwhat(?:'s| is)? due\b|\bmy deadlines\b", re.I), None),
+    ("whats_due", re.compile(r"\bwhat(?:'?s| is)? due\b|\bmy deadlines\b", re.I), None),
     ("find_events", re.compile(r"\b(?:any )?(?:free )?events?\b|\bany ctfs?\b|\bmeetups?\b", re.I), None),
     ("job_status", re.compile(r"\bjob status\b|\bapplication status\b|\bmy applications\b", re.I), None),
     ("find_jobs", re.compile(r"\b(?:any )?(?:new )?jobs?\b|\bfind (?:me )?(?:a )?jobs?\b|\bfind work\b", re.I), None),
@@ -123,6 +123,27 @@ _LLM_LABELS = [
 ]
 
 
+_CURLY = {"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-"}
+
+
+def _normalize(text: str) -> str:
+    """Punctuation-proof the utterance before matching.
+
+    This router's input is mostly SPEECH. Whisper's punctuation is its own opinion: it writes
+    "what's due" or "whats due" for identical audio, and prefers the curly apostrophe U+2019,
+    which never matches a rule written with U+0027. Calvin asked "Whats due this week", the
+    `what(?:'?s| is)? due` rule missed by one apostrophe, and the LLM fallback guessed
+    find_events -- so he got a list of CTFs instead of his deadlines.
+
+    Normalising here rather than in each rule means the next rule someone writes cannot
+    reintroduce it.
+    """
+    out = (text or "").strip()
+    for bad, good in _CURLY.items():
+        out = out.replace(bad, good)
+    return out
+
+
 class IntentRouter:
     """Two-stage intent resolver. Inject an LLMClient for tests; defaults to the shared one."""
 
@@ -137,7 +158,7 @@ class IntentRouter:
 
     def route(self, text: str, *, use_llm: bool = True) -> Intent:
         """Resolve `text` to an Intent. Keyword rules first, LLM classify as fallback."""
-        cleaned = text.strip()
+        cleaned = _normalize(text)
         if not cleaned:
             return self._build("chit_chat", {}, confidence=0.0, via="keyword")
 
