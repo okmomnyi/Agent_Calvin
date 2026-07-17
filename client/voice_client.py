@@ -217,7 +217,13 @@ async def handle_utterance(pcm: bytes, stt: Transcriber, speaker: Speaker) -> No
 async def wake_word_loop() -> None:
     from openwakeword.model import Model as WakeModel
 
-    wake = WakeModel(wakeword_models=[WAKE_WORD])
+    # ONNX, not openwakeword's tflite default: `tflite-runtime` publishes no Windows wheels
+    # at all (and none for 3.13 anywhere), so the default raises "Tried to import the tflite
+    # runtime ... please install tflite-runtime" on this laptop and there is nothing to
+    # install. onnxruntime ships wheels everywhere and openwakeword already pulls it in.
+    # Override with AGENT_WAKE_FRAMEWORK=tflite on a box where tflite is genuinely faster.
+    framework = os.getenv("AGENT_WAKE_FRAMEWORK", "onnx")
+    wake = WakeModel(wakeword_models=[WAKE_WORD], inference_framework=framework)
     stt = Transcriber()
     speaker = Speaker()
     print(f"AgentOS voice client ready. Wake word: '{WAKE_WORD}'. (Ctrl+C to quit.)")
