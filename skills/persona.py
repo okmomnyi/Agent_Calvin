@@ -99,8 +99,8 @@ class PersonaSkill(BaseSkill):
                     "'learning' or 'experimenting with' X, do NOT claim X as a skill. "
                     f"Allowed categories: {', '.join(_GH_CATEGORIES)}. "
                     "Give each fact a short `evidence` string citing the repo(s) it came from."},
-                 {"role": "user", "content": evidence[:12000]}],
-                schema_hint=_GH_SCHEMA, temperature=0.1, max_tokens=1200)
+                 {"role": "user", "content": evidence[:5000]}],
+                schema_hint=_GH_SCHEMA, temperature=0.1, max_tokens=700)
         except LLMError as exc:
             return CommandResult(text=f"Couldn't summarize GitHub right now: {exc}", ok=False)
 

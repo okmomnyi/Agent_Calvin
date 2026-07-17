@@ -39,7 +39,7 @@ log = get_logger("core.github")
 API = "https://api.github.com"
 # READMEs are one request each. Enough to characterise someone, few enough to stay well inside
 # the unauthenticated 60/hr budget alongside everything else.
-README_LIMIT = 12
+README_LIMIT = 5
 
 
 class GitHubError(RuntimeError):
@@ -105,7 +105,7 @@ def repos(user: str, *, http: Callable[..., Any] | None = None,
         try:
             data = _get(f"/repos/{user}/{repo.name}/readme", http=http)
             content = base64.b64decode(data.get("content", "")).decode("utf-8", "replace")
-            repo.readme = content[:4000]       # enough to characterise; keeps the prompt sane
+            repo.readme = content[:1200]       # enough to characterise; keeps the prompt sane
         except GitHubError:
             continue                            # a repo with no README is not an error
     return own
@@ -127,7 +127,7 @@ def evidence(user: str, *, http: Callable[..., Any] | None = None) -> str:
              "Languages by repo count: " + ", ".join(
                  f"{k} ({v})" for k, v in sorted(langs.items(), key=lambda x: -x[1])),
              "", "Repositories:"]
-    for r in rs[:40]:
+    for r in rs[:25]:
         bits = [f"  - {r.name}"]
         if r.language:
             bits.append(f"[{r.language}]")
@@ -137,6 +137,6 @@ def evidence(user: str, *, http: Callable[..., Any] | None = None) -> str:
             bits.append(f"-- {r.description[:110]}")
         lines.append(" ".join(bits))
         if r.readme:
-            head = " ".join(r.readme.split())[:300]
+            head = " ".join(r.readme.split())[:160]
             lines.append(f"      README: {head}")
     return "\n".join(lines)
