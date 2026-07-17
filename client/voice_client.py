@@ -39,6 +39,12 @@ SAMPLE_RATE = 16000
 FRAME_MS = 30
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000
 PTT_KEY = os.getenv("AGENT_PTT_KEY", "ctrl+space")
+# openwakeword runs inference only on >=1280-sample (80ms) chunks; below that it replays the
+# last score without looking at the audio (its model.py:303). Independent of FRAME_SAMPLES,
+# which is the mic/VAD frame.
+WAKE_CHUNK = 1280
+# Lower it if the wake word is missed (quiet mic), raise it if it self-triggers.
+WAKE_THRESHOLD = float(os.getenv("AGENT_WAKE_THRESHOLD", "0.5"))
 
 
 def chime() -> None:
@@ -227,15 +233,25 @@ async def wake_word_loop() -> None:
     stt = Transcriber()
     speaker = Speaker()
     print(f"AgentOS voice client ready. Wake word: '{WAKE_WORD}'. (Ctrl+C to quit.)")
+    import numpy as np
+
+    # openwakeword's contract is 1280 samples (80ms). Fed less, model.py:303 skips inference
+    # entirely and REPLAYS the previous score. At our 30ms/480-sample capture frame that made
+    # ~64% of predict() calls pure overhead returning a stale number (measured: 12 real runs
+    # vs 21 replays per second). The mic still streams 30ms frames -- that's what the VAD in
+    # record_utterance() wants -- so coalesce them here rather than change capture.
+    buf = np.empty(0, dtype=np.int16)
     with Microphone() as mic:
         while True:
             f = mic.frame()
             if f is None:
                 continue
-            import numpy as np
-
-            scores = wake.predict(np.frombuffer(f, dtype=np.int16))
-            if any(v > 0.5 for v in scores.values()):
+            buf = np.concatenate([buf, np.frombuffer(f, dtype=np.int16)])
+            if len(buf) < WAKE_CHUNK:
+                continue
+            chunk, buf = buf[:WAKE_CHUNK], buf[WAKE_CHUNK:]
+            scores = wake.predict(chunk)
+            if any(v > WAKE_THRESHOLD for v in scores.values()):
                 speaker.stop()  # barge-in: cut any current speech
                 chime()
                 pcm = record_utterance(mic)
