@@ -62,11 +62,13 @@ def _weak_job():
                   description="ads", category_hint="other")
 
 
-def _skill(sources, llm, mem, mailer, prep=None):
+def _skill(sources, llm, mem, mailer, prep=None, notify=None):
     # prep is injected (a mock by default) so the interview watcher never fires the real
     # Phase-6 prep pack, which would hit live search + the LLM.
+    # notify likewise: without it the watcher test pushed a real "Interview invite detected!
+    # From: hr@acme.com" to Calvin's phone on every suite run.
     return JobHunterSkill(llm=llm, memory=mem, sources=sources, mailer=mailer,
-                          prep=prep or MagicMock())
+                          prep=prep or MagicMock(), notify=notify or MagicMock())
 
 
 def test_hunt_scores_keeps_and_never_sends(fake_settings, mem):
@@ -144,7 +146,8 @@ def test_auto_apply_sends_email_jobs_during_hunt(fake_settings_autoapply, mem):
 def test_interview_watcher_alerts_on_invite(fake_settings, mem):
     llm = _HuntLLM({})
     prep = MagicMock()
-    skill = _skill([], llm, mem, MagicMock(), prep=prep)
+    notify = MagicMock()
+    skill = _skill([], llm, mem, MagicMock(), prep=prep, notify=notify)
     # record an application so there's a company to match against
     mem.record_application(job_id=None, company="Acme", source="remoteok", category="cloud_devops")
 
@@ -155,6 +158,10 @@ def test_interview_watcher_alerts_on_invite(fake_settings, mem):
     # the invite auto-fires the Phase-6 prep pack for the matched company
     prep.prep.assert_called_once()
     assert "Acme" in prep.prep.call_args.kwargs["company"]
+    # the alert goes out -- to the INJECTED notifier, never the real Telegram
+    notify.assert_called_once()
+    assert "Interview invite detected" in notify.call_args.args[0]
     # idempotent: same message won't alert twice
     again = skill.interview_check(messages=msgs)
     assert again.data["alerts"] == 0
+    assert notify.call_count == 1

@@ -35,10 +35,14 @@ class InterviewPrepSkill(BaseSkill):
     name = "interview_prep"
 
     def __init__(self, llm: LLMClient | None = None, memory: Memory | None = None,
-                 research: Any | None = None) -> None:
+                 research: Any | None = None,
+                 notify: Callable[[str], bool] | None = None) -> None:
         self._llm = llm
         self._mem = memory
         self._research = research
+        # Injectable: anything that can reach Calvin's phone must be replaceable by a
+        # test, or the suite texts him. See tests/test_voice.py's injection-point test.
+        self._notify = notify or send_telegram
 
     @property
     def llm(self) -> LLMClient:
@@ -106,7 +110,7 @@ class InterviewPrepSkill(BaseSkill):
         pdf_path = self._write_pdf(pack)
         summary = self._telegram_summary(pack, pdf_path)
         if notify:
-            send_telegram(summary)
+            self._notify(summary)
         return CommandResult(text=summary,
                              data={"company": company, "pdf": str(pdf_path),
                                    "questions": len(pack.get("questions", []))})

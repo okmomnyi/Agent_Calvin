@@ -48,6 +48,52 @@ def fake_llm() -> FakeLLM:
     return FakeLLM()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_telegram(monkeypatch, request):
+    """Nothing in the suite may push to the real Telegram. Autouse, so it cannot be forgotten.
+
+    This is not hypothetical. Three tests called skill methods whose `notify` defaults to True
+    -- job_hunter.interview_check, semester_planner.extract_deadlines,
+    lecture_capture.process_inbox -- and `core.notify.send_telegram` reads the real bot token
+    straight out of .env. Every full-suite run therefore fired live messages at Calvin's
+    phone: "Interview invite detected! From: hr@acme.com", a lecture he never recorded, a
+    deadline that does not exist. It ran for a whole night before he showed us the chat log.
+
+    Patching the individual call sites would fix today and rot tomorrow, because the default
+    stays notify=True and the next test to forget re-arms it. So the transport itself is
+    severed for the whole session: a test that forgets now gets a loud failure instead of
+    texting a human being.
+
+    `allow_telegram` opts a test back in (nothing does today) for testing the sender itself.
+    """
+    if "allow_telegram" in request.keywords:
+        return
+
+    def _blocked(*args, **kwargs):
+        raise AssertionError(
+            "A test tried to send a REAL Telegram message. Pass notify=False, or inject a "
+            "fake notifier. (If you are testing the sender itself, mark it @pytest.mark."
+            "allow_telegram.)")
+
+    monkeypatch.setattr("core.notify.send_telegram", _blocked)
+    # Skills import `notify`/`send_telegram` by value at module import, so patching only
+    # core.notify leaves those bound to the original function. Rebind every alias.
+    import importlib
+    import pkgutil
+
+    import skills as skills_pkg
+
+    for mod_info in pkgutil.iter_modules(skills_pkg.__path__):
+        for name in (f"skills.{mod_info.name}", f"skills.{mod_info.name}.skill"):
+            try:
+                mod = importlib.import_module(name)
+            except Exception:  # noqa: BLE001 - not every skill is a package
+                continue
+            for attr in ("send_telegram", "notify"):
+                if getattr(mod, attr, None) is not None and callable(getattr(mod, attr)):
+                    monkeypatch.setattr(f"{name}.{attr}", _blocked, raising=False)
+
+
 @pytest.fixture(scope="session")
 def _db() -> Memory:
     """One Postgres schema + table set for the whole session (creating it per test is slow)."""

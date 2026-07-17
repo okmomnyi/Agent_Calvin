@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from unittest.mock import MagicMock
 
 from core.embeddings import HashingEmbedder
 from core.llm import LLMClient
@@ -50,7 +51,8 @@ def lecture(mem, tmp_path, monkeypatch):
     monkeypatch.setattr(sv, "get_settings", lambda: _S())
 
     vault = VaultSkill(memory=mem, embedder=HashingEmbedder(), llm=_LectureLLM())
-    skill = LectureCaptureSkill(memory=mem, llm=_LectureLLM(),
+    # notify injected: process_inbox() notifies unconditionally.
+    skill = LectureCaptureSkill(memory=mem, llm=_LectureLLM(), notify=MagicMock(),
                                 transcriber=lambda p: "um so uh binary search trees give log n lookup",
                                 vault=vault)
     return skill, tmp_path

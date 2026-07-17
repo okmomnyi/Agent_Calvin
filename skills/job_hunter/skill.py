@@ -42,10 +42,16 @@ class JobHunterSkill(BaseSkill):
         sources: Sequence[Any] | None = None,
         mailer: ApplicationMailer | None = None,
         prep: Any | None = None,
+        notify: Callable[[str], bool] | None = None,
     ) -> None:
         self._llm = llm
         self._mem = memory
         self._fetcher = fetcher
+        # Injectable like every other dependency (infra_recon, music, adaptive all do this).
+        # It wasn't, and `interview_check` notifies unconditionally, so the watcher test sent
+        # a real "Interview invite detected! From: hr@acme.com" to Calvin's phone on every
+        # suite run. The dependency a test cannot replace is the one that reaches a human.
+        self._notify = notify or send_telegram
         self._sources = list(sources) if sources is not None else None
         self._mailer = mailer
         self._prep = prep
@@ -137,7 +143,7 @@ class JobHunterSkill(BaseSkill):
         auto_applied = self._maybe_auto_apply(keepers)
         digest = self._render_digest(keepers, deferred, auto_applied)
         if notify and keepers:
-            send_telegram(digest)
+            self._notify(digest)
         for k in keepers:
             self.mem.set_job_status(k["id"], "notified")
 
@@ -337,7 +343,7 @@ class JobHunterSkill(BaseSkill):
             f"By category: {cats}"
         )
         if notify:
-            send_telegram(text)
+            self._notify(text)
         return CommandResult(text=text, data=stats)
 
     # ------------------------------------------------------------- watch
@@ -381,7 +387,7 @@ class JobHunterSkill(BaseSkill):
             )
             if label == "interview_invite":
                 matched = next((c for c in companies if c in blob), "")
-                send_telegram(f"🎯 Interview invite detected!\nFrom: {msg.get('sender')}\n"
+                self._notify(f"🎯 Interview invite detected!\nFrom: {msg.get('sender')}\n"
                               f"Subject: {msg.get('subject')}\n\nGenerating your prep pack…")
                 self._auto_prep(matched or msg.get("sender", ""))
                 alerts += 1

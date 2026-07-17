@@ -38,10 +38,15 @@ class SemesterPlannerSkill(BaseSkill):
     name = "semester_planner"
 
     def __init__(self, memory: Memory | None = None, llm: LLMClient | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 notify: Callable[[str], bool] | None = None) -> None:
         self._mem = memory
         self._llm = llm
         self._now = clock
+        # Injectable so a test can never reach Calvin's phone. It wasn't, and
+        # extract_deadlines() notifies unconditionally, so every suite run texted him
+        # "I found 1 possible deadline(s) in your email" about a fixture.
+        self._notify = notify or send_telegram
 
     @property
     def mem(self) -> Memory:
@@ -142,7 +147,7 @@ class SemesterPlannerSkill(BaseSkill):
                                           status="pending", source="email")
                     pending += 1
         if pending:
-            send_telegram(f"🗓 I found {pending} possible deadline(s) in your email — confirm them with /deadlines.")
+            self._notify(f"🗓 I found {pending} possible deadline(s) in your email — confirm them with /deadlines.")
         return CommandResult(text=f"Extracted {pending} pending deadline(s) — awaiting your confirmation.",
                              data={"pending": pending})
 
@@ -195,7 +200,7 @@ class SemesterPlannerSkill(BaseSkill):
 
         text = "\n".join(lines)
         if notify:
-            send_telegram(text)
+            self._notify(text)
         return CommandResult(text=text, data={
             "classes": len(classes), "deadlines": len(ranked), "cards_due": cards_due,
             "job_approvals": job_approvals})
@@ -248,7 +253,7 @@ class SemesterPlannerSkill(BaseSkill):
             proposal = "Couldn't generate a plan right now."
         self.mem.kv_set(_PLAN_KEY, proposal)
         if notify:
-            send_telegram("🗂 Proposed week plan (edit anytime):\n\n" + proposal)
+            self._notify("🗂 Proposed week plan (edit anytime):\n\n" + proposal)
         return CommandResult(text=proposal, data={"weak_units": weak_units})
 
     # ------------------------------------------------------------- cram / panic mode
@@ -271,7 +276,7 @@ class SemesterPlannerSkill(BaseSkill):
                f"📄 Mock CAT (MUST format): {paper_pdf.name}\n"
                f"(Attempt it first — the marking scheme unlocks via /cram_marking {unit}.)")
         if notify:
-            send_telegram(msg)
+            self._notify(msg)
         return CommandResult(text=msg, data={"surged": surged, "cat_pdf": str(paper_pdf),
                                              "marking_scheme": str(scheme_pdf), "cards": len(weak)})
 

@@ -138,3 +138,39 @@ def test_client_only_uses_edge_tts():
     client_src = (_PROJECT / "client" / "voice_client.py").read_text(encoding="utf-8")
     assert "edge_tts" in client_src
     assert not re.search(r"\b(elevenlabs|coqui|so_vits|rvc|tortoise)\b", client_src, re.I)
+
+
+# ============================================================ no test may text a human
+def test_no_skill_sends_telegram_without_an_injection_point():
+    """Every skill that pushes to Telegram must accept an injectable `notify`.
+
+    Three did not (job_hunter, semester_planner, lecture_capture) while calling send_telegram
+    unconditionally, so every full-suite run fired real messages at Calvin's phone: an
+    interview invite from a fixture's hr@acme.com, a lecture he never recorded, a deadline
+    that did not exist. It ran all night before he pasted the chat log.
+
+    conftest's autouse guard severs the transport, but that only turns a text into a failure.
+    This asserts the design property: if you can reach a human, a test can replace you.
+    """
+    import inspect
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "skills"
+    offenders = []
+    for py in list(root.glob("*.py")) + list(root.glob("*/skill.py")):
+        src = py.read_text(encoding="utf-8")
+        # calls send_telegram(...) directly rather than through an injected self._notify
+        import re
+        if not re.search(r"(?<![\w.])send_telegram\(", src):
+            continue
+        mod_name = ("skills." + py.stem if py.parent == root
+                    else f"skills.{py.parent.name}.skill")
+        import importlib
+        mod = importlib.import_module(mod_name)
+        skill = getattr(mod, "SKILL", None)
+        if skill is None:
+            continue
+        if "notify" not in inspect.signature(type(skill).__init__).parameters:
+            offenders.append(f"{mod_name} calls send_telegram() but takes no `notify` kwarg")
+    assert not offenders, "skills that can text Calvin with no way to inject a fake:\n  " + \
+                          "\n  ".join(offenders)

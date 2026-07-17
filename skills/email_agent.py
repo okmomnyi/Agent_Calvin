@@ -38,10 +38,14 @@ class EmailAgentSkill(BaseSkill):
         gmail: GmailClient | None = None,
         llm: LLMClient | None = None,
         memory: Memory | None = None,
+        notify: Callable[[str], bool] | None = None,
     ) -> None:
         self._gmail = gmail
         self._llm = llm
         self._mem = memory
+        # Injectable: anything that can reach Calvin's phone must be replaceable by a
+        # test, or the suite texts him. See tests/test_voice.py's injection-point test.
+        self._notify = notify or send_telegram
 
     # lazy singletons so importing the skill never requires Gmail creds / network
     @property
@@ -163,7 +167,7 @@ class EmailAgentSkill(BaseSkill):
 
         text = self._render_digest(action_items, fyi_items, ignored, total=len(rows))
         if notify:
-            sent = send_telegram(text)
+            sent = self._notify(text)
             if not sent:
                 log.warning("Digest built but Telegram not configured — returning text only.")
         return CommandResult(text=text, data={"action_needed": len(action_items),

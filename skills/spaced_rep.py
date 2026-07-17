@@ -31,10 +31,14 @@ class SpacedRepSkill(BaseSkill):
     name = "spaced_rep"
 
     def __init__(self, memory: Memory | None = None, llm: LLMClient | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 notify: Callable[[str], bool] | None = None) -> None:
         self._mem = memory
         self._llm = llm
         self._now = clock
+        # Injectable: anything that can reach Calvin's phone must be replaceable by a
+        # test, or the suite texts him. See tests/test_voice.py's injection-point test.
+        self._notify = notify or send_telegram
 
     @property
     def mem(self) -> Memory:
@@ -212,7 +216,7 @@ class SpacedRepSkill(BaseSkill):
             lines.extend(f"  • ({w['unit']}) {w['front']} [lapses {w['lapses']}]" for w in weak)
         text = "\n".join(lines)
         if notify:
-            send_telegram(text)
+            self._notify(text)
         return CommandResult(text=text, data={"stats": stats, "due_now": due_now})
 
     def surge(self, unit: str = "", **_: Any) -> CommandResult:
@@ -230,7 +234,7 @@ class SpacedRepSkill(BaseSkill):
             return CommandResult(text="No cards due today.", data={"due": 0})
         msg = f"🧠 {due} flashcard(s) due today." + (f" {cand} candidate(s) to approve." if cand else "")
         msg += " Say 'quiz me' or /quiz to start."
-        send_telegram(msg)
+        self._notify(msg)
         return CommandResult(text=msg, data={"due": due, "candidates": cand})
 
     # ------------------------------------------------------------- generate from vault

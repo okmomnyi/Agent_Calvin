@@ -21,8 +21,12 @@ log = get_logger("skills.persona")
 class PersonaSkill(BaseSkill):
     name = "persona"
 
-    def __init__(self, engine: PersonaEngine | None = None) -> None:
+    def __init__(self, engine: PersonaEngine | None = None,
+                 notify: Callable[[str], bool] | None = None) -> None:
         self._engine = engine
+        # Injectable: anything that can reach Calvin's phone must be replaceable by a
+        # test, or the suite texts him. See tests/test_voice.py's injection-point test.
+        self._notify = notify or send_telegram
 
     @property
     def engine(self) -> PersonaEngine:
@@ -107,7 +111,7 @@ class PersonaSkill(BaseSkill):
         msg = (f"🧠 I learned {len(candidates)} possible new fact(s) from your edits "
                f"(unverified — confirm with /facts):\n{body}")
         if notify:
-            send_telegram(msg)
+            self._notify(msg)
         return CommandResult(text=msg, data={"candidates": len(candidates)})
 
     def regenerate_style(self, **_: Any) -> CommandResult:

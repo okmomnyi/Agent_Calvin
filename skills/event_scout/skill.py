@@ -31,10 +31,14 @@ class EventScoutSkill(BaseSkill):
     name = "event_scout"
 
     def __init__(self, memory: Memory | None = None, sources: list[Any] | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 notify: Callable[[str], bool] | None = None) -> None:
         self._mem = memory
         self._sources = sources
         self._now = clock
+        # Injectable: anything that can reach Calvin's phone must be replaceable by a
+        # test, or the suite texts him. See tests/test_voice.py's injection-point test.
+        self._notify = notify or send_telegram
 
     @property
     def mem(self) -> Memory:
@@ -166,7 +170,7 @@ class EventScoutSkill(BaseSkill):
             return CommandResult(text="No new free events this week.", data={"events": 0})
         text = "🎟 " + self._render(ranked[:12], "")
         if notify:
-            send_telegram(text)
+            self._notify(text)
         for r in ranked[:12]:
             self.mem.set_event_status(r["id"], "notified")
         return CommandResult(text=text, data={"events": len(ranked[:12])})
@@ -180,7 +184,7 @@ class EventScoutSkill(BaseSkill):
         for r in self.mem.events_by_status("new", limit=100):
             epoch = parse_event_date(r["date"])
             if epoch and now <= epoch <= now + 48 * 3600:
-                send_telegram(f"⏰ Starting soon: {r['title']}\n{r['url']}")
+                self._notify(f"⏰ Starting soon: {r['title']}\n{r['url']}")
                 self.mem.set_event_status(r["id"], "notified")
                 pushed += 1
         return CommandResult(text=f"Pushed {pushed} closing-soon event(s).", data={"pushed": pushed})

@@ -52,8 +52,12 @@ def _strip_html(text: str) -> str:
 class DuckDuckGoSearcher:
     """Free DDG HTML search — returns [{title, url, snippet}]. No API key."""
 
-    def __init__(self, fetcher: Any | None = None) -> None:
+    def __init__(self, fetcher: Any | None = None,
+                 notify: Callable[[str], bool] | None = None) -> None:
         self._fetcher = fetcher
+        # Injectable: anything that can reach Calvin's phone must be replaceable by a
+        # test, or the suite texts him. See tests/test_voice.py's injection-point test.
+        self._notify = notify or send_telegram
 
     @property
     def fetcher(self):
@@ -145,7 +149,7 @@ class ResearchSkill(BaseSkill):
             return CommandResult(text="What should I look up?", ok=False)
         result = self.research(query.strip())
         if deliver_full and result.sources:
-            send_telegram(f"🔎 {query}\n\n{result.cited_text()}")
+            self._notify(f"🔎 {query}\n\n{result.cited_text()}")
         return CommandResult(text=result.answer,
                              data={"sources": [s.__dict__ for s in result.sources], "query": query})
 

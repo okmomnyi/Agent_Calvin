@@ -41,11 +41,16 @@ class LectureCaptureSkill(BaseSkill):
     name = "lecture_capture"
 
     def __init__(self, memory: Memory | None = None, llm: LLMClient | None = None,
-                 transcriber: Transcriber | None = None, vault: Any | None = None) -> None:
+                 transcriber: Transcriber | None = None, vault: Any | None = None,
+                 notify: Callable[[str], bool] | None = None) -> None:
         self._mem = memory
         self._llm = llm
         self._transcriber = transcriber
         self._vault = vault
+        # Injectable so a test can never reach Calvin's phone. It wasn't, and process_inbox()
+        # notifies unconditionally, so every suite run announced a "CS301: Binary Search Trees"
+        # lecture he never recorded.
+        self._notify = notify or send_telegram
 
     @property
     def mem(self) -> Memory:
@@ -118,7 +123,7 @@ class LectureCaptureSkill(BaseSkill):
 
         summary = self._telegram_summary(unit, notes, pdf_path, cards_added)
         if notify:
-            send_telegram(summary)
+            self._notify(summary)
         return CommandResult(
             text=summary,
             data={"unit": unit, "transcript": str(transcript_path), "pdf": str(pdf_path),

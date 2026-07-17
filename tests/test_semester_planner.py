@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from unittest.mock import MagicMock
 
 from core import timetable
 from core.llm import LLMClient
@@ -29,8 +30,11 @@ class _PlannerLLM(LLMClient):
         return self._json
 
 
-def _skill(mem, llm=None, now=NOW):
-    return SemesterPlannerSkill(memory=mem, llm=llm or _PlannerLLM(), clock=lambda: now)
+def _skill(mem, llm=None, now=NOW, notify=None):
+    # notify injected: extract_deadlines() notifies unconditionally, and without this the
+    # suite texted Calvin about a fixture deadline on every run.
+    return SemesterPlannerSkill(memory=mem, llm=llm or _PlannerLLM(), clock=lambda: now,
+                               notify=notify or MagicMock())
 
 
 # ------------------------------------------------------------------ deadlines
