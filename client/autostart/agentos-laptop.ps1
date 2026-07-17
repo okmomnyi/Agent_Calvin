@@ -68,7 +68,11 @@ function Get-EnvValue($name) {
 $DropletIp = if ($env:AGENT_DROPLET_IP) { $env:AGENT_DROPLET_IP } else { "167.172.106.161" }
 $SshKey    = if ($env:AGENT_SSH_KEY)    { $env:AGENT_SSH_KEY }    else { Join-Path $env:USERPROFILE ".ssh\Pay-to-Connect" }
 $LocalPort = if ($env:AGENT_LOCAL_PORT) { $env:AGENT_LOCAL_PORT } else { "8000" }
-$Mode      = if ($env:AGENT_CLIENT_MODE){ $env:AGENT_CLIENT_MODE }else { "" }  # "" = wake word; "--text"; "--ptt"
+# The window (Phase 24), not the old wake-word daemon. It starts in the tray with the mic
+# CLOSED and opens it only when Calvin clicks. The wake word is still there behind
+# AGENT_CLIENT_MODE=voice for anyone who wants hands-free, but it is no longer the default:
+# an always-on microphone is not something to opt out of, it is something to opt in to.
+$Mode      = if ($env:AGENT_CLIENT_MODE){ $env:AGENT_CLIENT_MODE }else { "window" }
 $WsToken   = Get-EnvValue "AGENT_WS_TOKEN"
 
 if (-not $WsToken) { Log "FATAL: AGENT_WS_TOKEN not found in $EnvFile"; exit 1 }
@@ -113,7 +117,7 @@ try {
         }
         if (-not $ready) { Log "tunnel not up after 60s, retrying"; continue }
 
-        Log "tunnel up, launching voice client ($modeName)"
+        Log "tunnel up, launching client ($modeName)"
         Push-Location $ClientDir
         # Capture the client's own output. An earlier version just ran python and logged
         # "voice client exited", which is useless: it crash-looped for minutes on a missing
@@ -124,8 +128,9 @@ try {
         # -u because a redirected python block-buffers and you get nothing until it dies.
         # Add-Content -Encoding utf8 rather than Tee-Object: Tee writes UTF-16 in PS 5.1, and
         # mixing that into a UTF-8 log makes the file half NUL bytes ("binary file matches").
-        if ($Mode) { $out = & python -u voice_client.py $Mode 2>&1 }
-        else       { $out = & python -u voice_client.py       2>&1 }
+        if ($Mode -eq "window") { $out = & python -u agent_window.py --tray 2>&1 }
+        elseif ($Mode -eq "voice") { $out = & python -u voice_client.py 2>&1 }   # opt-in wake word
+        else { $out = & python -u voice_client.py $Mode 2>&1 }                   # --text / --ptt
         $out | ForEach-Object { Add-Content -Path $LogFile -Value ("    " + $_) -Encoding utf8 }
         Pop-Location
         Log "voice client exited (see output above), restarting in 5s"
