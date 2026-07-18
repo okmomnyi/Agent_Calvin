@@ -381,6 +381,22 @@ def cmd_persona_init(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_selftest(args: argparse.Namespace) -> int:
+    """Run the suite service-by-service, reporting each result to Telegram as it lands."""
+    from core.selftest import SERVICES, run_all
+
+    only = None
+    if args.service:
+        want = args.service.lower()
+        only = {k: v for k, v in SERVICES.items() if want in k.lower()}
+        if not only:
+            print(f"No service matching {args.service!r}. Known: {', '.join(SERVICES)}")
+            return 1
+    push = (lambda t: print(t)) if args.no_send else None
+    results = run_all(notify=push, services=only)
+    return 0 if all(r.ok for r in results) else 1
+
+
 def cmd_queue(args: argparse.Namespace) -> int:
     """Inspect the job queue: depth, recent failures, requeue after a fix."""
     from core.queue import get_queue
@@ -755,6 +771,11 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_persona_init)
 
     # --- Phase 5: form assistant ---
+    p_st = sub.add_parser("selftest", help="run tests per service, reporting to Telegram")
+    p_st.add_argument("service", nargs="?", help="only this service (substring match)")
+    p_st.add_argument("--no-send", action="store_true", help="print instead of Telegram")
+    p_st.set_defaults(func=cmd_selftest)
+
     p_q = sub.add_parser("queue", help="job queue depth, failures, and requeue")
     p_q.add_argument("--requeue", help="requeue failed jobs: a kind name, or 'all'")
     p_q.set_defaults(func=cmd_queue)
