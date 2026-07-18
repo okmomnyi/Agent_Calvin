@@ -7,7 +7,7 @@ prepares him for interviews, runs a side-hustle deal pipeline, audits his own
 infrastructure, and doubles as a full study companion — reachable by **voice** (laptop),
 **Telegram** (phone), **dashboard** (browser), and **CLI**.
 
-> **Status: all 23 phases complete.** 21 skills · 23 scheduled jobs · **471 tests passing**
+> **Status: all 27 phases complete.** 21 skills · 24 scheduled jobs · **540 tests passing**
 > (all offline, network mocked). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
 > full explanation of every capability and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) to run it.
 
@@ -26,12 +26,12 @@ infrastructure, and doubles as a full study companion — reachable by **voice**
 | **Study** | RAG over your course notes (cites file+page) · lecture audio → notes+flashcards → PDF · SM-2 spaced repetition · code tutor (explain/review/drill/socratic/mock-lab) |
 | **Planning** | Timezone-aware daily briefing · week planner · exam cram mode (mock CAT PDF) · deadline tracking with overdue warnings |
 | **Events** | Free events matching your interests (CTF, DevOps, hackathons…) → planner |
-| **CV** | ATS-optimized variant per job (reorders/emphasizes what's true, never fabricates) · keyword score before/after |
+| **CV** | ATS-optimized **PDF** per job, in your master's layout with clickable header links · auto-tailored on approval · master never modified · keyword score before/after |
 | **Deal broker** | Sources underpriced local listings → scores → drafts your negotiation → cross-posts a resale → first-committed-buyer-wins → margin ledger. **Never spends money, never messages a stranger as you** |
 | **Adaptive layer** | Notices repeated patterns and *proposes* a rule for you to confirm — never self-modifies. Skill Contracts bound which rules can reach which skill |
 | **Continuity** | One session across phone/laptop/browser/CLI — hand off mid-task, see every pending approval in one place |
 | **Self-audit** | Weekly report-only scan of infrastructure *you enrol*: open ports, TLS expiry, exposed config, CVEs via OSV, container health. **Never acts** |
-| **Music** | Spotify taste model, sequencing, playlists, transport control, narrated DJ mode (stock voice only) |
+| **Music** | Spotify taste model, playlists, transport control, narrated DJ mode (stock voice only) · **continuous session** driven from the server, so it keeps playing while your laptop sleeps |
 | **Desktop** | "open Spotify", "close VS Code" on your laptop by voice. **Allowlisted apps only** (your laptop decides, not the server) and **graceful close only** — no force-kill, so unsaved work is never lost |
 
 ## Non-negotiable principles ([§0](docs/ARCHITECTURE.md#0-non-negotiable-principles))
@@ -49,19 +49,29 @@ infrastructure, and doubles as a full study companion — reachable by **voice**
 ## Architecture at a glance
 
 ```
-Laptop  ── voice_client.py ──WSS──┐
-Phone   ── Telegram / shortcut ───┤
-Browser ── /dashboard ────────────┤
-CLI     ── manage.py ─────────────┤
-                                  ▼
-        ┌──────── DigitalOcean droplet ────────┐
-        │  kernel  (FastAPI + APScheduler +     │   two PM2 processes:
-        │           skill registry + router)    │   • agentos-api  (kernel + scheduler)
-        │  skills/ (21 auto-discovered skills)  │   • agentos-bot  (Telegram)
-        │  core/   (llm router, memory/Postgres,│
-        │           intent, persona, embeddings…)│
-        └───────────────────────────────────────┘
+Laptop  ── agent_window.py (tray) ─WSS─┐
+Phone   ── Telegram / shortcut ────────┤
+Browser ── /dashboard ─────────────────┤
+CLI     ── manage.py ──────────────────┤
+                                       ▼
+   ┌─────────────────── DigitalOcean droplet ───────────────────┐
+   │                                                             │
+   │   api          kernel: FastAPI + APScheduler + registry     │
+   │                → ENQUEUES heavy work, serves /api/*          │
+   │                                                             │
+   │   worker ×N    drains the job queue: scrape, score, tailor,  │
+   │                transcribe, embed  (scale: --scale worker=3)  │
+   │                                                             │
+   │   bot          Telegram long-poll                            │
+   │                                                             │
+   │   db           PostgreSQL — state AND the job queue          │
+   └─────────────────────────────────────────────────────────────┘
 ```
+
+Four services, split on real boundaries. Heavy work runs in **workers**, never in the API
+process, so a 6-hourly scrape or a 60-second CV tailor can't slow down the endpoint you talk
+to. The queue lives in Postgres (`FOR UPDATE SKIP LOCKED`), so scaling workers needs no extra
+infrastructure — and jobs get retries, backoff and a queryable status for free.
 
 All four channels share **one server-side session keyed to Calvin, not to a device** — so a
 mock interview started by voice continues on the phone.
@@ -80,9 +90,17 @@ docker compose exec api python manage.py health   # any CLI command
 docker compose logs -f bot
 ```
 
-`api` and `bot` are the same image run with different commands — restarting one never touches
-the other. Ports bind to `127.0.0.1`; use the `tls` profile to put Caddy in front for public
-access. Full detail: [docs/DEPLOYMENT.md § 0](docs/DEPLOYMENT.md#0-docker-the-recommended-path).
+`api`, `worker` and `bot` are the same image run with different commands — restarting one
+never touches the others. Ports bind to `127.0.0.1`; use the `tls` profile to put Caddy in
+front for public access.
+
+```bash
+docker compose up -d --scale worker=3   # three jobs at once; SKIP LOCKED keeps it safe
+docker compose exec api python manage.py queue          # depth + recent failures
+docker compose exec api python manage.py queue --requeue all   # after fixing a bug
+```
+
+Full detail: [docs/DEPLOYMENT.md § 0](docs/DEPLOYMENT.md#0-docker-the-recommended-path).
 
 ## Quick start — without Docker
 
@@ -95,7 +113,7 @@ pip install -r requirements.txt
 createdb agentos && createdb agentos_test
 
 cp .env.example .env          # set DATABASE_URL + NVIDIA_API_KEY (+ optional per-task keys)
-pytest                        # 471 tests (external services mocked; needs the test DB)
+pytest                        # 540 tests (external services mocked; needs the test DB)
 
 python manage.py health                    # subsystem snapshot
 python manage.py serve                     # start the kernel on :8000

@@ -44,7 +44,7 @@ Four files: [`Dockerfile`](../Dockerfile), [`docker-compose.yml`](../docker-comp
 ```bash
 git clone <your-repo> AgentOS && cd AgentOS
 cp .env.example .env && nano .env         # NVIDIA_API_KEY + AGENT_WS_TOKEN at minimum (§2)
-docker compose up -d --build              # postgres + api + bot
+docker compose up -d --build              # postgres + api + worker + bot
 docker compose ps                         # api should report (healthy) within ~30s
 curl -s localhost:8000/api/health | python -m json.tool
 ```
@@ -58,14 +58,35 @@ and the droplet.
 |---|---|---|
 | `db` | Postgres 17, data on the `pgdata` volume | `127.0.0.1:5433` → 5432 |
 | `api` | kernel + APScheduler (briefing, hunts, watchers, flip scans, Sunday recon) | `127.0.0.1:8000` |
+| `worker` | drains the job queue: scraping, scoring, CV tailoring, transcription, embedding | none |
 | `bot` | Telegram long-poll | none |
 | `caddy` | TLS termination — **profile `tls`** | 80 / 443 |
 | `tests` | the suite against a throwaway DB — **profile `test`** | none |
 
-`api` and `bot` are **the same image with different commands**, mirroring the two PM2
-processes: neither depends on the other, so `docker compose restart api` never takes the bot
-down. Both wait for the database's healthcheck, because the schema self-creates on first
-connect and a container that starts too early just crash-loops.
+`api`, `worker` and `bot` are **the same image with different commands**: none depends on the
+others, so `docker compose restart api` never takes the workers or the bot down.
+
+**Heavy work runs in `worker`, never in `api`.** A 6-hourly scrape or a 60-second CV tailor
+would otherwise compete with `/api/command` — the endpoint you actually talk to. Scale it:
+
+```bash
+docker compose up -d --scale worker=3      # three jobs at once
+```
+
+That is safe because claims use `FOR UPDATE SKIP LOCKED`: N workers take N different rows and
+never the same one. Watch the queue:
+
+```bash
+docker compose exec api python manage.py queue                  # depth + recent failures
+docker compose exec api python manage.py queue --requeue all    # retry failures after a fix
+curl -s localhost:8000/api/health | python -m json.tool         # includes queue depth
+```
+
+A failed job keeps its error and is never deleted (§0 P4), so you can inspect it, fix the
+cause, and requeue rather than losing the work.
+
+`api`, `worker` and `bot` all wait for the database's healthcheck: the schema self-creates on
+first connect, and a container that starts too early just crash-loops.
 
 **Ports are bound to `127.0.0.1` deliberately.** A bare `"8000:8000"` or `"5433:5432"` listens
 on `0.0.0.0`, which on a droplet publishes the kernel — and Postgres — to the open internet.

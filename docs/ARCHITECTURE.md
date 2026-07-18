@@ -106,7 +106,15 @@ The addendum phases (16–22) added three more, enforced the same way:
 │  skills/  (20, auto-discovered — see §8)                                                       │
 └───────────────────────────────────────────────────────────────────────────────────────────────┘
 
-  Two independently-restartable PM2 processes:  agentos-api (kernel + APScheduler)  ·  agentos-bot
+  Four independently-restartable services (Phase 26):
+    api      kernel + APScheduler — serves /api/*, ENQUEUES heavy work
+    worker×N drains the job queue (scrape, score, tailor, transcribe, embed)
+    bot      Telegram long-poll
+    db       PostgreSQL — durable state AND the job queue
+
+  Heavy work never runs in `api`, so a 6-hourly scrape or a 60s CV tailor cannot slow down
+  the endpoint Calvin talks to. `docker compose up -d --scale worker=3` is safe because
+  claims use FOR UPDATE SKIP LOCKED: N workers take N different rows, never the same one.
 ```
 
 **Why this shape?** The kernel is tiny and never changes; all capability lives in skills that
@@ -281,7 +289,8 @@ single-writer contention a file DB hits. Key tables:
 | `card_reviews` | review log → retention stats |
 | `deadlines` | CAT/assignment/exam/lab: due, weight, status (`active/pending/done/cancelled`) |
 | `events` | free events: format, date, tags, status (`new→notified→interested→skipped`) |
-| `kv` | generic key-value: session state, tag overrides, style profile, cv version, etc. |
+| `kv` | generic key-value: session state, tag overrides, style profile, cv version, music session, etc. |
+| `job_queue` | Phase 26 work queue: kind, JSON payload, status, attempts, backoff `run_at`, dedupe key, worker, last error. Claimed with `FOR UPDATE SKIP LOCKED`; failed rows are kept for inspection and requeue, never deleted |
 | `listings` / `scores` | sourced deals + their hard-filter and quality scores (Phase 16) |
 | `pipeline_state` / `pipeline_transitions` | the flip state machine + an **immutable** transition log |
 | `negotiation_threads` | drafted (never sent) negotiation messages |
@@ -535,6 +544,62 @@ device — open Spotify somewhere first"` was a dead end for someone talking to 
 their hands full. `music.play()` now returns an `open spotify` action on that one error (and
 only that one — a 403 for a non-Premium account opens nothing), while still reporting
 `ok=False`, because playback genuinely didn't start.
+
+### Phase 24 — Desktop window (`client/agent_window.py` + `client/assistant_core.py`)
+A tray window replaces the always-on wake word. **Achieved:** `AssistantCore` holds the whole
+session (mic state machine, typing, actions, errors) with every dependency injected, so it is
+tested without audio hardware; `agent_window.py` is a thin tkinter shell.
+The property that justifies it: **the OS audio stream is OPENED on toggle-on and CLOSED on
+toggle-off, on window close, and on any crash in the loop** — so Windows' own microphone
+indicator is the truth, not a checkbox we drew. Typing works with the mic shut, which is the
+point. Native rather than a browser page on purpose: the Web Speech API would ship Calvin's
+voice to a cloud STT, destroying the privacy this design exists for. Whisper and edge-tts stay
+on the laptop; only the transcript crosses the tunnel. The wake word survives behind
+`AGENT_CLIENT_MODE=voice` — opt-in, never the default, because nobody opts *out* of a mic.
+
+### Phase 25 — GitHub persona import (`core/github_profile.py`)
+45 public repos are better evidence of what Calvin builds than any interview answer.
+**Achieved:** profile/repos/READMEs/contributor-graphs → structured facts, plus a
+`collaborations` list so work he did on *other people's* repos (UMS, Project47, ZKSentinel)
+counts. Everything lands **unverified** and waits for him (§0 P5) — a machine reading a README
+does not decide what is true about a person, and "experimenting with Kubernetes" must never
+reach an employer as "uses Kubernetes". GitHub only: **LinkedIn is deliberately not fetched**,
+the same call `config.yaml` already makes about Facebook Marketplace — their ToS forbids
+automated access and it is *his* account that gets restricted.
+The subtle part: reading each repo's *dominant* language hid every infrastructure signal
+(GitHub reports `Dockerfile`, `PLpgSQL`, `Shell` only in the per-repo breakdown), which is why
+a CV tailored for an SRE role once listed Docker as a **gap** for someone who ships Dockerfiles.
+
+### Phase 26 — Job queue & worker service (`core/queue.py`, `kernel/worker.py`)
+The api/worker split that makes AgentOS scale. **Achieved:** a Postgres-backed queue using
+`FOR UPDATE SKIP LOCKED`, so `--scale worker=3` runs three jobs at once and two workers can
+never claim the same row. Handlers register by **name** (`@handler("job_hunter.score_one")`),
+so a queued row holds strings rather than a pickled callable and a worker on a newer image can
+drain rows enqueued by an older one. Jobs carry attempts, exponential backoff, a last error and
+a status; failures are **kept, never deleted** (§0 P4), inspectable via `manage.py queue` and
+requeueable after a fix.
+Why Postgres and not Redis/Celery: the database is already there, already backed up, already
+shared by both processes — one less service to run is the point of splitting on real boundaries
+rather than adding infrastructure.
+**This deleted the 40-job cap as a concept.** `max_score_per_run: 40` and "(438 more deferred
+to the next run)" were never policy — they were the absence of a queue, and because each run
+also scraped fresh postings, 741 jobs sat unscored for days. The cap now bounds one *pass*; the
+overflow is enqueued and drained, deduped by job id.
+`ScheduledJob(queued=True, skill=…, action=…)` moves any heavy timer job off the API process
+(hunt, lecture transcription, vault embedding, flip/event scrapes) without rewriting the skill —
+the scheduler enqueues, a generic `skill.run` handler dispatches by name in the worker. Light
+jobs stay inline: a 2-second no-op gains nothing from a queue hop.
+
+### Phase 27 — Continuous music session (`music.start_session` / `session_tick`)
+Music that keeps playing until told to stop, driven from the **server** so it survives the
+laptop sleeping. **Achieved:** session state in `kv`, plus a 4-minute tick that tops the queue
+up — under the length of most tracks, so it never runs dry. The droplet is the DJ, not the
+stereo: audio comes out of whichever Spotify device is active.
+Honest about the limits: Spotify has **no clear-queue API**, so `stop` says plainly that up to
+`SESSION_LOOKAHEAD` already-queued tracks may still play rather than claiming silence. The tick
+no-ops unless a session is active (a timer that acts unasked is how music starts by itself at
+3am), and a device disappearing mid-session does *not* kill the session — he'll reopen Spotify
+and expect it to resume.
 
 ---
 
