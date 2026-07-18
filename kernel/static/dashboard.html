@@ -104,22 +104,24 @@ async function api(path, opts = {}) {
 function renderSession(s) {
   const live = s.live_skill_session || s.active_skill;
   $("#session").innerHTML =
-    `<div>Last active on <b class="teal">${s.last_channel || "—"}</b>` +
-    (live ? ` · live: <b class="teal">${live}</b>` : " · nothing mid-flight") +
+    `<div>Last active on <b class="teal">${esc(s.last_channel || "—")}</b>` +
+    (live ? ` · live: <b class="teal">${esc(live)}</b>` : " · nothing mid-flight") +
     `</div><div class="dim mono">${(s.turns||[]).length} turns remembered</div>`;
   const ul = $("#approvals");
   const items = s.pending_approvals || [];
   ul.innerHTML = items.length
-    ? items.map(i => `<li><span class="tag">${i.kind}</span><span>${i.what}</span>
-                      <span class="dim">— ${i.action}</span></li>`).join("")
+    ? items.map(i => `<li><span class="tag">${esc(i.kind)}</span><span>${esc(i.what)}</span>
+                      <span class="dim">— ${esc(i.action)}</span></li>`).join("")
     : `<li class="dim">Nothing. 🎉</li>`;
   $("#log").innerHTML = (s.turns||[]).slice(-6).map(t =>
-    `<div class="turn"><div class="chan">${t.channel}</div>
+    `<div class="turn"><div class="chan">${esc(t.channel)}</div>
      <div class="you">› ${esc(t.text)}</div><div class="them">${esc(t.reply)}</div></div>`).join("");
   $("#log").scrollTop = $("#log").scrollHeight;
 }
 
-const esc = s => (s||"").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+const esc = value => String(value ?? "").replace(/[<>&"']/g, c => (
+  {"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;","'":"&#39;"}[c]
+));
 
 async function refresh() {
   if (!token) { setLed(false); return; }

@@ -9,6 +9,7 @@ import pytest
 
 from core.ats import ats_score, fabrication_terms, keywords, missing_keywords
 from core.llm import LLMClient
+from kernel.registry import SkillRegistry
 from skills.cv_tailor import CvTailorSkill
 
 
@@ -65,7 +66,8 @@ def cv(mem, tmp_path, monkeypatch):
 # ------------------------------------------------------------------ update / ingest
 def test_update_parses_master_and_reports_diff(cv, mem):
     skill, tmp = cv
-    cvdir = tmp / "cv"; cvdir.mkdir()
+    cvdir = tmp / "cv"
+    cvdir.mkdir()
     (cvdir / "master_cv.md").write_text(
         "# Calvin\nSkills: Docker, PM2, Caddy\nExperience: Full-stack dev", encoding="utf-8")
     skill._llm = _CvLLM(facts=[
@@ -79,7 +81,8 @@ def test_update_parses_master_and_reports_diff(cv, mem):
 
 def test_update_persona_crosscheck_flags_gap(cv, mem):
     skill, tmp = cv
-    cvdir = tmp / "cv"; cvdir.mkdir()
+    cvdir = tmp / "cv"
+    cvdir.mkdir()
     (cvdir / "master_cv.md").write_text("Skills: Docker", encoding="utf-8")
     # a verified persona skill that the CV won't mention
     mem.upsert_fact("skills", "kubernetes", "used on a project", verified=True)
@@ -103,6 +106,8 @@ def test_tailor_never_adds_unverified_flags_gap(cv, mem):
     assert any("Kubernetes" in g for g in res.data["gaps"]) # gap surfaced, not silently added
     assert Path(res.data["variant"]).exists()               # variant saved (never touches master)
     assert res.data["ats_after"] >= res.data["ats_before"]
+    saved = Path(res.data["variant"]).read_text(encoding="utf-8").lower()
+    assert "kubernetes" not in saved
 
 
 def test_tailor_links_variant_to_job(cv, mem):
@@ -124,3 +129,63 @@ def test_tailor_requires_cv_facts(cv, mem):
     skill, _ = cv
     res = skill.tailor(target="some JD")
     assert res.ok is False and "master CV" in res.text
+
+
+def test_refinement_is_a_guided_two_turn_conversation(cv, mem):
+    skill, _ = cv
+    mem.replace_cv_facts(
+        [{"section": "skills", "key": "devops", "value": "Docker and Terraform"}], "v1")
+    skill._llm = _CvLLM(tailor={
+        "cv_markdown": "## Skills\nDocker and Terraform",
+        "changelog": ["Focused the summary on DevOps"],
+        "gaps": [],
+    })
+
+    started = skill.refine()
+    assert started.ok is True and started.data["awaiting"] == "job_description"
+    assert mem.kv_get("cv_tailor.session")
+
+    finished = skill.continue_refinement(text="DevOps engineer using Docker and Terraform")
+    assert finished.ok is True and finished.data["variant"]
+    assert mem.kv_get("cv_tailor.session") == ""
+
+
+def test_refinement_keeps_waiting_when_saved_job_does_not_exist(cv, mem):
+    skill, _ = cv
+    mem.replace_cv_facts([{"section": "skills", "key": "devops", "value": "Docker"}], "v1")
+    skill.refine()
+
+    result = skill.continue_refinement(text="job 999")
+    assert result.ok is False and "not found" in result.text
+    assert mem.kv_get("cv_tailor.session")
+
+
+def test_registry_routes_plain_followup_into_active_cv_flow(cv, mem, monkeypatch):
+    skill, _ = cv
+    mem.replace_cv_facts([{"section": "skills", "key": "devops", "value": "Docker"}], "v1")
+    skill._llm = _CvLLM(tailor={
+        "cv_markdown": "## Skills\nDocker", "changelog": [], "gaps": []})
+    monkeypatch.setattr("core.memory.get_memory", lambda: mem)
+    registry = SkillRegistry()
+    registry.register(skill)
+    skill.refine()
+
+    intent, result = registry.handle_command("Cloud role requiring Docker", use_llm=False)
+    assert intent.via == "session"
+    assert intent.action == "continue_refinement"
+    assert result.ok is True
+
+
+def test_tailor_never_saves_a_lower_scoring_variant(cv, mem):
+    skill, _ = cv
+    mem.replace_cv_facts(
+        [{"section": "skills", "key": "cloud", "value": "Docker Linux Git CI/CD"}], "v1")
+    skill._llm = _CvLLM(tailor={
+        "cv_markdown": "## Profile\nCloud learner",
+        "changelog": ["Shortened everything"],
+        "gaps": [],
+    })
+
+    result = skill.tailor(target="Docker Linux Git CI/CD cloud engineer")
+    assert result.data["ats_after"] == result.data["ats_before"]
+    assert "reduced ATS match" in result.data["safeguard"]

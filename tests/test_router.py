@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 
-import pytest
 
 from core.llm import LLMClient, _try_parse_json, _strip_fences
 
@@ -33,6 +31,21 @@ def test_chat_uses_routed_model():
     c = _RoutedClient({"default": "d", "write": "writer"})
     c.chat("write", [{"role": "user", "content": "hi"}])
     assert c.last_model == "writer"
+
+
+def test_generative_calls_receive_time_and_grounding_context():
+    captured = []
+
+    class _Capture(_RoutedClient):
+        def _post(self, model, messages, **params):  # type: ignore[override]
+            captured.extend(messages)
+            return "ok"
+
+    _Capture({"default": "d"}).chat("write", [{"role": "user", "content": "hello"}])
+    truth = captured[0]["content"]
+    assert "Current user-local date and time" in truth
+    assert "Never assume it is morning" in truth
+    assert "Never invent facts" in truth
 
 
 def test_strip_fences_removes_json_block():

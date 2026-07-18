@@ -7,7 +7,7 @@ prepares him for interviews, runs a side-hustle deal pipeline, audits his own
 infrastructure, and doubles as a full study companion — reachable by **voice** (laptop),
 **Telegram** (phone), **dashboard** (browser), and **CLI**.
 
-> **Status: all 23 phases complete.** 21 skills · 23 scheduled jobs · **400 tests passing**
+> **Status: all 23 phases complete.** 21 skills · 23 scheduled jobs · **471 tests passing**
 > (all offline, network mocked). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
 > full explanation of every capability and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) to run it.
 
@@ -18,13 +18,13 @@ infrastructure, and doubles as a full study companion — reachable by **voice**
 | Area | Capability |
 |------|------------|
 | **Job hunting** | Scrapes 9+ sources → category-scores → drafts a cover email from your verified facts → digest with Apply/Skip/Tailor buttons → sends on approval with a tailored CV → tracks applications → watches for interview invites |
-| **Email** | Hourly inbox cleanup (classify + archive/label, never trash) · reply drafting (never sends) |
+| **Email** | Hourly inbox cleanup (classify + archive/label) · explicit recoverable Trash with preview, confirmation, and undo · reply drafting (never sends) |
 | **Persona** | Answers *as you* from verified facts only (never invents) · standing instructions · learns your style from your edits |
 | **Forms & interviews** | Fills application forms / screeners from your KB (flags unknowns) · interview prep packs (PDF) · `/mock` rehearsals |
 | **Voice** | Wake-word laptop client (local STT) · pre-built neural voices only · barge-in · push-to-talk |
 | **Telegram** | Full remote control · inline approval buttons · voice notes transcribed & routed |
 | **Study** | RAG over your course notes (cites file+page) · lecture audio → notes+flashcards → PDF · SM-2 spaced repetition · code tutor (explain/review/drill/socratic/mock-lab) |
-| **Planning** | Unified 07:00 morning briefing · week planner · exam cram mode (mock CAT PDF) · deadline tracking |
+| **Planning** | Timezone-aware daily briefing · week planner · exam cram mode (mock CAT PDF) · deadline tracking with overdue warnings |
 | **Events** | Free events matching your interests (CTF, DevOps, hackathons…) → planner |
 | **CV** | ATS-optimized variant per job (reorders/emphasizes what's true, never fabricates) · keyword score before/after |
 | **Deal broker** | Sources underpriced local listings → scores → drafts your negotiation → cross-posts a resale → first-committed-buyer-wins → margin ledger. **Never spends money, never messages a stranger as you** |
@@ -40,7 +40,7 @@ infrastructure, and doubles as a full study companion — reachable by **voice**
 - **Best model per task, routed not hardcoded** — a coder model reviews code, a reasoning
   model does research, a cheap model classifies. Each task class can even use its **own API
   key** so concurrent work doesn't throttle itself (see [Model routing](#model-routing)).
-- **Approval gates** on anything sent in your name. **Never deletes data.** **Never fabricates
+- **Approval gates** on anything sent in your name. **Never permanently deletes data** (email Trash is recoverable and requires an exact preview/confirmation). **Never fabricates
   facts about you.** **No face or voice cloning — ever.**
 - **Everything is a Skill** — self-contained, auto-discovered; adding one never touches the kernel.
 - **No undisclosed personas** — every message a stranger receives is sent by you (drafted by the
@@ -95,7 +95,7 @@ pip install -r requirements.txt
 createdb agentos && createdb agentos_test
 
 cp .env.example .env          # set DATABASE_URL + NVIDIA_API_KEY (+ optional per-task keys)
-pytest                        # 400 tests (external services mocked; needs the test DB)
+pytest                        # 471 tests (external services mocked; needs the test DB)
 
 python manage.py health                    # subsystem snapshot
 python manage.py serve                     # start the kernel on :8000

@@ -25,6 +25,7 @@ window and not a browser page (the Web Speech API would ship your voice to a clo
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import os
 import queue
 import sys
@@ -57,6 +58,7 @@ class AgentWindow:
         self.core = AssistantCore(
             recorder=self._record, open_mic=self._open_mic, close_mic=self._close_mic,
             transcribe=self._transcribe, send=self._send, speak=self._speak,
+            interrupt_playback=self._stop_speaking,
             run_actions=self._run_actions, flush_input=self._flush,
             # The core runs on a worker thread; tkinter is not thread-safe, so changes are
             # queued and drained on the UI thread. Touching widgets from the mic thread
@@ -92,6 +94,15 @@ class AgentWindow:
         self.log.tag_config("you", foreground=TEAL)
         self.log.tag_config("agent", foreground=INK)
         self.log.tag_config("system", foreground=AMBER, font=("Consolas", 8))
+        self.log.tag_config("speaker", foreground=DIM, font=("Segoe UI", 8, "bold"))
+        self.log.tag_config("heading", foreground=AMBER, font=("Segoe UI", 11, "bold"),
+                            spacing1=5, spacing3=3)
+        self.log.tag_config("bullet", foreground=INK, lmargin1=18, lmargin2=30)
+        self.log.tag_config("meta", foreground=DIM, font=("Consolas", 9),
+                            lmargin1=22, lmargin2=22)
+        self.log.tag_config("link", foreground=TEAL, underline=True,
+                            lmargin1=22, lmargin2=22)
+        self.log.tag_config("divider", foreground="#3a3e45")
 
         bottom = tk.Frame(self.root, bg=BG)
         bottom.pack(fill="x", padx=14, pady=(4, 12))
@@ -155,11 +166,37 @@ class AgentWindow:
 
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
-        for t in self.core.turns[-80:]:
-            prefix = {"you": "you  ", "agent": "     ", "system": "  · "}[t.who]
-            self.log.insert("end", f"{prefix}{t.text}\n\n", t.who)
+        for index, turn in enumerate(self.core.turns[-80:]):
+            if index:
+                self.log.insert("end", "────────────────────────────────────────\n", "divider")
+            label = {"you": "YOU", "agent": "AGENTOS", "system": "SYSTEM"}[turn.who]
+            self.log.insert("end", f"{label}\n", "speaker" if turn.who != "system" else "system")
+            self._render_turn(turn.text, turn.who)
+            self.log.insert("end", "\n")
         self.log.see("end")
         self.log.config(state="disabled")
+
+    def _render_turn(self, text: str, who: str) -> None:
+        """Render plain skill output as a readable hierarchy without trusting HTML/markdown."""
+        for raw in (text or "").splitlines() or [""]:
+            line = raw.rstrip()
+            stripped = line.strip()
+            if not stripped:
+                self.log.insert("end", "\n")
+                continue
+            if who == "system":
+                tag = "system"
+            elif stripped.startswith(("http://", "https://", "LINK   ")):
+                tag = "link"
+            elif stripped.startswith(("WHEN   ", "WHERE  ", "TAGS   ", "ID     ")):
+                tag = "meta"
+            elif stripped.startswith(("•", "- ")) or stripped[:2].rstrip(".").isdigit():
+                tag = "bullet"
+            elif stripped.isupper() or (len(stripped) < 70 and stripped.endswith(":")):
+                tag = "heading"
+            else:
+                tag = who
+            self.log.insert("end", stripped + "\n", tag)
 
     # ------------------------------------------------------------- audio (laptop-local)
     def _open_mic(self) -> None:
@@ -202,13 +239,25 @@ class AgentWindow:
                 return
 
     def _record(self) -> bytes | None:
-        """One utterance: wait for speech, capture until it stops. None if the mic went away."""
-        from voice_client import FRAME_MS, is_silent, silence_elapsed
+        """Capture one turn, including natural barge-in while a response is playing.
+
+        During playback, a short adaptive echo baseline prevents the assistant's own speaker
+        from immediately triggering itself. A materially louder overlapping voice interrupts
+        playback; headphones remain the most reliable full-duplex setup.
+        """
+        from voice_client import END_SILENCE_MS, FRAME_MS, MAX_UTTERANCE_SECONDS
+        from voice_utils import is_silent, pcm_rms, silence_elapsed
 
         frames: list[bytes] = []
+        pre_roll = deque(maxlen=max(1, int(300 / FRAME_MS)))
         silent = 0
         spoke = False
-        for _ in range(int(15000 / FRAME_MS)):          # 15s ceiling
+        echo_level = 0.0
+        echo_frames = 0
+        louder_frames = 0
+        barge_floor = float(os.getenv("AGENT_BARGE_MIN_RMS", "700"))
+        barge_ratio = float(os.getenv("AGENT_BARGE_ECHO_RATIO", "1.5"))
+        for _ in range(int(MAX_UTTERANCE_SECONDS * 1000 / FRAME_MS)):
             if self._mic_stream is None:
                 return None
             try:
@@ -217,12 +266,38 @@ class AgentWindow:
                 if not spoke:
                     return b""                          # nothing said; loop round again
                 continue
+            level = pcm_rms(f)
+
+            # While TTS is audible, learn its mic echo and require a sustained, significantly
+            # louder signal before treating it as the user talking over the assistant.
+            if self.core.state is MicState.SPEAKING and not spoke:
+                pre_roll.append(f)
+                echo_frames += 1
+                if echo_frames <= max(1, int(300 / FRAME_MS)):
+                    echo_level = max(echo_level, level)
+                    continue
+                trigger = max(barge_floor, echo_level * barge_ratio)
+                if level >= trigger:
+                    louder_frames += 1
+                    if louder_frames < max(2, int(120 / FRAME_MS)):
+                        continue
+                    self.core.barge_in()
+                    frames.extend(pre_roll)
+                    spoke = True
+                    silent = 0
+                else:
+                    louder_frames = 0
+                    echo_level = max(level, echo_level * 0.97)
+                    continue
+
             frames.append(f)
             if is_silent(f):
                 silent += 1
-                if spoke and silence_elapsed(silent):
+                if spoke and silence_elapsed(silent, stop_after_ms=END_SILENCE_MS):
                     break
             else:
+                if not spoke and self.core.state is MicState.THINKING:
+                    self.core.barge_in()
                 spoke = True
                 silent = 0
         return b"".join(frames) if spoke else b""
@@ -241,6 +316,11 @@ class AgentWindow:
             self._speaker = Speaker()
         asyncio.run_coroutine_threadsafe(
             self._speaker.speak(text, voice_id, rate), self._loop).result(timeout=60)
+
+    def _stop_speaking(self) -> None:
+        speaker = getattr(self, "_speaker", None)
+        if speaker is not None:
+            speaker.stop()
 
     # ------------------------------------------------------------- server
     def _send(self, text: str) -> dict:

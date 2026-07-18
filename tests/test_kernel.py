@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -10,12 +11,29 @@ from core.intent import Intent, IntentRouter
 from core.skill import CommandResult
 from kernel.app import to_spoken
 from kernel.registry import SkillRegistry
+from manage import _mask_dsn
 
 
 def test_discovery_finds_chat_skill(fake_llm):
     reg = SkillRegistry(router=IntentRouter(llm=fake_llm))
     reg.discover()
     assert "chat" in reg.skills
+
+
+def test_discovery_attempts_an_unavailable_contract_store_only_once(fake_llm, monkeypatch):
+    calls = 0
+
+    def unavailable():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("database offline")
+
+    monkeypatch.setattr("core.memory.get_memory", unavailable)
+    reg = SkillRegistry(router=IntentRouter(llm=fake_llm))
+    reg.discover()
+
+    assert "chat" in reg.skills
+    assert calls == 1
 
 
 def test_unbuilt_skill_degrades_gracefully(fake_llm):
@@ -84,3 +102,32 @@ def test_remote_command_fails_closed_without_configured_token(monkeypatch):
         "/api/command", headers={"X-Agent-Token": "anything"}, json={"text": "hello"}
     )
     assert response.status_code == 503
+
+
+def test_health_dsn_masker_preserves_user_and_hides_password():
+    masked = _mask_dsn("postgresql://agentos:super-secret@localhost:5432/agentos")
+    assert masked == "postgresql://agentos:***@localhost:5432/agentos"
+    assert "super-secret" not in masked
+
+
+def test_health_dsn_masker_hides_keyword_passwords():
+    masked = _mask_dsn("host=localhost dbname=agentos user=agentos password='super secret'")
+    assert masked == "host=localhost dbname=agentos user=agentos password=***"
+    assert "super secret" not in masked
+
+
+def test_dashboard_escapes_every_server_derived_html_field():
+    html = (Path(__file__).parents[1] / "kernel" / "static" / "dashboard.html").read_text(
+        encoding="utf-8"
+    )
+    for expression in (
+        "esc(s.last_channel || \"—\")",
+        "esc(live)",
+        "esc(i.kind)",
+        "esc(i.what)",
+        "esc(i.action)",
+        "esc(t.channel)",
+        "esc(t.text)",
+        "esc(t.reply)",
+    ):
+        assert expression in html

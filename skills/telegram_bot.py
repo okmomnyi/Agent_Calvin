@@ -449,10 +449,12 @@ def build_application(core: BotCore | None = None):
         markup = None
         if query.data == "q:reveal":
             markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(l, callback_data=d) for l, d in row] for row in GRADE_BUTTONS])
+                [[InlineKeyboardButton(label, callback_data=data) for label, data in row]
+                 for row in GRADE_BUTTONS])
         elif query.data.startswith("q:grade") and core.quiz_active():
             markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(l, callback_data=d) for l, d in row] for row in REVEAL_BUTTON])
+                [[InlineKeyboardButton(label, callback_data=data) for label, data in row]
+                 for row in REVEAL_BUTTON])
         await query.message.reply_text(text[:4000], reply_markup=markup)
 
     async def on_text(update: "Update", context) -> None:  # noqa: ANN001

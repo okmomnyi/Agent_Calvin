@@ -23,8 +23,10 @@ export AGENT_WS_URL="wss://agent.example.com/ws/voice"   # your droplet
 export AGENT_WS_TOKEN="<same AGENT_WS_TOKEN as the droplet .env>"
 # optional:
 export AGENT_WAKE_WORD="hey_jarvis"     # an openwakeword built-in model name
-export AGENT_WHISPER_MODEL="small"      # tiny|base|small (small recommended)
+export AGENT_WHISPER_MODEL="base"       # tiny|base|small (base recommended for low latency)
 export AGENT_PTT_KEY="ctrl+space"       # push-to-talk key
+export AGENT_END_SILENCE_MS="1800"      # tolerate natural mid-sentence pauses
+export AGENT_MAX_UTTERANCE_SECONDS="45" # enough for a spoken job description
 ```
 
 Mic permission: macOS will prompt on first run (System Settings → Privacy → Microphone).
@@ -33,17 +35,28 @@ On Linux, `keyboard` (push-to-talk) may need `sudo`; wake-word mode does not.
 ## Run
 
 ```bash
+python client/agent_window.py           # continuous conversation; no wake word
 python client/voice_client.py          # wake-word mode ("Hey Agent, …")
 python client/voice_client.py --ptt    # push-to-talk (hold the key) — good for noisy rooms
 ```
 
-Flow: wake word → chime → speak (records until ~1.2s silence) → local faster-whisper
+The window is the smoothest conversational mode. Turn the mic on once and speak naturally;
+capture continues while AgentOS thinks or talks, and talking over a reply replaces that reply
+instead of queueing another question. Headphones give the most reliable barge-in because they
+prevent the microphone from hearing the assistant's own speakers; an adaptive echo threshold
+is used when headphones are unavailable.
+
+Flow: wake word → chime → speak (records until ~1.8s silence) → local faster-whisper
 transcribes → sent to the droplet → spoken reply. Say **"stop"/"cancel"** to abort locally;
 saying the wake word during playback (**barge-in**) cuts the speech and listens again.
 
 Things to say: "check my email", "any new jobs?", "any free events?", "search for X",
 "prep me for <company>", "mock interview for <company>", "change voice to Zuri",
 "speak slower", "remember that …", "stop".
+
+CV refinement is conversational: say "refine my CV", then provide a saved job number or
+read/paste the job description when prompted. The flow remains active across voice, Telegram,
+dashboard and REST until it succeeds or you say "cancel".
 
 ## Autostart on boot/login
 

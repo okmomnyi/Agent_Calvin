@@ -12,6 +12,8 @@ to the job so the hunter attaches it on approval.
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -31,6 +33,7 @@ _CV_SCHEMA = ('{"facts": [{"section": one of '
               '"key": string, "value": string}]}')
 _TAILOR_SCHEMA = ('{"cv_markdown": string (ATS-safe plain markdown, standard headers, no tables/'
                   'columns/images), "changelog": [string], "gaps": [string]}')
+_SESSION_KEY = "cv_tailor.session"
 
 
 class CvTailorSkill(BaseSkill):
@@ -59,7 +62,14 @@ class CvTailorSkill(BaseSkill):
         return get_settings().data_dir / "cv"
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
-        return {"update": self.update, "view": self.view, "tailor": self.tailor, "facts": self.facts}
+        return {
+            "update": self.update,
+            "view": self.view,
+            "tailor": self.tailor,
+            "refine": self.refine,
+            "continue_refinement": self.continue_refinement,
+            "facts": self.facts,
+        }
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
         return []
@@ -120,7 +130,6 @@ class CvTailorSkill(BaseSkill):
 
     def _persona_crosscheck(self) -> list[str]:
         """Flag skills/education present in persona but missing from the CV (and vice-versa)."""
-        cv_skills = {r["value"].lower() for r in self.mem.get_cv_facts() if r["section"] == "skills"}
         cv_blob = self._facts_text().lower()
         flags = []
         for r in self.mem.facts_by_category("skills"):
@@ -151,11 +160,55 @@ class CvTailorSkill(BaseSkill):
         return CommandResult(text="\n".join(lines), data={"variants": [str(v) for v in variants]})
 
     # ------------------------------------------------------------- tailoring
+    def refine(self, target: str = "", **kwargs: Any) -> CommandResult:
+        """Start a guided CV refinement instead of requiring a perfect one-shot command."""
+        target = (target or "").strip()
+        if target:
+            return self.tailor(target=target, **kwargs)
+
+        if not self.mem.get_cv_facts():
+            if not self._master_path():
+                return CommandResult(
+                    text=(f"I need your master CV first. Put it at {self.cv_dir}/master_cv.pdf "
+                          "(or .docx/.md), then say ‘refine my CV’ again."),
+                    ok=False,
+                )
+            imported = self.update()
+            if not imported.ok:
+                return imported
+
+        self.mem.kv_set(_SESSION_KEY, json.dumps({"stage": "awaiting_target"}))
+        return CommandResult(
+            text=("Your master CV is ready. Which role should I refine it for? "
+                  "Paste or read the job description, or say ‘job 12’ for a saved job."),
+            data={"awaiting": "job_description"},
+        )
+
+    def continue_refinement(self, text: str = "", **_: Any) -> CommandResult:
+        """Consume the next conversational turn in an active refinement flow."""
+        text = (text or "").strip()
+        if not text:
+            return CommandResult(text="Tell me the role or job description you want to target.", ok=False)
+        if re.fullmatch(r"(?:cancel|stop|never\s*mind)", text, re.I):
+            self.mem.kv_set(_SESSION_KEY, "")
+            return CommandResult(text="CV refinement cancelled.")
+
+        match = re.fullmatch(r"(?:saved\s+)?job(?:\s+(?:number|id))?\s*#?\s*(\d+)", text, re.I)
+        if match:
+            result = self.tailor(job_id=int(match.group(1)))
+        else:
+            result = self.tailor(target=text)
+        if result.ok:
+            self.mem.kv_set(_SESSION_KEY, "")
+        return result
+
     def tailor(self, target: str = "", job_id: int | str = 0, company: str = "", **_: Any) -> CommandResult:
         """Tailor the CV to a job description (or a stored job). Never adds unverified facts."""
         jd, job_row = self._resolve_jd(target, job_id)
+        if job_id and job_row is None:
+            return CommandResult(text=f"Saved job {job_id} was not found.", ok=False)
         if not jd.strip():
-            return CommandResult(text="Give me a job description (or a job id) to tailor against.", ok=False)
+            return self.refine()
         if not self.mem.get_cv_facts():
             return CommandResult(text="No CV on file. Run /cv update with your master CV first.", ok=False)
 
@@ -184,7 +237,28 @@ class CvTailorSkill(BaseSkill):
         # §0 anti-fabrication check: strip/flag any tech term not supported by the master CV.
         fabricated = fabrication_terms(tailored, master_text + " " + self._facts_text())
         after = ats_score(tailored, jd_kw)
-        gaps = list(data.get("gaps", [])) + [f"(keyword) {g}" for g in gaps_pre if g not in tailored.lower()][:8]
+        gaps = list(data.get("gaps", []))
+        gap_blob = " ".join(str(g).lower() for g in gaps)
+        gaps.extend(
+            f"(keyword) {keyword}"
+            for keyword in gaps_pre
+            if keyword not in tailored.lower() and keyword not in gap_blob
+        )
+
+        # A "refinement" is not allowed to make the CV objectively worse or persist a draft
+        # containing unsupported tech claims. Keep the verified master as the safe variant;
+        # the attempted terms remain in the report so Calvin can confirm any that are true.
+        safeguard_reason = ""
+        if fabricated:
+            safeguard_reason = "the draft introduced unsupported terms"
+        elif after < before:
+            safeguard_reason = f"the draft reduced ATS match from {before} to {after}"
+        if safeguard_reason:
+            tailored = master_text
+            after = before
+            data.setdefault("changelog", []).append(
+                f"Safety fallback: preserved the verified master because {safeguard_reason}."
+            )
 
         company = company or (job_row["company"] if job_row else "job")
         variant_path = self._save_variant(job_id, company, tailored)
@@ -202,7 +276,8 @@ class CvTailorSkill(BaseSkill):
             lines.append("🚫 Removed/flagged unsupported terms the draft tried to add: " + ", ".join(fabricated))
         return CommandResult(text="\n".join(lines),
                              data={"variant": str(variant_path), "ats_before": before, "ats_after": after,
-                                   "gaps": gaps, "fabricated": fabricated})
+                                   "gaps": gaps, "fabricated": fabricated,
+                                   "safeguard": safeguard_reason})
 
     def _resolve_jd(self, target: str, job_id: int | str) -> tuple[str, Any]:
         if job_id:
@@ -213,6 +288,7 @@ class CvTailorSkill(BaseSkill):
                 raw = _json.loads(row["raw_json"]) if row["raw_json"] else {}
                 jd = f"{row['title']}\n{raw.get('description', '')}"
                 return jd, row
+            return "", None
         return target, None
 
     def _save_variant(self, job_id: int | str, company: str, markdown: str) -> Path:

@@ -54,6 +54,7 @@ __pycache__/
 venv/
 .python/
 .test-tmp-*/
+.test-*/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/

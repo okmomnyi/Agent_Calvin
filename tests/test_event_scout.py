@@ -102,6 +102,8 @@ def test_find_ranks_by_tag_match(mem):
     titles = [e["title"] for e in res.data["events"]]
     assert titles[0] == "DevOps & Cloud Meetup"      # tag match ranks it first
     assert "Baking Class" not in titles              # zero tag match dropped (no filter)
+    assert "WHEN" in res.text and "WHERE" in res.text and "LINK" in res.text
+    assert res.data["events"][0]["local_time"]
 
 
 def test_physical_bias_penalises_far_cities(mem):
@@ -144,3 +146,14 @@ def test_skip_marks_skipped(mem):
     eid = mem.events_by_status("new")[0]["id"]
     skill.skip(event_id=eid)
     assert mem.get_event(eid)["status"] == "skipped"
+
+
+def test_cancelled_or_postponed_events_are_not_recommended(mem):
+    events = [
+        RawEvent("s", "x", "Cloud CTF POSTPONED", date="2027-06-01", tags=["ctf"]),
+        RawEvent("s", "y", "Active Cloud CTF", date="2027-06-01", tags=["ctf"]),
+    ]
+    skill = _skill(mem, events)
+    skill.scan()
+    titles = [event["title"] for event in skill.find().data["events"]]
+    assert titles == ["Active Cloud CTF"]

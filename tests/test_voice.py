@@ -69,7 +69,9 @@ def test_is_silent_and_elapsed():
     assert is_silent(b"\x00\x00" * 100) is True
     loud = (b"\xff\x7f" * 100)  # max amplitude samples
     assert is_silent(loud) is False
-    assert silence_elapsed(40) is True     # 40 * 30ms = 1200ms
+    assert silence_elapsed(40) is False    # a normal mid-sentence pause should not cut off
+    assert silence_elapsed(60) is True     # 60 * 30ms = 1800ms
+    assert silence_elapsed(40, stop_after_ms=1200) is True
     assert silence_elapsed(10) is False
 
 

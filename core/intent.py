@@ -33,18 +33,24 @@ class Intent:
 # Canonical intent registry: name -> (skill, action). Mirrors the Phase 1 spec list.
 INTENTS: dict[str, tuple[str, str]] = {
     "research":        ("research", "search"),
+    "current_time":    ("chat", "time_status"),
     "prep_pack":       ("interview_prep", "prep"),
     "mock_interview":  ("interview_prep", "mock"),
     "check_email":     ("email_agent", "check"),
     "summarize_inbox": ("email_agent", "digest"),
+    "trash_email":     ("email_agent", "trash"),
+    "restore_email":   ("email_agent", "restore"),
     "summarize":       ("router", "summarize"),
     "find_jobs":       ("job_hunter", "hunt"),
     "find_events":     ("event_scout", "find"),
+    "event_interested": ("event_scout", "interested"),
+    "event_skip":       ("event_scout", "skip"),
     "job_status":      ("job_hunter", "status"),
     "approve":         ("approvals", "approve"),
     "review_code":     ("code_review", "review"),
     "answer_form":     ("form_assist", "answer"),
     "tailor_cv":       ("cv_tailor", "tailor"),
+    "refine_cv":       ("cv_tailor", "refine"),
     "change_voice":    ("voice", "set_voice"),
     "speak_rate":      ("voice", "set_rate"),
     "remember":        ("persona", "remember"),
@@ -67,6 +73,9 @@ INTENTS: dict[str, tuple[str, str]] = {
 # Ordered keyword rules. First match wins; capture groups feed args via `arg_key`.
 # Each rule: (intent_name, compiled_regex, arg_key_or_None)
 _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
+    ("current_time", re.compile(
+        r"^(?:what(?:'?s| is) (?:the )?(?:time|date)(?: right now| today)?|"
+        r"what time is it(?: right now)?|current (?:time|date)|what day is it)\??$", re.I), None),
     # Explicit cross-device handoff (Phase 19) — every group but the channel is non-capturing,
     # because _first_group() returns the first capturing group as the arg.
     ("handoff", re.compile(
@@ -85,6 +94,9 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     ("remember", re.compile(r"\bremember\b[:,]?\s*(?P<t>.+)", re.I), "instruction"),
     ("approve", re.compile(r"\b(?:approve|apply to|send)(?: number| numbers)?\s+(?P<t>[\d ,and]+)$", re.I), "selection"),
     ("tailor_cv", re.compile(r"\btailor (?:my )?cv\b(?: for (?P<t>.+))?", re.I), "target"),
+    ("refine_cv", re.compile(
+        r"\b(?:refine|improve|polish|optimise|optimize|rewrite|update)\s+"
+        r"(?:my\s+)?(?:cv|resume|résumé)\b(?:\s+for\s+(?P<t>.+))?", re.I), "target"),
     ("ask_notes", re.compile(r"\bask (?:my )?notes\b[:,]?\s*(?P<t>.+)", re.I), "question"),
     ("quiz", re.compile(r"\bquiz me\b(?: on (?P<t>.+))?", re.I), "unit"),
     ("tutor", re.compile(r"\btutor(?: mode)?\b[:,]?\s*(?P<t>.+)", re.I), "topic"),
@@ -93,12 +105,22 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     ("prep_pack", re.compile(r"\b(?:prep|prepare)(?: me)?(?: for)?\s+(?P<t>.+)", re.I), "company"),
     ("plan_week", re.compile(r"\bplan (?:my )?week\b", re.I), None),
     ("whats_due", re.compile(r"\bwhat(?:'?s| is)? due\b|\bmy deadlines\b", re.I), None),
+    ("event_interested", re.compile(
+        r"\b(?:interested in|add|save)\s+(?:the\s+)?event\s+#?\s*(?P<t>\d+)\b", re.I),
+        "event_id"),
+    ("event_skip", re.compile(
+        r"\b(?:skip|ignore)\s+(?:the\s+)?event\s+#?\s*(?P<t>\d+)\b", re.I),
+        "event_id"),
     ("find_events", re.compile(r"\b(?:any )?(?:free )?events?\b|\bany ctfs?\b|\bmeetups?\b", re.I), None),
     ("job_status", re.compile(r"\bjob status\b|\bapplication status\b|\bmy applications\b", re.I), None),
     ("find_jobs", re.compile(r"\b(?:any )?(?:new )?jobs?\b|\bfind (?:me )?(?:a )?jobs?\b|\bfind work\b", re.I), None),
     ("review_code", re.compile(r"\breview (?:my )?(?:code|diff|last diff)\b", re.I), None),
     ("answer_form", re.compile(r"\b(?:answer|help me (?:with|answer)) (?:this )?form\b", re.I), None),
     ("summarize_inbox", re.compile(r"\bsummari[sz]e (?:my )?inbox\b", re.I), None),
+    ("restore_email", re.compile(r"\b(?:undo|restore) (?:the )?(?:last )?(?:email )?trash\b", re.I), None),
+    ("trash_email", re.compile(
+        r"\b(?:delete|trash|remove)\s+(?:some\s+)?(?:of\s+)?(?:my\s+)?emails?"
+        r"(?:\s+(?P<t>.+))?$", re.I), "query"),
     ("check_email", re.compile(r"\bcheck (?:my )?(?:email|inbox|mail)\b|\bany (?:new )?email\b", re.I), None),
     # Desktop app control (Phase 23) — laptop-side, voice only. Deliberately late in the list
     # and anchored to the end of the utterance: "start"/"open" are common verbs elsewhere

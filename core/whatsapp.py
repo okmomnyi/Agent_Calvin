@@ -16,7 +16,6 @@ import os
 
 import requests
 
-from core.config import get_settings
 from core.logging_setup import get_logger
 
 log = get_logger("core.whatsapp")

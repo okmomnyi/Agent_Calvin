@@ -15,6 +15,7 @@ from typing import Any
 
 from core.config import get_settings
 from core.logging_setup import get_logger
+from core.time_context import user_zone
 from skills.job_hunter.fetcher import Fetcher
 from skills.job_hunter.sources.base import stable_id
 
@@ -46,12 +47,18 @@ def parse_event_date(s: str) -> float | None:
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=user_zone())
+        return parsed.timestamp()
     except ValueError:
         pass
     for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%a, %d %b %Y %H:%M:%S %z"):
         try:
-            return datetime.strptime(s[:len(fmt) + 6], fmt).timestamp()
+            parsed = datetime.strptime(s[:len(fmt) + 6], fmt)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=user_zone())
+            return parsed.timestamp()
         except ValueError:
             continue
     return None

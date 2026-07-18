@@ -27,7 +27,7 @@ class ChatSkill(BaseSkill):
         return self._llm
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
-        return {"reply": self.reply}
+        return {"reply": self.reply, "time_status": self.time_status}
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
         return []
@@ -48,6 +48,18 @@ class ChatSkill(BaseSkill):
         ]
         reply = self.llm.chat("voice_chat", messages, max_tokens=200)
         return CommandResult(text=reply)
+
+    def time_status(self, **_: Any) -> CommandResult:
+        """Return authoritative local time without asking a model to guess or classify it."""
+        from core.config import get_settings
+        from core.time_context import local_now
+
+        now = local_now()
+        return CommandResult(
+            text=(f"It is {now.strftime('%H:%M')} on {now.strftime('%A, %d %B %Y')} "
+                  f"in {get_settings().tz} ({now.tzname()})."),
+            data={"local_time": now.isoformat(), "timezone": get_settings().tz},
+        )
 
 
 SKILL = ChatSkill()

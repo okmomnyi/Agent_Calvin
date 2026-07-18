@@ -5,11 +5,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from unittest.mock import MagicMock
 
 from core import timetable
 from core.llm import LLMClient
+from core.time_context import local_now, parse_local_datetime
 from skills.semester_planner import SemesterPlannerSkill, _iso_to_epoch
 
 
@@ -39,7 +39,9 @@ def _skill(mem, llm=None, now=NOW, notify=None):
 
 # ------------------------------------------------------------------ deadlines
 def test_iso_to_epoch():
-    assert _iso_to_epoch("2026-08-01") is not None
+    epoch = _iso_to_epoch("2026-08-01")
+    assert epoch is not None
+    assert local_now(epoch).strftime("%H:%M:%S") == "23:59:59"
     assert _iso_to_epoch("not a date") is None
 
 
@@ -122,6 +124,22 @@ def test_briefing_top3_heuristic_without_llm(mem):
     skill = _skill(mem, _DeadLLM())
     res = skill.briefing(notify=False)
     assert "Exam" in res.text   # heuristic top-3 still lists the nearest deadline
+
+
+def test_briefing_uses_actual_local_time_not_hardcoded_morning(mem):
+    afternoon = parse_local_datetime("2026-07-18T14:30")
+    skill = _skill(mem, now=afternoon)
+    result = skill.briefing(notify=False)
+    assert "Good afternoon" in result.text
+    assert "Local time is 14:30" in result.text
+    assert "Morning" not in result.text
+
+
+def test_due_surfaces_overdue_deadlines(mem):
+    mem.add_deadline("Missed lab", NOW - 3600, unit="CS320", dtype="lab", weight=1.0)
+    result = _skill(mem).due(days=7)
+    assert "OVERDUE" in result.text
+    assert "Missed lab" in result.text
 
 
 # ------------------------------------------------------------------ plan

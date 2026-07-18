@@ -65,6 +65,19 @@ def test_tailor_cv_optional_target(router):
     assert "Acme" in intent.args["target"]
 
 
+@pytest.mark.parametrize("text", [
+    "refine my CV",
+    "improve my resume",
+    "polish my CV for a cloud engineer role",
+])
+def test_refine_cv_natural_phrasings(router, text):
+    intent = router.route(text, use_llm=False)
+    assert intent.name == "refine_cv"
+    assert intent.skill == "cv_tailor"
+    if "cloud engineer" in text:
+        assert intent.args["target"] == "a cloud engineer role"
+
+
 def test_llm_fallback_used_when_no_keyword(fake_llm):
     fake_llm.classify_result = "find_jobs"
     router = IntentRouter(llm=fake_llm)
@@ -122,3 +135,26 @@ def test_due_is_not_confused_with_events():
     r = IntentRouter(llm=None)
     assert r.route("Whats due this week", use_llm=False).skill == "semester_planner"
     assert r.route("any free events", use_llm=False).skill == "event_scout"
+
+
+def test_email_trash_and_restore_intents(router):
+    trash = router.route("delete some of my emails", use_llm=False)
+    assert trash.name == "trash_email" and trash.skill == "email_agent"
+    assert trash.args == {}
+    filtered = router.route("delete my emails from LinkedIn", use_llm=False)
+    assert filtered.args["query"] == "from LinkedIn"
+    restore = router.route("undo email trash", use_llm=False)
+    assert restore.name == "restore_email"
+
+
+def test_event_action_intents_extract_exact_id(router):
+    interested = router.route("interested in event 12", use_llm=False)
+    assert interested.name == "event_interested"
+    assert interested.args["event_id"] == "12"
+
+
+def test_current_time_never_uses_llm_fallback(router):
+    intent = router.route("what time is it right now?", use_llm=True)
+    assert intent.name == "current_time"
+    assert intent.skill == "chat"
+    assert intent.via == "keyword"

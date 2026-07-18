@@ -50,7 +50,7 @@ These are hard rules. Each is enforced in code and covered by tests.
 | 1 | **Free-first LLMs (NIM only)** | All model calls go through `core/llm.py` → NVIDIA NIM. No other provider is imported anywhere. |
 | 2 | **Model routing, never hardcoding** | Every call passes a *task class*; `config.yaml → llm.routes` maps class→model. No model id is hardcoded in a skill. |
 | 3 | **Approval gates** | Job applications & form submits require approval (`approve`, Telegram buttons) or `AUTO_APPLY` (email-apply only). Email replies are **draft-only**. Tests assert nothing sends pre-approval. |
-| 4 | **Never delete data** | Emails archived+labelled (never trashed); DB rows get status changes / soft-deletes (`suspended`, `cancelled`, `active=0`), never `DELETE`. |
+| 4 | **Never permanently delete data** | Scheduled cleanup only archives+labels. A user's explicit request may move previewed, confirmed messages to recoverable Gmail Trash and offers undo; permanent Gmail deletion is not exposed. DB rows use status changes / soft-deletes (`suspended`, `cancelled`, `active=0`), never `DELETE`. |
 | 5 | **Never fabricate facts about Calvin** | `persona.answer()` returns `NEEDS_INPUT` on any gap; form answers flag unknowns; CV tailoring has an anti-fabrication check (`core/ats.fabrication_terms`). Multiple tests. |
 | 6 | **Everything is a Skill** | Skills live in `skills/`, auto-discovered by `kernel/registry.py`. Adding one never touches the kernel. |
 | 7 | **Idempotent + resumable** | Every scraped job / processed email / event / ingested file is de-duplicated in Postgres (`ON CONFLICT DO NOTHING` + unique keys). Re-runs process zero duplicates. |
@@ -101,7 +101,7 @@ The addendum phases (16–22) added three more, enforced the same way:
 │    whatsapp.py       Africa's Talking WhatsApp/SMS push (flip alerts)                         │
 │    spotify.py        Spotify Web API client (refuses endpoints dead for new apps)             │
 │    notify.py         Telegram push (dependency-light)                                          │
-│    gmail_client.py   Gmail API wrapper (labels/archive/drafts; no send method)                │
+│    gmail_client.py   Gmail API wrapper (labels/archive/recoverable trash/drafts; no send)     │
 │                                                                                               │
 │  skills/  (20, auto-discovered — see §8)                                                       │
 └───────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -271,7 +271,7 @@ single-writer contention a file DB hits. Key tables:
 |-------|---------|
 | `jobs` | scraped jobs: score, category, cover, apply route, cv_variant, status (`new→scored→drafted→notified→approved→applied`/`skipped`) |
 | `applications` | applied jobs: status (`applied→replied→interview→offer/rejected`), cv_variant_used |
-| `emails` | processed emails: category, action (archived/labelled/drafted) — idempotent by `gmail_id` |
+| `emails` | processed emails: category, action (archived/labelled/drafted/trashed/restored) — idempotent by `gmail_id` |
 | `persona_facts` | verified facts about Calvin by category; `stories` category = STAR anecdotes |
 | `standing_instructions` | behaviour rules Calvin gives the agent (soft-deleted, never removed) |
 | `cv_facts` | structured master-CV facts, versioned; cross-checked against `persona_facts` |
@@ -560,7 +560,7 @@ immutable transition log, not a conversation.
 
 ## 10. Testing philosophy
 
-- **400 tests.** Every external service (NIM, Gmail, HTTP scrapers, Telegram, Spotify, sockets,
+- **471 tests.** Every external service (NIM, Gmail, HTTP scrapers, Telegram, Spotify, sockets,
   TLS, OSV) and the clock are injected or mocked — `pytest` needs no API keys and hits no
   network. The one real dependency is **PostgreSQL**: `TEST_DATABASE_URL` points at a test
   database, and each test runs in its own schema (created once per session, truncated between

@@ -8,7 +8,6 @@ jobs.rss_feeds. Parsing is delegated to feedparser and normalized to RawJob.
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from core.logging_setup import get_logger
 from skills.job_hunter.fetcher import Fetcher

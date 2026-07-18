@@ -41,6 +41,7 @@ if (-not $mutex.WaitOne(0)) {
 $Root      = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # ...\Agentic OS
 $ClientDir = Join-Path $Root "client"
 $EnvFile   = Join-Path $Root ".env"
+$BundledPython = Join-Path $Root ".python\python.exe"
 $LogDir    = Join-Path $env:LOCALAPPDATA "AgentOS"
 $LogFile   = Join-Path $LogDir "laptop.log"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -77,6 +78,12 @@ $WsToken   = Get-EnvValue "AGENT_WS_TOKEN"
 
 if (-not $WsToken) { Log "FATAL: AGENT_WS_TOKEN not found in $EnvFile"; exit 1 }
 if (-not (Test-Path $SshKey)) { Log "FATAL: ssh key not found: $SshKey"; exit 1 }
+if (Test-Path $BundledPython) { $Python = $BundledPython }
+else {
+    $PythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $PythonCommand) { Log "FATAL: no Python found (expected $BundledPython)"; exit 1 }
+    $Python = $PythonCommand.Source
+}
 
 $env:AGENT_WS_URL   = "ws://localhost:$LocalPort/ws/voice"
 $env:AGENT_WS_TOKEN = $WsToken
@@ -128,9 +135,9 @@ try {
         # -u because a redirected python block-buffers and you get nothing until it dies.
         # Add-Content -Encoding utf8 rather than Tee-Object: Tee writes UTF-16 in PS 5.1, and
         # mixing that into a UTF-8 log makes the file half NUL bytes ("binary file matches").
-        if ($Mode -eq "window") { $out = & python -u agent_window.py --tray 2>&1 }
-        elseif ($Mode -eq "voice") { $out = & python -u voice_client.py 2>&1 }   # opt-in wake word
-        else { $out = & python -u voice_client.py $Mode 2>&1 }                   # --text / --ptt
+        if ($Mode -eq "window") { $out = & $Python -u agent_window.py --tray 2>&1 }
+        elseif ($Mode -eq "voice") { $out = & $Python -u voice_client.py 2>&1 }  # opt-in wake word
+        else { $out = & $Python -u voice_client.py $Mode 2>&1 }                  # --text / --ptt
         $out | ForEach-Object { Add-Content -Path $LogFile -Value ("    " + $_) -Encoding utf8 }
         Pop-Location
         Log "voice client exited (see output above), restarting in 5s"

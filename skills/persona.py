@@ -8,13 +8,12 @@ invents facts — answer() returns NEEDS_INPUT when something is unknown (§0).
 
 from __future__ import annotations
 
-import json
 from typing import Any, Callable
 
 from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.notify import send_telegram
-from core.persona_store import NEEDS_INPUT, PersonaEngine, get_engine
+from core.persona_store import PersonaEngine, get_engine
 from core.skill import BaseSkill, CommandResult, ScheduledJob
 
 log = get_logger("skills.persona")

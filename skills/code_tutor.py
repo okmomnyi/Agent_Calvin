@@ -22,7 +22,6 @@ import re
 import time
 from typing import Any, Callable
 
-from core.config import get_settings
 from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.memory import Memory, get_memory

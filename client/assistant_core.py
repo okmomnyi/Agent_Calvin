@@ -24,7 +24,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from typing import Callable
 
 
 class MicState(str, Enum):
@@ -60,6 +60,7 @@ class AssistantCore:
                  transcribe: Callable[[bytes], str],
                  send: Callable[[str], dict],
                  speak: Callable[[str, str, str], None] | None = None,
+                 interrupt_playback: Callable[[], None] | None = None,
                  run_actions: Callable[[list], list] | None = None,
                  flush_input: Callable[[], None] | None = None,
                  on_change: Callable[[], None] | None = None) -> None:
@@ -75,6 +76,7 @@ class AssistantCore:
         self._transcribe = transcribe
         self._send = send
         self._speak = speak
+        self._interrupt_playback = interrupt_playback or (lambda: None)
         self._run_actions = run_actions
         self._on_change = on_change or (lambda: None)
 
@@ -85,6 +87,7 @@ class AssistantCore:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self._response_generation = 0
 
     # ------------------------------------------------------------- state
     @property
@@ -129,6 +132,7 @@ class AssistantCore:
             self._stop.clear()
             self._open_mic()
             self._mic_open = True
+            self._flush_input()  # discard only audio from before consent was granted
             self._set(MicState.LISTENING)
             self._thread = threading.Thread(target=self._loop, daemon=True, name="agentos-mic")
             self._thread.start()
@@ -147,6 +151,9 @@ class AssistantCore:
     def shutdown(self) -> None:
         """Window closed / quitting. Never leave the mic open behind us."""
         self.mic_off()
+        with self._lock:
+            self._response_generation += 1
+            self._interrupt_playback()
         t = self._thread
         if t and t.is_alive():
             t.join(timeout=2)
@@ -155,9 +162,8 @@ class AssistantCore:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                # Everything captured while thinking/speaking is stale by now (and may be our
-                # own voice). Start each turn from silence.
-                self._flush_input()
+                # Capture continuously.  Responses run on separate workers, so speech during
+                # THINKING/SPEAKING can interrupt instead of sitting in a device backlog.
                 pcm = self._recorder()
             except Exception as exc:  # noqa: BLE001 - a mic glitch must not kill the session
                 self._say("system", f"microphone error: {exc}")
@@ -186,26 +192,69 @@ class AssistantCore:
         if not text:
             self._set(MicState.LISTENING)
             return
-        self.submit(text, _from_mic=True)
+        self.submit(text, _from_mic=True, _async=True)
+
+    def barge_in(self) -> bool:
+        """Cancel the current response as soon as new user speech is detected.
+
+        The network request may already be in flight and cannot be unsent, but its generation
+        becomes stale: its reply is neither spoken nor appended after the newer utterance.
+        """
+        with self._lock:
+            if self.state not in (MicState.THINKING, MicState.SPEAKING):
+                return False
+            was_speaking = self.state is MicState.SPEAKING
+            self._response_generation += 1
+            if was_speaking:
+                self._interrupt_playback()
+            self._set(MicState.RECORDING)
+            return True
 
     # ------------------------------------------------------------- submit (mic OR typed)
-    def submit(self, text: str, *, _from_mic: bool = False) -> dict:
+    def submit(self, text: str, *, _from_mic: bool = False, _async: bool = False) -> dict:
         """Send one command. Typing works with the mic off -- that's the point."""
         text = (text or "").strip()
         if not text:
             return {}
-        self._say("you", text)
-        self._set(MicState.THINKING)
+        with self._lock:
+            # A new turn always wins over an older in-flight response.  This is replacement,
+            # not a FIFO queue: stale replies are quietly dropped.
+            self._response_generation += 1
+            generation = self._response_generation
+            if self.state is MicState.SPEAKING:
+                self._interrupt_playback()
+            self._say("you", text)
+            self._set(MicState.THINKING)
+        if _async:
+            worker = threading.Thread(
+                target=self._respond,
+                args=(text, _from_mic, generation),
+                daemon=True,
+                name=f"agentos-response-{generation}",
+            )
+            worker.start()
+            return {"in_flight": True}
+        return self._respond(text, _from_mic, generation)
+
+    def _is_current(self, generation: int) -> bool:
+        with self._lock:
+            return generation == self._response_generation
+
+    def _respond(self, text: str, from_mic: bool, generation: int) -> dict:
+        """Complete one response; only the newest generation may reach the user."""
         try:
             reply = self._send(text)
         except Exception as exc:  # noqa: BLE001 - the droplet/tunnel drops constantly
-            self._say("system", f"couldn't reach the agent: {exc}")
-            self._set(MicState.LISTENING if self.mic_on else MicState.OFF)
+            if self._is_current(generation):
+                self._say("system", f"couldn't reach the agent: {exc}")
+                self._set(MicState.LISTENING if self.mic_on else MicState.OFF)
+            return {}
+
+        if not self._is_current(generation):
             return {}
 
         body = reply.get("text", "")
         actions = reply.get("actions") or []
-        self._say("agent", body, actions)
 
         if actions and self._run_actions:
             try:
@@ -214,14 +263,21 @@ class AssistantCore:
             except Exception as exc:  # noqa: BLE001
                 self._say("system", f"app action failed: {exc}")
 
-        if body and self.speak_replies and self._speak and _from_mic:
+        if body and self.speak_replies and self._speak and from_mic:
             self._set(MicState.SPEAKING)
             try:
                 self._speak(body, reply.get("voice_id", "en-US-GuyNeural"),
                             reply.get("rate", "+0%"))
             except Exception as exc:  # noqa: BLE001
-                self._say("system", f"playback failed: {exc}")
+                if self._is_current(generation):
+                    self._say("system", f"playback failed: {exc}")
 
+        if not self._is_current(generation):
+            return {}
+
+        # Spoken turns appear after playback instead of printing a full answer and only then
+        # beginning to talk. Typed turns still render immediately.
+        self._say("agent", body, actions)
         self._set(MicState.LISTENING if self.mic_on else MicState.OFF)
         return reply
 
@@ -235,5 +291,5 @@ class AssistantCore:
             MicState.LISTENING: "Listening - just talk, no wake word",
             MicState.RECORDING: "Hearing you...",
             MicState.THINKING: "Thinking...",
-            MicState.SPEAKING: "Speaking... (mic paused)",
+            MicState.SPEAKING: "Speaking - talk over me to interrupt",
         }[self.state]

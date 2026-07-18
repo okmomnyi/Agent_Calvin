@@ -51,7 +51,11 @@ class SkillRegistry:
             if skill is None:
                 continue
 
-            self.register(skill)
+            # Persist contracts as one batch after discovery.  Calling get_memory() once
+            # per skill made an unavailable database cost CONNECT_TIMEOUT for every module
+            # (several minutes) before startup finally failed.
+            self._skills[skill.name] = skill
+        self._register_all_contracts()
         log.info("Discovered %d skill(s): %s", len(self._skills), ", ".join(sorted(self._skills)))
 
     def register(self, skill: Skill) -> None:
@@ -60,15 +64,35 @@ class SkillRegistry:
         self._skills[skill.name] = skill
         self._register_contract(skill)
 
-    @staticmethod
-    def _register_contract(skill: Skill) -> None:
-        """Persist the skill's declared scope (Phase 20) so rules can be boundary-checked."""
+    def _register_all_contracts(self) -> None:
+        """Persist discovered contracts through one resolved database handle.
+
+        Discovery itself remains useful when PostgreSQL is unavailable (for diagnostics),
+        and a failed connection is attempted only once rather than once per skill.
+        """
         try:
             from core.memory import get_memory
 
+            memory = get_memory()
+        except Exception:  # noqa: BLE001 - discovery must still complete for health output
+            log.warning("Could not persist skill contracts: database unavailable")
+            return
+
+        for skill in self._skills.values():
+            self._register_contract(skill, memory=memory)
+
+    @staticmethod
+    def _register_contract(skill: Skill, memory: Any | None = None) -> None:
+        """Persist the skill's declared scope (Phase 20) so rules can be boundary-checked."""
+        try:
+            if memory is None:
+                from core.memory import get_memory
+
+                memory = get_memory()
+
             contract = skill.contract()
-            get_memory().register_contract(skill.name, contract.reads_categories,
-                                           contract.hard_invariants)
+            memory.register_contract(skill.name, contract.reads_categories,
+                                     contract.hard_invariants)
         except Exception:  # noqa: BLE001 - a contract write must never break discovery
             log.debug("could not persist contract for '%s'", getattr(skill, "name", "?"))
 
@@ -111,6 +135,41 @@ class SkillRegistry:
 
     def handle_command(self, text: str, *, use_llm: bool = True) -> tuple[Intent, CommandResult]:
         """Full path: raw text -> intent -> skill result."""
+        continuation = self._active_continuation(text)
+        if continuation is not None:
+            return continuation
         intent = self.router.route(text, use_llm=use_llm)
         result = self.dispatch_intent(intent)
         return intent, result
+
+    def _active_continuation(self, text: str) -> tuple[Intent, CommandResult] | None:
+        """Continue server-side conversations consistently on every channel.
+
+        Telegram previously did this itself, which left voice, dashboard and REST follow-up
+        answers to fall through the general router.  The registry is the shared narrow waist.
+        """
+        try:
+            from core.memory import get_memory
+
+            mem = get_memory()
+            flows = (
+                ("email_agent.trash_session", "email_trash", "email_agent", "continue_trash", "text"),
+                ("cv_tailor.session", "cv_refinement", "cv_tailor", "continue_refinement", "text"),
+                ("interview_prep.mock", "mock_answer", "interview_prep", "mock_answer", "answer"),
+                ("spaced_rep.session", "quiz_answer", "spaced_rep", "quiz_answer", "answer"),
+                ("code_tutor.session", "tutor_continue", "code_tutor", "continue", "text"),
+            )
+            for key, name, skill, action, arg_name in flows:
+                if mem.kv_get(key):
+                    intent = Intent(
+                        name=name,
+                        skill=skill,
+                        action=action,
+                        args={arg_name: text},
+                        confidence=1.0,
+                        via="session",
+                    )
+                    return intent, self.dispatch_intent(intent)
+        except Exception:  # noqa: BLE001 - routing still works if continuity storage is down
+            log.debug("could not inspect active conversational sessions", exc_info=True)
+        return None

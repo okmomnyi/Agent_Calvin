@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from core.logging_setup import get_logger
@@ -27,6 +27,8 @@ CHANNELS = ("telegram", "voice", "dashboard", "cli")
 
 # Live conversational state machines, and where each keeps its state.
 _SKILL_SESSIONS = {
+    "email_agent.trash_session": "email trash confirmation",
+    "cv_tailor.session": "CV refinement",
     "interview_prep.mock": "mock interview",
     "spaced_rep.session": "flashcard quiz",
     "code_tutor.session": "tutor session",

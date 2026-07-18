@@ -190,7 +190,14 @@ class LLMClient:
 
     def chat(self, task: str, messages: Sequence[Message], **params: Any) -> str:
         """Route by task class and return the assistant's text response."""
-        return self._post_routed(task, messages, **params).strip()
+        return self._post_routed(task, self._grounded(messages), **params).strip()
+
+    @staticmethod
+    def _grounded(messages: Sequence[Message]) -> list[Message]:
+        """Prepend current-time and evidence rules to every generative call."""
+        from core.time_context import runtime_truth
+
+        return [{"role": "system", "content": runtime_truth()}, *list(messages)]
 
     def classify(
         self,
@@ -240,7 +247,7 @@ class LLMClient:
         **params: Any,
     ) -> dict[str, Any]:
         """Return a parsed JSON object. Strips code fences; retries once on parse failure."""
-        msgs = list(messages)
+        msgs = self._grounded(messages)
         instruction = (
             "Respond with a single valid JSON object only. No prose, no code fences. "
             f"Schema: {schema_hint}"

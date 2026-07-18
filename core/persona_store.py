@@ -10,9 +10,8 @@ confirmation. "Calvin's voice" here means writing tone only — never audio (§0
 
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from core.llm import LLMClient, LLMError, get_client

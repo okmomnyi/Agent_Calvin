@@ -141,7 +141,7 @@ class InterviewPrepSkill(BaseSkill):
                  f"\n{len(qs)} likely questions prepared. Top 3:"]
         for qa in qs[:3]:
             lines.append(f"• {qa.get('q', '')}")
-        lines.append(f"\nAsk THEM: " + "; ".join(pack.get("ask_them", [])[:3]))
+        lines.append("\nAsk THEM: " + "; ".join(pack.get("ask_them", [])[:3]))
         lines.append(f"\n📄 Full pack (with your suggested answers): {pdf_path.name}")
         lines.append("Type /mock " + pack["company"] + " to rehearse.")
         return "\n".join(lines)

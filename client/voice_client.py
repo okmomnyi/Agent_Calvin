@@ -30,14 +30,26 @@ from pathlib import Path
 
 from voice_utils import detect_local_command, is_silent, silence_elapsed, strip_wake_word
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:  # the autostart scripts may provide variables directly
+    pass
+
 # ------------------------------------------------------------------ config
-WS_URL = os.getenv("AGENT_WS_URL", "wss://agent.example.com/ws/voice")
+WS_URL = os.getenv(
+    "AGENT_WS_URL",
+    f"ws://127.0.0.1:{os.getenv('AGENTOS_PORT', '8000')}/ws/voice",
+)
 WS_TOKEN = os.getenv("AGENT_WS_TOKEN", "")
 WAKE_WORD = os.getenv("AGENT_WAKE_WORD", "hey_jarvis")  # openwakeword built-in model name
-WHISPER_MODEL = os.getenv("AGENT_WHISPER_MODEL", "small")
+WHISPER_MODEL = os.getenv("AGENT_WHISPER_MODEL", "base")
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000
+END_SILENCE_MS = int(os.getenv("AGENT_END_SILENCE_MS", "1800"))
+MAX_UTTERANCE_SECONDS = float(os.getenv("AGENT_MAX_UTTERANCE_SECONDS", "45"))
 PTT_KEY = os.getenv("AGENT_PTT_KEY", "ctrl+space")
 # openwakeword runs inference only on >=1280-sample (80ms) chunks; below that it replays the
 # last score without looking at the audio (its model.py:303). Independent of FRAME_SAMPLES,
@@ -87,8 +99,8 @@ class Microphone:
             return None
 
 
-def record_utterance(mic: Microphone, max_seconds: float = 15.0) -> bytes:
-    """Record until 1.2s of trailing silence (or max_seconds). Returns raw PCM16 bytes."""
+def record_utterance(mic: Microphone, max_seconds: float = MAX_UTTERANCE_SECONDS) -> bytes:
+    """Record until a natural trailing pause (or max_seconds). Returns raw PCM16 bytes."""
     frames: list[bytes] = []
     silent = 0
     spoke = False
@@ -100,7 +112,7 @@ def record_utterance(mic: Microphone, max_seconds: float = 15.0) -> bytes:
         frames.append(f)
         if is_silent(f):
             silent += 1
-            if spoke and silence_elapsed(silent):
+            if spoke and silence_elapsed(silent, stop_after_ms=END_SILENCE_MS):
                 break
         else:
             spoke = True
@@ -121,7 +133,13 @@ class Transcriber:
         import numpy as np
 
         audio = np.frombuffer(pcm16, dtype=np.int16).astype("float32") / 32768.0
-        segments, _ = self.model.transcribe(audio, language="en", vad_filter=True)
+        segments, _ = self.model.transcribe(
+            audio,
+            language="en",
+            vad_filter=True,
+            beam_size=1,  # voice conversation favours latency over an expensive 5-beam search
+            condition_on_previous_text=False,
+        )
         return " ".join(s.text for s in segments).strip()
 
 
@@ -130,16 +148,20 @@ class Speaker:
     """Speaks text with edge-tts using the stock voice id the server reports. Barge-in aware."""
 
     def __init__(self) -> None:
-        self._task: asyncio.Task | None = None
+        self._generation = 0
 
     async def speak(self, text: str, voice_id: str, rate: str) -> None:
         import edge_tts
 
         if not text:
             return
+        self._generation += 1
+        generation = self._generation
         out = Path(tempfile.gettempdir()) / "agentos_tts.mp3"
         communicate = edge_tts.Communicate(text, voice_id, rate=rate)
         await communicate.save(str(out))
+        if generation != self._generation:
+            return
         await self._play(out)
 
     async def _play(self, path: Path) -> None:
@@ -152,6 +174,7 @@ class Speaker:
         await asyncio.to_thread(sd.wait)
 
     def stop(self) -> None:
+        self._generation += 1
         try:
             import sounddevice as sd
 
@@ -232,6 +255,7 @@ async def wake_word_loop() -> None:
     wake = WakeModel(wakeword_models=[WAKE_WORD], inference_framework=framework)
     stt = Transcriber()
     speaker = Speaker()
+    active_turn: asyncio.Task | None = None
     print(f"AgentOS voice client ready. Wake word: '{WAKE_WORD}'. (Ctrl+C to quit.)")
     import numpy as np
 
@@ -245,6 +269,7 @@ async def wake_word_loop() -> None:
         while True:
             f = mic.frame()
             if f is None:
+                await asyncio.sleep(0)
                 continue
             buf = np.concatenate([buf, np.frombuffer(f, dtype=np.int16)])
             if len(buf) < WAKE_CHUNK:
@@ -253,9 +278,14 @@ async def wake_word_loop() -> None:
             scores = wake.predict(chunk)
             if any(v > WAKE_THRESHOLD for v in scores.values()):
                 speaker.stop()  # barge-in: cut any current speech
+                if active_turn and not active_turn.done():
+                    active_turn.cancel()  # newest utterance replaces the old response
                 chime()
                 pcm = record_utterance(mic)
-                await handle_utterance(pcm, stt, speaker)
+                active_turn = asyncio.create_task(handle_utterance(pcm, stt, speaker))
+            # The microphone loop is otherwise entirely synchronous; explicitly yield so an
+            # in-flight network/TTS task can progress while wake-word detection continues.
+            await asyncio.sleep(0)
 
 
 async def push_to_talk_loop() -> None:

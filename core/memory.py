@@ -808,7 +808,8 @@ class Memory:
         sql = "SELECT * FROM deadlines WHERE unit=%s AND status=%s"
         params: list[Any] = [unit, status]
         if dtype:
-            sql += " AND type=%s"; params.append(dtype)
+            sql += " AND type=%s"
+            params.append(dtype)
         sql += " ORDER BY due_at"
         return self.conn.execute(sql, params).fetchall()
 
@@ -906,8 +907,10 @@ class Memory:
         sql = "SELECT * FROM flashcards WHERE status='candidate'"
         params: list[Any] = []
         if unit:
-            sql += " AND unit=%s"; params.append(unit)
-        sql += " ORDER BY created_at LIMIT %s"; params.append(limit)
+            sql += " AND unit=%s"
+            params.append(unit)
+        sql += " ORDER BY created_at LIMIT %s"
+        params.append(limit)
         return self.conn.execute(sql, params).fetchall()
 
     def due_cards(self, unit: str | None = None, now: float | None = None,
@@ -916,8 +919,10 @@ class Memory:
         sql = "SELECT * FROM flashcards WHERE status='active' AND (due_at IS NULL OR due_at<=%s)"
         params: list[Any] = [now]
         if unit:
-            sql += " AND unit=%s"; params.append(unit)
-        sql += " ORDER BY due_at LIMIT %s"; params.append(limit)
+            sql += " AND unit=%s"
+            params.append(unit)
+        sql += " ORDER BY due_at LIMIT %s"
+        params.append(limit)
         return self.conn.execute(sql, params).fetchall()
 
     def approve_card(self, card_id: int, now: float | None = None) -> None:
@@ -972,8 +977,10 @@ class Memory:
         sql = "SELECT * FROM flashcards WHERE status='active'"
         params: list[Any] = []
         if unit:
-            sql += " AND unit=%s"; params.append(unit)
-        sql += " ORDER BY lapses DESC, ease ASC LIMIT %s"; params.append(limit)
+            sql += " AND unit=%s"
+            params.append(unit)
+        sql += " ORDER BY lapses DESC, ease ASC LIMIT %s"
+        params.append(limit)
         return self.conn.execute(sql, params).fetchall()
 
     def surge_unit(self, unit: str, now: float | None = None, ease_below: float = 2.3) -> int:
@@ -989,9 +996,11 @@ class Memory:
         sql, params = "SELECT COUNT(*) c FROM flashcards", []
         clauses = []
         if unit:
-            clauses.append("unit=%s"); params.append(unit)
+            clauses.append("unit=%s")
+            params.append(unit)
         if status:
-            clauses.append("status=%s"); params.append(status)
+            clauses.append("status=%s")
+            params.append(status)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         return self.conn.execute(sql, params).fetchone()["c"]
@@ -1043,9 +1052,11 @@ class Memory:
                "FROM listings WHERE make_model=%s AND asking_price IS NOT NULL")
         params: list[Any] = [make_model]
         if condition:
-            sql += " AND condition=%s"; params.append(condition)
+            sql += " AND condition=%s"
+            params.append(condition)
         if exclude_id:
-            sql += " AND id<>%s"; params.append(exclude_id)
+            sql += " AND id<>%s"
+            params.append(exclude_id)
         row = self.conn.execute(sql, params).fetchone()
         return float(row["m"]) if row and row["m"] is not None else None
 
@@ -1249,6 +1260,11 @@ class Memory:
             (listing_id,)).fetchone()
         return row is not None
 
+    def set_email_action(self, gmail_id: str, action: str) -> None:
+        """Update the audit status for an email without removing its history row."""
+        with self.tx():
+            self.conn.execute("UPDATE emails SET action=%s WHERE gmail_id=%s", (action, gmail_id))
+
     # -------------------------------------------------------------- margin ledger (Phase 18)
     def open_position(self, flip_id: int, *, category: str | None, seller_price: float | None,
                       resale_price: float | None, flash_deadline: float | None,
@@ -1415,7 +1431,8 @@ class Memory:
         sql = ("SELECT * FROM infra_scan_results WHERE status='open'")
         params: list[Any] = []
         if target:
-            sql += " AND target=%s"; params.append(target)
+            sql += " AND target=%s"
+            params.append(target)
         sql += (" ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
                 "WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, occurrences DESC")
         return self.conn.execute(sql, params).fetchall()

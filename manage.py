@@ -570,7 +570,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
 def _mask_dsn(dsn: str) -> str:
     """Hide the password when printing a connection string."""
     import re
-    return re.sub(r"://([^:/@]+):[^@]*@", r"://:***@", dsn or "")
+
+    masked = re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", dsn or "")
+    # psycopg also accepts keyword DSNs (``host=... password=...``).  Health output
+    # must not leak those credentials merely because the operator chose that format.
+    return re.sub(
+        r"(?i)(\bpassword\s*=\s*)(?:'[^']*'|\"[^\"]*\"|\S+)",
+        r"\1***",
+        masked,
+    )
 
 
 def cmd_health(_: argparse.Namespace) -> int:

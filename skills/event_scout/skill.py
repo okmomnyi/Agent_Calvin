@@ -18,7 +18,8 @@ from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
 from core.notify import send_telegram
 from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
-from skills.event_scout.sources import RawEvent, build_event_sources
+from core.time_context import format_local, relative_due
+from skills.event_scout.sources import build_event_sources
 from skills.job_hunter.sources.base import keyword_category  # noqa: F401 (kept for parity)
 
 log = get_logger("skills.event_scout")
@@ -141,6 +142,9 @@ class EventScoutSkill(BaseSkill):
         for r in rows:
             from skills.event_scout.sources import parse_event_date
 
+            if any(marker in (r["title"] or "").lower()
+                   for marker in ("cancelled", "canceled", "postponed")):
+                continue
             epoch = parse_event_date(r["date"])
             if epoch and epoch < now - 86400:   # skip past events
                 continue
@@ -225,20 +229,34 @@ class EventScoutSkill(BaseSkill):
 
     # ------------------------------------------------------------- render
     def _brief(self, r: Any) -> dict[str, Any]:
-        return {"id": r["id"], "title": r["title"], "format": r["format"],
-                "location": r["location"], "date": r["date"], "url": r["url"]}
+        from skills.event_scout.sources import parse_event_date
+
+        epoch = parse_event_date(r["date"])
+        return {
+            "id": r["id"], "title": r["title"], "format": r["format"],
+            "location": r["location"], "date": r["date"], "url": r["url"],
+            "tags": [t.strip() for t in (r["tags"] or "").split(",") if t.strip()],
+            "local_time": format_local(epoch) if epoch else "Date TBA",
+            "starts": relative_due(epoch, self._now()).replace("due", "starts") if epoch else "time TBA",
+        }
 
     def _render(self, rows: list[Any], tag: str) -> str:
-        head = f"Free events{' · ' + tag if tag else ''} ({len(rows)}):"
-        lines = [head]
-        for r in rows:
-            icon = "🌐" if r["format"] == "online" else "📍"
-            when = (r["date"] or "TBA")[:10]
-            lines.append(f"[{r['id']}] {icon} {r['title']} — {when}"
-                         + (f" · {r['location']}" if r["location"] and r["format"] == "physical" else "")
-                         + f"\n    {r['url']}")
-        lines.append("\nTap Interested to add one to your planner.")
-        return "\n".join(lines)
+        head = f"🎟 UPCOMING FREE EVENTS{' · ' + tag if tag else ''}"
+        blocks = [head, f"{len(rows)} relevant match{'es' if len(rows) != 1 else ''}"]
+        for index, row in enumerate(rows, start=1):
+            event = self._brief(row)
+            where = (event["location"] or "Online") if event["format"] == "physical" else "Online"
+            tags = " · ".join(event["tags"][:3]) or "general"
+            blocks.append(
+                f"{index}. {event['title']}\n"
+                f"   WHEN   {event['local_time']} · {event['starts']}\n"
+                f"   WHERE  {where}\n"
+                f"   TAGS   {tags}\n"
+                f"   ID     {event['id']}\n"
+                f"   LINK   {event['url'] or 'No link supplied'}"
+            )
+        blocks.append("Say “interested in event <ID>” to add one to your planner.")
+        return "\n\n".join(blocks)
 
 
 SKILL = EventScoutSkill()

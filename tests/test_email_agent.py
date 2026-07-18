@@ -9,10 +9,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
 
 from core.gmail_client import GmailClient
-from skills.email_agent import EmailAgentSkill
+from skills.email_agent import EmailAgentSkill, _gmail_query
 
 
 def _message(msg_id: str = "m1", subject: str = "50% OFF today", sender: str = "deals@shop.com"):
@@ -131,3 +130,47 @@ def test_digest_groups_and_returns_counts(fake_llm, mem):
     assert result.data["action_needed"] == 1
     assert result.data["ignored"] == 1     # the promotion
     assert "ACTION NEEDED" in result.text
+
+
+def test_trash_starts_with_a_question_and_changes_nothing(fake_llm, mem):
+    svc = _mock_service(_message())
+    skill = _skill(svc, fake_llm, mem)
+    result = skill.request_trash()
+    assert result.data["awaiting"] == "email_query"
+    assert svc.users.return_value.messages.return_value.trash.called is False
+
+
+def test_trash_preview_requires_exact_confirmation(fake_llm, mem):
+    svc = _mock_service(_message())
+    skill = _skill(svc, fake_llm, mem)
+    preview = skill.request_trash(query="from deals@shop.com")
+    assert preview.data["requires_confirmation"] is True
+    messages = svc.users.return_value.messages.return_value
+    assert messages.list.call_args.kwargs["q"] == "from:(deals@shop.com)"
+    assert messages.trash.called is False
+
+    refused = skill.continue_trash(text="yes")
+    assert refused.ok is False
+    assert messages.trash.called is False
+
+
+def test_confirmed_trash_is_recoverable_and_audited(fake_llm, mem):
+    svc = _mock_service(_message())
+    skill = _skill(svc, fake_llm, mem)
+    skill.request_trash(query="promotions")
+    result = skill.continue_trash(text="confirm trash")
+    messages = svc.users.return_value.messages.return_value
+    assert result.ok is True
+    messages.trash.assert_called_once_with(userId="me", id="m1")
+    assert mem.execute("SELECT action FROM emails WHERE gmail_id='m1'").fetchone()["action"] == "trashed"
+
+    restored = skill.restore_last()
+    assert restored.ok is True
+    messages.untrash.assert_called_once_with(userId="me", id="m1")
+    assert mem.execute("SELECT action FROM emails WHERE gmail_id='m1'").fetchone()["action"] == "restored"
+
+
+def test_spoken_email_filters_are_deterministic():
+    assert _gmail_query("older than 30 days") == "older_than:30d"
+    assert _gmail_query("subject newsletter") == "subject:(newsletter)"
+    assert _gmail_query("promotions") == "category:promotions"

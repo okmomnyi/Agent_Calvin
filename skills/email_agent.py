@@ -2,7 +2,9 @@
 
 Three capabilities over Calvin's Gmail:
   * Hourly inbox cleanup — classify each new inbox message into one of six categories
-    and archive promotions/newsletters/social under AgentOS/<Category> labels (never trash).
+    and archive promotions/newsletters/social under AgentOS/<Category> labels.
+  * User-requested cleanup — preview exact matches, require explicit confirmation, move
+    them to recoverable Gmail Trash, and support undo. Never permanently delete.
   * Daily 07:00 EAT digest — a grouped Telegram summary (action needed / FYI / ignored).
   * Reply drafting — turn an instruction into a Gmail DRAFT in Calvin's concise tone
     (never sends; approval/sending stays with Calvin per §0).
@@ -11,6 +13,8 @@ All processed messages are logged idempotently so restarts never double-process.
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from typing import Any, Callable
 
@@ -21,6 +25,7 @@ from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
 from core.notify import send_telegram
 from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
+from core.time_context import local_now, start_of_local_day
 
 log = get_logger("skills.email_agent")
 
@@ -28,6 +33,8 @@ CATEGORIES = ["promotion", "newsletter", "social", "job_related", "important", "
 # Only these three are archived out of the inbox; the rest stay visible and just get labelled.
 ARCHIVE_CATEGORIES = {"promotion", "newsletter", "social"}
 ACTION_CATEGORIES = {"important", "job_related"}
+_TRASH_SESSION_KEY = "email_agent.trash_session"
+_LAST_TRASH_KEY = "email_agent.last_trash"
 
 
 class EmailAgentSkill(BaseSkill):
@@ -39,10 +46,12 @@ class EmailAgentSkill(BaseSkill):
         llm: LLMClient | None = None,
         memory: Memory | None = None,
         notify: Callable[[str], bool] | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._gmail = gmail
         self._llm = llm
         self._mem = memory
+        self._now = clock
         # Injectable: anything that can reach Calvin's phone must be replaceable by a
         # test, or the suite texts him. See tests/test_voice.py's injection-point test.
         self._notify = notify or send_telegram
@@ -73,6 +82,9 @@ class EmailAgentSkill(BaseSkill):
             "cleanup": self.cleanup,
             "digest": self.digest,
             "draft": self.draft,
+            "trash": self.request_trash,
+            "continue_trash": self.continue_trash,
+            "restore": self.restore_last,
         }
 
     def contract(self) -> SkillContract:
@@ -154,7 +166,7 @@ class EmailAgentSkill(BaseSkill):
     # ------------------------------------------------------------- daily digest
     def digest(self, notify: bool = True, **_: Any) -> CommandResult:
         """Build and send the grouped daily digest from today's processed emails."""
-        since = _start_of_today_epoch()
+        since = start_of_local_day(self._now())
         rows = self.mem.execute(
             "SELECT category, subject, sender, action FROM emails "
             "WHERE processed_at >= %s ORDER BY processed_at DESC",
@@ -175,7 +187,7 @@ class EmailAgentSkill(BaseSkill):
 
     def _render_digest(self, action_items, fyi_items, ignored: int, total: int) -> str:
         name = get_settings().my_name
-        header = f"📬 {name}'s inbox digest — {time.strftime('%a %d %b')}"
+        header = f"📬 {name}'s inbox digest — {local_now(self._now()).strftime('%a %d %b')}"
         if total == 0:
             return f"{header}\n\nNothing new since yesterday. Inbox is quiet."
 
@@ -272,11 +284,118 @@ class EmailAgentSkill(BaseSkill):
         ).fetchone()
         return row["gmail_id"] if row else None
 
+    # ------------------------------------------------------------- recoverable deletion
+    def request_trash(self, query: str = "", max_results: int = 10, **_: Any) -> CommandResult:
+        """Preview exact Gmail matches; never moves anything before a second confirmation."""
+        query = _clean_delete_query(query)
+        if not query:
+            self.mem.kv_set(_TRASH_SESSION_KEY, json.dumps({
+                "stage": "awaiting_query", "created_at": self._now()}))
+            return CommandResult(
+                text=("Which emails should I move to Trash? Give me a sender, subject, or age, "
+                      "for example: ‘from LinkedIn’, ‘subject newsletter’, or ‘older than 30 days’."),
+                data={"awaiting": "email_query"},
+            )
 
-def _start_of_today_epoch() -> float:
-    lt = time.localtime()
-    midnight = time.struct_time((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, lt.tm_wday, lt.tm_yday, lt.tm_isdst))
-    return time.mktime(midnight)
+        gmail_query = _gmail_query(query)
+        try:
+            ids = self.gmail.list_inbox(max_results=min(max(1, int(max_results)), 20),
+                                        query=gmail_query)
+            candidates = []
+            for msg_id in ids:
+                message = self.gmail.get_message(msg_id, fmt="metadata")
+                candidates.append({
+                    "id": msg_id,
+                    "thread_id": message.get("threadId"),
+                    "subject": self.gmail.header(message, "Subject") or "(no subject)",
+                    "sender": self.gmail.header(message, "From") or "(unknown sender)",
+                })
+        except Exception as exc:  # noqa: BLE001
+            return CommandResult(text=f"Couldn't search Gmail: {exc}", ok=False)
+
+        if not candidates:
+            self.mem.kv_set(_TRASH_SESSION_KEY, "")
+            return CommandResult(text=f"No emails matched ‘{query}’. Nothing was changed.",
+                                 data={"matches": []})
+
+        self.mem.kv_set(_TRASH_SESSION_KEY, json.dumps({
+            "stage": "awaiting_confirmation",
+            "created_at": self._now(),
+            "query": query,
+            "messages": candidates,
+        }))
+        lines = [f"🗑 TRASH PREVIEW · {len(candidates)} message(s)",
+                 "Nothing has been changed yet."]
+        for index, item in enumerate(candidates, start=1):
+            lines.append(f"{index}. {item['subject']}\n   From: {item['sender']}\n   ID: {item['id']}")
+        lines.append("Say ‘confirm trash’ to move exactly these messages to Gmail Trash, or ‘cancel’.")
+        return CommandResult(text="\n\n".join(lines),
+                             data={"matches": candidates, "requires_confirmation": True})
+
+    def continue_trash(self, text: str = "", **_: Any) -> CommandResult:
+        raw = self.mem.kv_get(_TRASH_SESSION_KEY) or ""
+        try:
+            state = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            state = {}
+        if not state:
+            return self.request_trash(query=text)
+        if self._now() - float(state.get("created_at", 0)) > 600:
+            self.mem.kv_set(_TRASH_SESSION_KEY, "")
+            return CommandResult(text="That trash preview expired after 10 minutes. Start again.", ok=False)
+        if re.fullmatch(r"\s*(?:cancel|stop|never\s*mind)\s*", text, re.I):
+            self.mem.kv_set(_TRASH_SESSION_KEY, "")
+            return CommandResult(text="Email trash cancelled. Nothing was changed.")
+        if state.get("stage") == "awaiting_query":
+            return self.request_trash(query=text)
+        if not re.fullmatch(r"\s*(?:confirm\s+trash|yes,?\s+trash\s+them)\s*", text, re.I):
+            return CommandResult(
+                text="Nothing changed. Say exactly ‘confirm trash’ to proceed, or ‘cancel’.",
+                data={"requires_confirmation": True}, ok=False)
+
+        moved, failed = [], []
+        for item in state.get("messages", []):
+            try:
+                self.gmail.trash(item["id"])
+                self.mem.record_email(
+                    item["id"], thread_id=item.get("thread_id"), category="user_trashed",
+                    subject=item.get("subject"), sender=item.get("sender"), action="trashed")
+                self.mem.set_email_action(item["id"], "trashed")
+                moved.append(item)
+            except Exception as exc:  # noqa: BLE001
+                failed.append({"id": item.get("id"), "error": str(exc)})
+        self.mem.kv_set(_TRASH_SESSION_KEY, "")
+        self.mem.kv_set(_LAST_TRASH_KEY, json.dumps({"at": self._now(), "messages": moved}))
+        text_out = (f"Moved {len(moved)} message(s) to Gmail Trash. "
+                    "They remain recoverable; say ‘undo email trash’ to restore them.")
+        if failed:
+            text_out += f" {len(failed)} message(s) failed and were left unchanged."
+        return CommandResult(text=text_out, data={"trashed": moved, "failed": failed},
+                             ok=bool(moved) and not failed)
+
+    def restore_last(self, **_: Any) -> CommandResult:
+        raw = self.mem.kv_get(_LAST_TRASH_KEY) or ""
+        try:
+            state = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            state = {}
+        messages = state.get("messages", [])
+        if not messages:
+            return CommandResult(text="There is no recent AgentOS trash action to undo.", ok=False)
+        restored, failed = 0, 0
+        for item in messages:
+            try:
+                self.gmail.untrash(item["id"])
+                self.mem.set_email_action(item["id"], "restored")
+                restored += 1
+            except Exception:  # noqa: BLE001
+                failed += 1
+        if not failed:
+            self.mem.kv_set(_LAST_TRASH_KEY, "")
+        return CommandResult(
+            text=f"Restored {restored} message(s) from Gmail Trash."
+                 + (f" {failed} could not be restored." if failed else ""),
+            data={"restored": restored, "failed": failed}, ok=restored > 0 and failed == 0)
 
 
 def _extract_email(addr: str) -> str:
@@ -284,6 +403,34 @@ def _extract_email(addr: str) -> str:
     if "<" in addr and ">" in addr:
         return addr[addr.index("<") + 1: addr.index(">")].strip()
     return addr.strip()
+
+
+def _clean_delete_query(text: str) -> str:
+    cleaned = (text or "").strip().strip(".?!")
+    if re.fullmatch(r"(?:some\s+)?(?:of\s+)?(?:my\s+)?emails?", cleaned, re.I):
+        return ""
+    return cleaned
+
+
+def _gmail_query(text: str) -> str:
+    """Translate common spoken filters without asking an LLM to invent Gmail syntax."""
+    cleaned = text.strip()
+    if re.search(r"\b(?:from|subject|older_than|newer_than|category|before|after):", cleaned, re.I):
+        return cleaned
+    match = re.fullmatch(r"from\s+(.+)", cleaned, re.I)
+    if match:
+        return f"from:({match.group(1).strip()})"
+    match = re.fullmatch(r"(?:with\s+)?subject\s+(.+)", cleaned, re.I)
+    if match:
+        return f"subject:({match.group(1).strip()})"
+    match = re.fullmatch(r"older\s+than\s+(\d+)\s*(day|days|month|months|year|years)", cleaned, re.I)
+    if match:
+        suffix = {"day": "d", "days": "d", "month": "m", "months": "m",
+                  "year": "y", "years": "y"}[match.group(2).lower()]
+        return f"older_than:{match.group(1)}{suffix}"
+    if cleaned.lower() in {"promotions", "promotion", "promotional emails"}:
+        return "category:promotions"
+    return cleaned
 
 
 SKILL = EmailAgentSkill()

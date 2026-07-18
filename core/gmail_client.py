@@ -2,9 +2,9 @@
 
 Wraps google-api-python-client with the OAuth desktop flow described in the build spec:
 `python manage.py auth` on the laptop mints token.json, which is copied to the droplet.
-Uses the gmail.modify scope only — enough to read, relabel, archive, and create drafts,
-but NOT to permanently delete (Principle: never delete data — we archive+label, never trash).
-Exposes clean methods (list, get, labels, archive, create_draft) over the fluent API.
+Uses gmail.modify for reading, relabelling, archiving, drafts, and recoverable Trash.
+Permanent deletion is deliberately not exposed. Trash actions are called only after the
+email skill previews exact messages and receives explicit confirmation.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from core.logging_setup import get_logger
 
 log = get_logger("core.gmail")
 
-# gmail.modify: read + label + draft, but cannot permanently delete. Deliberate (§0).
+# gmail.modify: read + label + draft + recoverable trash, but no permanent deletion (§0).
 # gmail.send: used ONLY by core.mailer for approved job applications (Principle 3). The
 # email-reply path (GmailClient) exposes no send method, so replies remain draft-only.
 SCOPES = [
@@ -196,6 +196,14 @@ class GmailClient:
         self.service.users().messages().modify(
             userId=self.user_id, id=msg_id, body=body
         ).execute()
+
+    def trash(self, msg_id: str) -> None:
+        """Move one explicitly confirmed message to Gmail Trash (recoverable, never permanent)."""
+        self.service.users().messages().trash(userId=self.user_id, id=msg_id).execute()
+
+    def untrash(self, msg_id: str) -> None:
+        """Restore a message previously moved to Trash."""
+        self.service.users().messages().untrash(userId=self.user_id, id=msg_id).execute()
 
     # ------------------------------------------------------------- drafts (never send)
     def create_draft(

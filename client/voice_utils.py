@@ -41,21 +41,22 @@ def strip_wake_word(transcript: str) -> str:
     return t
 
 
-def is_silent(pcm16: bytes, threshold: int = 500) -> bool:
-    """True if a 16-bit PCM frame's RMS is below `threshold` (VAD fallback / end-of-speech).
-
-    Computes RMS directly (stdlib `audioop` was removed in Python 3.13, PEP 594).
-    """
+def pcm_rms(pcm16: bytes) -> float:
+    """Return a PCM16 frame's RMS level (stdlib audioop disappeared in Python 3.13)."""
     if not pcm16:
-        return True
+        return 0.0
     samples = array.array("h")
     samples.frombytes(pcm16[: len(pcm16) // 2 * 2])
     if not samples:
-        return True
-    rms = math.sqrt(sum(s * s for s in samples) / len(samples))
-    return rms < threshold
+        return 0.0
+    return math.sqrt(sum(s * s for s in samples) / len(samples))
 
 
-def silence_elapsed(silent_frames: int, frame_ms: int = 30, stop_after_ms: int = 1200) -> bool:
-    """True once trailing silence has lasted stop_after_ms (default 1.2s, per spec)."""
+def is_silent(pcm16: bytes, threshold: int = 500) -> bool:
+    """True if a 16-bit PCM frame's RMS is below `threshold` (VAD fallback / endpointing)."""
+    return pcm_rms(pcm16) < threshold
+
+
+def silence_elapsed(silent_frames: int, frame_ms: int = 30, stop_after_ms: int = 1800) -> bool:
+    """True once trailing silence has lasted stop_after_ms (a natural mid-sentence pause)."""
     return silent_frames * frame_ms >= stop_after_ms

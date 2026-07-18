@@ -32,7 +32,7 @@ def _seed_and_gap_questions() -> list[Question]:
     name = get_settings().my_name
     return [
         # Known basics — confirm or correct (defaults pre-filled from the project brief).
-        Question("bio", "name", f"Your name?", name),
+        Question("bio", "name", "Your name?", name),
         Question("bio", "location", "Where are you based?", "Nairobi, Kenya (volunteering in Mombasa)"),
         Question("education", "university", "University & course?",
                  "Meru University of Science and Technology — BSc Computer Science"),

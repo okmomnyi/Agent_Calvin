@@ -49,13 +49,15 @@ class _Mic:
         return None
 
 
-def _core(mic=None, send=None, transcribe=None, speak=None, run_actions=None):
+def _core(mic=None, send=None, transcribe=None, speak=None, run_actions=None,
+          interrupt_playback=None, flush_input=None):
     mic = mic or _Mic()
     return AssistantCore(
         recorder=mic.record, open_mic=mic.open, close_mic=mic.close,
         transcribe=transcribe or (lambda pcm: "what's due this week"),
         send=send or (lambda t: {"text": "CAT 1 for CS305, in 3 days"}),
-        speak=speak, run_actions=run_actions), mic
+        speak=speak, run_actions=run_actions, interrupt_playback=interrupt_playback,
+        flush_input=flush_input), mic
 
 
 # ================================================================= the guarantee
@@ -162,6 +164,19 @@ def test_a_spoken_utterance_round_trips_and_is_spoken_back():
     assert ("you", "what's due this week") in [(t.who, t.text) for t in core.turns]
 
 
+def test_spoken_reply_is_not_written_in_full_before_playback_begins():
+    observed = []
+    core, _ = _core()
+
+    def speak(*_args):
+        observed.append(any(t.who == "agent" for t in core.turns))
+
+    core._speak = speak
+    core.submit("hello", _from_mic=True)
+    assert observed == [False]
+    assert any(t.who == "agent" for t in core.turns)
+
+
 def test_desktop_actions_run_and_are_reported(monkeypatch):
     ran = []
     core, _ = _core(
@@ -250,37 +265,46 @@ def test_state_never_claims_to_listen_while_the_device_is_shut():
 
 
 # ================================================================= real-time, not a backlog
-def test_audio_captured_while_busy_is_discarded_not_queued():
-    """Calvin: "Its queing my audio instead of listening and responding in real time".
-
-    The device buffer keeps filling through THINKING and SPEAKING. Without a flush, every
-    turn answers the PREVIOUS sentence and the backlog grows -- he said "Hi Javis" three
-    times and got three late replies. Worse, while speaking, the mic picks up the agent's
-    own TTS through the speakers and transcribes it straight back.
-    """
-    flushes, order = [], []
+def test_new_speech_replaces_an_inflight_reply_instead_of_queueing():
+    """The newest utterance wins while the previous network request is still running."""
+    first_started = threading.Event()
+    release_first = threading.Event()
     mic = _Mic(utterances=[b"\x01", b"\x02"])
 
-    def record():
-        order.append("record")
-        return mic.record()
+    def send(text):
+        if text == "first":
+            first_started.set()
+            release_first.wait(2)
+            return {"text": "stale reply"}
+        return {"text": "current reply"}
 
     core = AssistantCore(
-        recorder=record, open_mic=mic.open, close_mic=mic.close,
-        transcribe=lambda pcm: "hi",
-        send=lambda t: {"text": "hello"},
-        flush_input=lambda: (flushes.append(1), order.append("flush")))
+        recorder=mic.record, open_mic=mic.open, close_mic=mic.close,
+        transcribe=lambda pcm: "first" if pcm == b"\x01" else "second",
+        send=send)
     core.mic_on_()
     for _ in range(100):
-        if len(flushes) >= 2:
+        if first_started.is_set() and any(t.text == "current reply" for t in core.turns):
             break
         threading.Event().wait(0.02)
+    release_first.set()
+    threading.Event().wait(0.05)
     core.shutdown()
-    assert flushes, "stale audio was never discarded -- the backlog is back"
-    # every capture must be preceded by a flush, never the other way round
-    assert order[0] == "flush"
-    for a, b in zip(order, order[1:]):
-        assert not (a == "record" and b == "record"), "two captures with no flush between"
+    replies = [t.text for t in core.turns if t.who == "agent"]
+    assert "current reply" in replies
+    assert "stale reply" not in replies
+
+
+def test_barge_in_stops_playback_and_invalidates_the_old_response():
+    interrupted = []
+    core, _ = _core(interrupt_playback=lambda: interrupted.append(True))
+    core.state = MicState.SPEAKING
+    generation = core._response_generation
+
+    assert core.barge_in() is True
+    assert interrupted == [True]
+    assert core.state is MicState.RECORDING
+    assert core._response_generation == generation + 1
 
 
 def test_flush_is_optional():

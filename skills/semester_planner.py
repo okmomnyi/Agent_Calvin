@@ -28,6 +28,8 @@ from core.memory import Memory, get_memory
 from core.notify import send_telegram
 from core.pdf import build_pdf
 from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.time_context import (format_local, greeting, local_now, parse_local_datetime,
+                               relative_due)
 
 log = get_logger("skills.semester_planner")
 
@@ -85,26 +87,44 @@ class SemesterPlannerSkill(BaseSkill):
         epoch = _iso_to_epoch(due)
         if epoch is None:
             return CommandResult(text=f"Couldn't parse date '{due}' (use YYYY-MM-DD).", ok=False)
-        self.mem.add_deadline(title, epoch, unit=unit or None, dtype=dtype or None,
-                              weight=float(weight), status="active", source="manual")
-        return CommandResult(text=f"📌 Saved deadline: {title} ({unit or 'general'}) due {due}.")
+        deadline_id = self.mem.add_deadline(
+            title, epoch, unit=unit or None, dtype=dtype or None,
+            weight=float(weight), status="active", source="manual",
+        )
+        return CommandResult(
+            text=(f"📌 Saved deadline\n"
+                  f"• {title} · {unit or 'general'}\n"
+                  f"• {format_local(epoch)} ({relative_due(epoch, self._now())})"),
+            data={"deadline_id": deadline_id},
+        )
 
     def due(self, days: int = 7, **_: Any) -> CommandResult:
         rows = self._ranked_deadlines(days)
         if not rows:
             return CommandResult(text=f"Nothing due in the next {days} days. 🎉", data={"count": 0})
-        lines = [f"🗓 Due within {days} days (by urgency):"]
+        lines = [f"🗓 DEADLINES · next {days} days", ""]
         for d, score, dleft in rows:
-            lines.append(f"  • {d['title']} ({d['unit'] or 'general'}, {d['type'] or 'task'}) "
-                         f"— in {dleft:.0f}d, weight {d['weight']}")
-        return CommandResult(text="\n".join(lines), data={"count": len(rows)})
+            lines.append(
+                f"• {d['title']}\n"
+                f"  {d['unit'] or 'general'} · {d['type'] or 'task'} · "
+                f"{format_local(d['due_at'])}\n"
+                f"  {relative_due(d['due_at'], self._now())} · priority {score:.1f}"
+            )
+        return CommandResult(text="\n\n".join(lines), data={"count": len(rows),
+                             "generated_at": local_now(self._now()).isoformat()})
 
     def _ranked_deadlines(self, days: int) -> list[tuple[Any, float, float]]:
         now = self._now()
         out = []
-        for d in self.mem.deadlines_within(days, now=now):
-            days_left = max(0.0, (d["due_at"] - now) / 86400)
+        rows = self.mem.execute(
+            "SELECT * FROM deadlines WHERE status='active' AND due_at<=%s ORDER BY due_at",
+            (now + days * 86400,),
+        ).fetchall()
+        for d in rows:
+            days_left = (d["due_at"] - now) / 86400
             score = d["weight"] / max(0.5, days_left)   # urgency × weight
+            if days_left < 0:
+                score = 10_000 + d["weight"] + abs(days_left)
             out.append((d, score, days_left))
         out.sort(key=lambda x: x[1], reverse=True)
         return out
@@ -161,11 +181,11 @@ class SemesterPlannerSkill(BaseSkill):
     def briefing(self, notify: bool = True, **_: Any) -> CommandResult:
         """The unified 07:00 briefing (replaces the plain inbox summary)."""
         now = self._now()
-        lt = time.localtime(now)
-        date_iso = time.strftime("%Y-%m-%d", lt)
+        local = local_now(now)
+        date_iso = local.strftime("%Y-%m-%d")
         names = timetable.unit_names()
 
-        classes = timetable.classes_on(lt.tm_wday, date_iso)
+        classes = timetable.classes_on(local.weekday(), date_iso)
         ranked = self._ranked_deadlines(7)
         cards_due = len(self.mem.due_cards(now=now))
         job_approvals = self.mem.execute(
@@ -177,7 +197,10 @@ class SemesterPlannerSkill(BaseSkill):
         commitments = get_settings().get("planner", "commitments", default=[]) or []
 
         name = get_settings().my_name
-        lines = [f"☀️ Morning {name} — {time.strftime('%A %d %b', lt)}"]
+        lines = [
+            f"📋 DAILY BRIEFING · {local.strftime('%A %d %b')}",
+            f"{greeting(now)}, {name}. Local time is {local.strftime('%H:%M %Z')}.",
+        ]
 
         lines.append("\n📚 Classes today: " + (
             ", ".join(f"{c.get('start','')} {c.get('title', c.get('unit',''))}" for c in classes)
@@ -186,7 +209,10 @@ class SemesterPlannerSkill(BaseSkill):
         if ranked:
             lines.append("\n🗓 Deadlines (next 7 days):")
             for d, _s, dleft in ranked[:5]:
-                lines.append(f"  • {d['title']} ({names.get(d['unit'], d['unit'] or 'general')}) — in {dleft:.0f}d")
+                lines.append(
+                    f"  • {d['title']} ({names.get(d['unit'], d['unit'] or 'general')}) "
+                    f"— {relative_due(d['due_at'], now)} · {format_local(d['due_at'])}"
+                )
         lines.append(f"\n🧠 Flashcards due: {cards_due}   ·   💼 Job approvals pending: {job_approvals}")
         if interviews:
             lines.append("🎯 Interviews: " + ", ".join(i["company"] for i in interviews))
@@ -203,7 +229,8 @@ class SemesterPlannerSkill(BaseSkill):
             self._notify(text)
         return CommandResult(text=text, data={
             "classes": len(classes), "deadlines": len(ranked), "cards_due": cards_due,
-            "job_approvals": job_approvals})
+            "job_approvals": job_approvals, "local_time": local.isoformat(),
+            "timezone": get_settings().tz})
 
     def _top3(self, ranked, cards_due: int, job_approvals: int, classes, commitments) -> str:
         summary = {
@@ -336,14 +363,8 @@ class SemesterPlannerSkill(BaseSkill):
 
 
 def _iso_to_epoch(iso: str) -> float | None:
-    """Parse 'YYYY-MM-DD' (optionally with time) to a local epoch. Returns None on failure."""
-    iso = (iso or "").strip()
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-        try:
-            return time.mktime(time.strptime(iso, fmt))
-        except (ValueError, OverflowError):
-            continue
-    return None
+    """Parse in the configured user timezone; bare dates remain due through 23:59:59."""
+    return parse_local_datetime(iso, date_at_end_of_day=True)
 
 
 SKILL = SemesterPlannerSkill()
