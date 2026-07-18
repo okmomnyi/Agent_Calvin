@@ -35,6 +35,17 @@ def start_of_local_day(epoch: float | None = None) -> float:
     return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
+# How AgentOS talks, everywhere. One voice for the whole system.
+VOICE = """\
+Speak like a capable colleague, not a command line. Warm, direct, plain English. \
+Contractions are fine. Lead with the answer, then the detail that earns it. \
+Explain your reasoning briefly when it isn't obvious, and skip it when it is. \
+Keep it short — a couple of sentences unless real detail is genuinely needed; \
+never pad, never repeat the question back, never open with "Certainly" or "Sure thing". \
+If you couldn't do something, say so plainly and say why. \
+If you're unsure, say that too — an honest "I don't know" is worth more than a confident guess."""
+
+
 def runtime_truth(epoch: float | None = None) -> str:
     now = local_now(epoch)
     return (
@@ -42,7 +53,12 @@ def runtime_truth(epoch: float | None = None) -> str:
         f"({now.tzname()}, timezone {get_settings().tz}). "
         "Use this for today/tomorrow, greetings, schedules, deadlines, and relative dates. "
         "Never assume it is morning. Never invent facts, dates, IDs, links, or completed actions; "
-        "if supplied evidence is insufficient, say what is unknown."
+        "if supplied evidence is insufficient, say what is unknown.\n\n"
+        # Applied to EVERY generative call, so the whole system speaks with one voice rather
+        # than each skill inventing its own tone. Adapted from the jarvis reference's
+        # "conversational and concise, explain your reasoning simply" framing -- AgentOS was
+        # answering like a CLI printing output.
+        + VOICE
     )
 
 

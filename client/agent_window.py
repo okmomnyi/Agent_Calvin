@@ -91,13 +91,23 @@ class AgentWindow:
             self.root, bg=PANEL, fg=INK, insertbackground=INK, relief="flat", wrap="word",
             font=("Segoe UI", 10), padx=10, pady=8, state="disabled")
         self.log.pack(fill="both", expand=True, padx=14, pady=6)
-        self.log.tag_config("you", foreground=TEAL)
-        self.log.tag_config("agent", foreground=INK)
+        self.log.tag_config("you", foreground=TEAL, lmargin1=10, lmargin2=10)
+        self.log.tag_config("agent", foreground=INK, lmargin1=10, lmargin2=10)
         self.log.tag_config("system", foreground=AMBER, font=("Consolas", 8))
         self.log.tag_config("speaker", foreground=DIM, font=("Segoe UI", 8, "bold"))
+        # Chat-style attribution + indented body, rather than dividers between blocks: the
+        # eye follows who-said-what far faster than it follows horizontal rules.
+        self.log.tag_config("you_name", foreground=TEAL, font=("Segoe UI", 9, "bold"),
+                            spacing1=6)
+        self.log.tag_config("ai_name", foreground=AMBER, font=("Segoe UI", 9, "bold"),
+                            spacing1=6)
+        self.log.tag_config("card", foreground=DIM, font=("Consolas", 9),
+                            lmargin1=10, lmargin2=22)
+        self.log.tag_config("pending", foreground=DIM, font=("Segoe UI", 10, "italic"),
+                            lmargin1=10)
         self.log.tag_config("heading", foreground=AMBER, font=("Segoe UI", 11, "bold"),
                             spacing1=5, spacing3=3)
-        self.log.tag_config("bullet", foreground=INK, lmargin1=18, lmargin2=30)
+        self.log.tag_config("bullet", foreground=INK, lmargin1=26, lmargin2=38)
         self.log.tag_config("meta", foreground=DIM, font=("Consolas", 9),
                             lmargin1=22, lmargin2=22)
         self.log.tag_config("link", foreground=TEAL, underline=True,
@@ -166,13 +176,29 @@ class AgentWindow:
 
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
-        for index, turn in enumerate(self.core.turns[-80:]):
-            if index:
-                self.log.insert("end", "────────────────────────────────────────\n", "divider")
-            label = {"you": "YOU", "agent": "AGENTOS", "system": "SYSTEM"}[turn.who]
-            self.log.insert("end", f"{label}\n", "speaker" if turn.who != "system" else "system")
+        for turn in self.core.turns[-80:]:
+            if turn.who == "system":
+                # A tool-call card, not a chat message: what the agent DID, set apart from
+                # what it SAID. Borrowed from OpenJarvis's ToolCallCard -- collapsing actions
+                # into the prose is what made it read like a log file.
+                self.log.insert("end", f"  ⚙  {turn.text}\n\n", "card")
+                continue
+            speaker = "You" if turn.who == "you" else "AgentOS"
+            self.log.insert("end", f"{speaker}\n", "you_name" if turn.who == "you" else "ai_name")
             self._render_turn(turn.text, turn.who)
+            if turn.actions:
+                for a in turn.actions:
+                    self.log.insert("end", f"  ⚙  {a.get('op','?')} {a.get('app','')}\n", "card")
             self.log.insert("end", "\n")
+
+        # Live state at the foot of the transcript, so he can see it is working rather than
+        # wondering whether it heard him (OpenJarvis's StreamingDots).
+        if self.core.state is MicState.THINKING:
+            self.log.insert("end", "AgentOS\n", "ai_name")
+            self.log.insert("end", "  thinking…\n\n", "pending")
+        elif self.core.state is MicState.RECORDING:
+            self.log.insert("end", "  listening…\n\n", "pending")
+
         self.log.see("end")
         self.log.config(state="disabled")
 

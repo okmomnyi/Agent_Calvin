@@ -312,3 +312,27 @@ def test_flush_is_optional():
     core, _ = _core()
     core.submit("hello")
     assert any(t.who == "agent" for t in core.turns)
+
+
+# ================================================================= one voice everywhere
+def test_every_generative_call_carries_the_house_voice():
+    """The tone rules ride on runtime_truth, which _grounded() prepends to every call.
+
+    Put anywhere else and each skill invents its own register -- which is how AgentOS ended
+    up answering like a CLI printing output while claiming to be an assistant.
+    """
+    from core.time_context import VOICE, runtime_truth
+
+    grounding = runtime_truth()
+    assert VOICE in grounding
+    # the factual grounding must still come FIRST; tone never outranks truth
+    assert grounding.index("Never invent facts") < grounding.index(VOICE[:40])
+
+
+def test_the_voice_forbids_the_filler_it_was_written_to_kill():
+    from core.time_context import VOICE
+
+    lowered = VOICE.lower()
+    for rule in ("certainly", "repeat the question", "never pad"):
+        assert rule in lowered
+    assert "i don't know" in lowered, "an honest unknown must stay explicitly allowed"
