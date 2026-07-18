@@ -13,6 +13,7 @@ so importing this module never requires the library or starts polling.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Callable
 
@@ -185,12 +186,33 @@ class BotCore:
             return self._dispatch(skill, action, payload)
         return f"Unknown command /{cmd}. Try /help."
 
+    def _session_fresh(self, key: str, ttl: int = 600) -> bool:
+        """True only if a stored session exists AND is younger than ttl.
+
+        A STALE session must not swallow an unrelated message: Calvin's "write and send an
+        email ..." got eaten by a 10-minute-old trash preview, which replied "expired, start
+        again" and consumed it. A stale session is cleared and the message falls through to
+        normal routing.
+        """
+        raw = self.mem.kv_get(key)
+        if not raw:
+            return False
+        try:
+            created = float(json.loads(raw).get("created_at", 0))
+        except Exception:  # noqa: BLE001 - malformed session is stale by definition
+            self.mem.kv_set(key, "")
+            return False
+        if time.time() - created > ttl:
+            self.mem.kv_set(key, "")     # expire it silently; do not intercept
+            return False
+        return True
+
     def route_text(self, text: str) -> str:
-        """Free text: continue an active mock/quiz if one is running, else route via intent engine."""
+        """Free text: continue an active (FRESH) session if one is running, else route via intent."""
         if not text.startswith("/"):
-            if self.mem.kv_get(_SEND_KEY):   # "confirm send" / "cancel" after a compose preview
+            if self._session_fresh(_SEND_KEY):   # "confirm send" / "cancel" after a compose preview
                 return self._dispatch("email_agent", "continue_send", {"text": text})
-            if self.mem.kv_get(_TRASH_KEY):  # "confirm trash" / "cancel" / a follow-up filter
+            if self._session_fresh(_TRASH_KEY):  # "confirm trash" / "cancel" / a follow-up filter
                 return self._dispatch("email_agent", "continue_trash", {"text": text})
             if self.mem.kv_get(_MOCK_KEY):
                 return self._dispatch("interview_prep", "mock_answer", {"answer": text})

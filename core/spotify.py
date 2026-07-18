@@ -43,6 +43,10 @@ AUTH_URL = "https://accounts.spotify.com/authorize"
 
 # Everything we need, and nothing we don't.
 SCOPES = [
+    # user-read-private is what makes /me return `product` (free|premium). Without it Spotify
+    # simply omits the field, is_premium() reads None, and a genuine Premium account is told
+    # "requires Premium" -- which is exactly what happened to Calvin's real Premium account.
+    "user-read-private",
     "user-read-playback-state", "user-modify-playback-state", "user-read-currently-playing",
     "user-read-recently-played", "user-top-read", "user-library-read",
     "playlist-modify-private", "playlist-modify-public",

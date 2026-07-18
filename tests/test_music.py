@@ -474,3 +474,29 @@ def test_playback_errors_surface_cleanly(music):
     sp.play = boom
     res = skill.play()
     assert res.ok is False and "rate limited" in res.text
+
+
+def test_premium_detection_requests_the_scope_that_returns_product():
+    """`product` only appears in /me when user-read-private was granted.
+
+    Without that scope Spotify omits the field entirely, is_premium() sees None, and a real
+    Premium account gets told "requires Premium" -- which is what Calvin hit: the CLI printed
+    "Connected as Calvin (None)" and warned, on a genuinely Premium account.
+    """
+    from core.spotify import SCOPES
+
+    assert "user-read-private" in SCOPES, (
+        "without user-read-private, /me has no `product` and Premium can never be detected")
+
+
+def test_is_premium_reads_the_product_field():
+    from core.spotify import SpotifyClient
+
+    c = SpotifyClient()
+    c.me = lambda: {"display_name": "Calvin", "product": "premium"}
+    assert c.is_premium() is True
+    c.me = lambda: {"display_name": "Calvin", "product": "free"}
+    assert c.is_premium() is False
+    # the missing-scope case: absent field must not masquerade as a definite "free"
+    c.me = lambda: {"display_name": "Calvin"}
+    assert c.is_premium() is False

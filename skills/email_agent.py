@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from core.config import get_settings
 from core.gmail_client import GmailClient
-from core.llm import LLMClient, get_client
+from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
 from core.notify import send_telegram
@@ -281,6 +281,44 @@ class EmailAgentSkill(BaseSkill):
             data={"draft_id": draft.get("id"), "to": to_addr},
         )
 
+    def _compose_body(self, to: str, instruction: str) -> str:
+        """Draft a NEW email body (not a reply) from a plain-language instruction.
+
+        Deliberately separate from _compose_reply, whose prompt is framed around an original
+        message. Reusing it for a fresh compose left the model with an empty "original email"
+        and it wandered: asked to "send an email saying systems are back online", it produced a
+        tutorial on sending mail with Python's smtplib. The framing below is explicit that the
+        output IS the email, never code or commentary about email.
+        """
+        name = get_settings().my_name
+        sys = (
+            f"You write short professional emails as {name}. Output ONLY the email body text: "
+            "no code, no explanation, no commentary about how email works, no subject line, no "
+            "markdown. Start with a greeting and end by signing off as "
+            f"{name.split()[0]}. Keep it under 120 words. State ONLY what the instruction says "
+            "— never invent commitments, dates, names or details."
+        )
+        user = (f"Recipient: {to or '(unspecified)'}\n"
+                f"What {name} wants to say: {instruction}\n\n"
+                "Write the email body now.")
+        return self.llm.chat("write", [{"role": "system", "content": sys},
+                                       {"role": "user", "content": user}], max_tokens=400).strip()
+
+    def _compose_subject(self, source: str) -> str:
+        """A short subject line. Falls back to a trimmed instruction if the model is unavailable."""
+        try:
+            line = self.llm.chat(
+                "write",
+                [{"role": "system", "content":
+                    "Write ONLY a concise email subject line (max 8 words). No quotes, no "
+                    "prefix like 'Subject:', no punctuation at the end."},
+                 {"role": "user", "content": source[:500]}],
+                max_tokens=24).strip()
+        except LLMError:
+            line = ""
+        line = line.splitlines()[0].strip().strip('"').removeprefix("Subject:").strip() if line else ""
+        return line[:80] or (source[:60].strip() or "(no subject)")
+
     def _compose_reply(self, sender: str, subject: str, snippet: str, instruction: str) -> str:
         name = get_settings().my_name
         sys = (
@@ -441,12 +479,12 @@ class EmailAgentSkill(BaseSkill):
         if not to or "@" not in to:
             return CommandResult(text="Who should I email? Give me an address.", ok=False)
         if not body and instruction:
-            body = self._compose_reply(sender=to, subject=subject or "", snippet="",
-                                       instruction=instruction)
+            body = self._compose_body(to, instruction)
         if not body:
             return CommandResult(text="What should the email say? Give me a body or an instruction.",
                                  ok=False)
-        subject = subject or (instruction[:60] if instruction else "(no subject)")
+        if not subject:
+            subject = self._compose_subject(instruction or body)
         self.mem.kv_set(_SEND_SESSION_KEY, json.dumps({
             "to": to, "subject": subject, "body": body, "created_at": self._now()}))
         return CommandResult(
