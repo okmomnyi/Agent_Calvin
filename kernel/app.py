@@ -31,11 +31,36 @@ registry = SkillRegistry()
 scheduler = AsyncIOScheduler(timezone=get_settings().tz)
 
 
+def _enqueue_scheduled(job_id: str, skill: str, action: str):
+    """Build the timer callback for a QUEUED job: enqueue it, don't run it here.
+
+    The scheduler's job becomes "put work on the queue"; a worker does the work. That keeps
+    scraping, transcription and batch LLM calls out of the API process, and gives them retries
+    and visibility. Deduped on the job id, so a slow run still draining does not stack up
+    another copy every time the timer fires.
+    """
+    def _fire() -> None:
+        from core.queue import get_queue
+
+        try:
+            queued = get_queue().enqueue("skill.run", {"skill": skill, "action": action},
+                                         dedupe_key=f"sched:{job_id}")
+            log.info("scheduled '%s' -> %s", job_id,
+                     f"queued #{queued}" if queued else "skipped (previous run still pending)")
+        except Exception:  # noqa: BLE001 - a queue outage must not kill the scheduler
+            log.exception("could not enqueue scheduled job '%s'", job_id)
+    return _fire
+
+
 def _register_scheduled_jobs() -> None:
     for job in registry.all_scheduled_jobs():
         try:
-            scheduler.add_job(job.func, trigger=job.trigger, id=job.id, replace_existing=True, **job.kwargs)
-            log.info("Registered scheduled job '%s' (%s)", job.id, job.trigger)
+            func = job.func
+            if getattr(job, "queued", False) and job.skill and job.action:
+                func = _enqueue_scheduled(job.id, job.skill, job.action)
+            scheduler.add_job(func, trigger=job.trigger, id=job.id, replace_existing=True, **job.kwargs)
+            log.info("Registered scheduled job '%s' (%s)%s", job.id, job.trigger,
+                     " [queued]" if getattr(job, "queued", False) else "")
         except Exception:  # noqa: BLE001
             log.exception("Could not register scheduled job '%s'", job.id)
 

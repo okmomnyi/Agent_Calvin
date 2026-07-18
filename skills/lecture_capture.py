@@ -84,7 +84,8 @@ class LectureCaptureSkill(BaseSkill):
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
         return [ScheduledJob(id="lecture.inbox", func=self.process_inbox, trigger="interval",
-                             kwargs={"minutes": 10})]
+                             kwargs={"minutes": 10},
+                             queued=True, skill="lecture_capture", action="process_inbox")]
 
     # ------------------------------------------------------------- inbox
     def process_inbox(self, **_: Any) -> CommandResult:

@@ -80,6 +80,17 @@ class ScheduledJob:
     func: Callable[..., Any]
     trigger: str = "interval"
     kwargs: dict[str, Any] = field(default_factory=dict)
+    # Heavy work (scraping, transcription, embedding, batch LLM calls) belongs on the queue,
+    # not in the API process: when the timer fires, ENQUEUE and let a worker run it. Set this
+    # and the job stops competing with /api/command — which is what Calvin talks to — and
+    # gains retries, backoff and visibility for free (Phase 26).
+    #
+    # `queued=True` requires (skill, action) so the worker can dispatch it by NAME. A queued
+    # row must never hold a pickled callable: a worker on a newer image has to be able to run
+    # a row enqueued by an older one.
+    queued: bool = False
+    skill: str = ""
+    action: str = ""
 
 
 @dataclass

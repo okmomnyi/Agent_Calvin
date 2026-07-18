@@ -176,3 +176,85 @@ def test_the_score_handler_is_registered_for_workers():
     import skills.job_hunter.skill  # noqa: F401  (import registers it)
 
     assert "job_hunter.score_one" in registered()
+
+
+# ================================================================= scheduled -> queued
+def test_heavy_scheduled_jobs_are_routed_to_the_queue():
+    """Scraping, transcription and embedding must not run inside the API process.
+
+    A 6-hourly hunt or a 10-minute transcription pass competing with /api/command is what
+    made the API feel slow; queued, they get a worker, retries and visibility instead.
+    """
+    from kernel.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    registry.discover()
+    queued = {j.id for j in registry.all_scheduled_jobs() if getattr(j, "queued", False)}
+    for heavy in ("job_hunter.hunt", "lecture.inbox", "vault.ingest", "flip.scan", "events.scan"):
+        assert heavy in queued, f"{heavy} still runs in the API process"
+
+
+def test_every_queued_job_names_a_real_skill_action():
+    """A queued row dispatches by NAME; a typo would fail silently every time it fired."""
+    from kernel.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    registry.discover()
+    for job in registry.all_scheduled_jobs():
+        if not getattr(job, "queued", False):
+            continue
+        assert job.skill and job.action, f"{job.id} is queued but names no skill/action"
+        skill = registry.get(job.skill)
+        assert skill is not None, f"{job.id} -> unknown skill {job.skill!r}"
+        assert job.action in skill.commands(), f"{job.id} -> {job.skill} has no {job.action!r}"
+
+
+def test_light_jobs_still_run_inline():
+    """Not everything belongs on the queue: a 2-second no-op tick would just add latency."""
+    from kernel.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    registry.discover()
+    inline = {j.id for j in registry.all_scheduled_jobs() if not getattr(j, "queued", False)}
+    assert "music.session_tick" in inline
+    assert "planner.briefing" in inline
+
+
+def test_skill_run_handler_dispatches(mem, monkeypatch):
+    from core.queue import run_skill
+
+    calls = []
+
+    class _FakeSkill:
+        name = "faker"
+
+        def commands(self):
+            return {"go": lambda **kw: type("R", (), {"text": f"ran {kw}"})()}
+
+    class _Reg:
+        def discover(self): pass
+        def get(self, name): return _FakeSkill() if name == "faker" else None
+
+    monkeypatch.setattr("kernel.registry.SkillRegistry", lambda: _Reg())
+    out = run_skill(skill="faker", action="go", n=1)
+    assert "ran" in out
+
+
+def test_skill_run_fails_loudly_on_a_bad_target(mem, monkeypatch):
+    from core.queue import run_skill
+
+    class _Reg:
+        def discover(self): pass
+        def get(self, name): return None
+
+    monkeypatch.setattr("kernel.registry.SkillRegistry", lambda: _Reg())
+    with pytest.raises(RuntimeError, match="unknown skill"):
+        run_skill(skill="ghost", action="go")
+
+
+def test_a_slow_scheduled_run_does_not_stack_up_copies(q):
+    """The timer fires every 6h; if the previous run is still draining, don't queue another."""
+    assert q.enqueue("skill.run", {"skill": "job_hunter", "action": "hunt"},
+                     dedupe_key="sched:job_hunter.hunt") is not None
+    assert q.enqueue("skill.run", {"skill": "job_hunter", "action": "hunt"},
+                     dedupe_key="sched:job_hunter.hunt") is None

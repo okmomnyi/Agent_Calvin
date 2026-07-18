@@ -110,7 +110,8 @@ class DealBrokerSkill(BaseSkill):
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
         return [
-            ScheduledJob(id="flip.scan", func=self.scan, trigger="interval", kwargs={"hours": 6}),
+            ScheduledJob(id="flip.scan", func=self.scan, trigger="interval", kwargs={"hours": 6},
+                         queued=True, skill="deal_broker", action="scan"),
             ScheduledJob(id="flip.expire", func=self.expire_stale, trigger="interval",
                          kwargs={"minutes": 30}),
             ScheduledJob(id="flip.digest", func=self.digest, trigger="cron", kwargs={"hour": 18}),

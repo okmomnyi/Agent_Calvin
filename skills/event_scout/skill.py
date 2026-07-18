@@ -64,7 +64,8 @@ class EventScoutSkill(BaseSkill):
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
         return [
-            ScheduledJob(id="events.scan", func=self.scan, trigger="interval", kwargs={"hours": 12}),
+            ScheduledJob(id="events.scan", func=self.scan, trigger="interval", kwargs={"hours": 12},
+                         queued=True, skill="event_scout", action="scan"),
             ScheduledJob(id="events.digest", func=self.digest, trigger="cron",
                          kwargs={"day_of_week": "mon", "hour": 8}),
             ScheduledJob(id="events.closing", func=self.closing_soon, trigger="interval",

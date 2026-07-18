@@ -153,7 +153,8 @@ class JobHunterSkill(BaseSkill):
     def scheduled_jobs(self) -> list[ScheduledJob]:
         return [
             ScheduledJob(id="job_hunter.hunt", func=self.hunt, trigger="interval",
-                         kwargs={"hours": 6}),
+                         kwargs={"hours": 6},
+                         queued=True, skill="job_hunter", action="hunt"),
             ScheduledJob(id="job_hunter.report", func=self.report, trigger="cron",
                          kwargs={"day_of_week": "sun", "hour": 18, "minute": 0}),
             ScheduledJob(id="job_hunter.interview_check", func=self.interview_check,

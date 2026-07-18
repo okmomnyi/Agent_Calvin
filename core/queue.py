@@ -215,3 +215,25 @@ def get_queue() -> JobQueue:
     if _queue is None:
         _queue = JobQueue()
     return _queue
+
+
+@handler("skill.run")
+def run_skill(skill: str, action: str, **kwargs: Any) -> str:
+    """Dispatch a skill action in a worker. The bridge between the scheduler and the queue.
+
+    Referenced by NAME from a queued row, so the payload is just strings — a worker running a
+    newer image can still drain rows enqueued by an older one. This is what lets any heavy
+    scheduled job move off the API process without rewriting the skill.
+    """
+    from kernel.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    registry.discover()
+    target = registry.get(skill)
+    if target is None:
+        raise RuntimeError(f"unknown skill {skill!r}")
+    fn = target.commands().get(action)
+    if fn is None:
+        raise RuntimeError(f"skill {skill!r} has no action {action!r}")
+    result = fn(**kwargs)
+    return getattr(result, "text", str(result))[:2000]

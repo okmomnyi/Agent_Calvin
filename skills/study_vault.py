@@ -77,7 +77,8 @@ class VaultSkill(BaseSkill):
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
         return [ScheduledJob(id="vault.ingest", func=self.ingest, trigger="interval",
-                             kwargs={"minutes": 10})]
+                             kwargs={"minutes": 10},
+                         queued=True, skill="vault", action="ingest")]
 
     # ------------------------------------------------------------- ingest
     def ingest(self, unit: str = "", **_: Any) -> CommandResult:
