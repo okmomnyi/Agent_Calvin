@@ -500,3 +500,85 @@ def test_is_premium_reads_the_product_field():
     # the missing-scope case: absent field must not masquerade as a definite "free"
     c.me = lambda: {"display_name": "Calvin"}
     assert c.is_premium() is False
+
+
+# ================================================================= continuous session (Phase 27)
+def test_session_starts_queues_and_plays(music):
+    skill, sp, _, _ = music
+    res = skill.start_session(cue="afrobeats")
+    assert res.data["session"] is True
+    assert sp.queued, "nothing was queued to start the session"
+    assert getattr(sp, "played", False) is True
+
+
+def test_session_survives_the_laptop_and_keeps_topping_up(music):
+    """The whole point of server-driven: the droplet tops the queue up on a timer."""
+    skill, sp, _, _ = music
+    skill.start_session(cue="focus")
+    before = len(sp.queued)
+    out = skill.session_tick()
+    assert out.data["topped_up"] > 0
+    assert len(sp.queued) > before
+
+
+def test_tick_does_nothing_when_no_session_is_running(music):
+    """A timer that acts unasked is how music starts by itself at 3am."""
+    skill, sp, _, _ = music
+    out = skill.session_tick()
+    assert out.data["topped_up"] == 0
+    assert sp.queued == []
+
+
+def test_stop_ends_the_session_and_pauses(music):
+    skill, sp, _, _ = music
+    skill.start_session()
+    res = skill.stop_session()
+    assert res.data["session"] is False
+    assert getattr(sp, "paused", False) is True
+    # after stopping, the tick must not queue anything more
+    sp.queued.clear()
+    skill.session_tick()
+    assert sp.queued == []
+
+
+def test_stop_is_honest_that_queued_tracks_still_play(music):
+    """Spotify has no clear-queue API. Claiming silence would be a small lie."""
+    skill, _, _, _ = music
+    skill.start_session()
+    text = skill.stop_session().text.lower()
+    assert "already-queued" in text or "may still play" in text
+
+
+def test_session_status_reports_state(music):
+    skill, _, _, _ = music
+    assert skill.session_status().data["active"] is False
+    skill.start_session(cue="deep house")
+    st = skill.session_status()
+    assert st.data["active"] is True and "deep house" in st.text
+
+
+def test_a_device_that_disappears_does_not_kill_the_session(music):
+    """Laptop closes mid-session: keep it alive so reopening Spotify resumes."""
+    skill, sp, _, _ = music
+    skill.start_session()
+
+    def gone():
+        raise SpotifyError("No active Spotify device — open Spotify somewhere first.")
+
+    sp.now_playing = gone
+    out = skill.session_tick()
+    assert out.data["topped_up"] == 0
+    assert skill.session_status().data["active"] is True, "session was killed by a sleeping laptop"
+
+
+def test_starting_without_a_device_asks_the_laptop_to_open_spotify(music):
+    skill, sp, _, _ = music
+    sp.devices = lambda: []
+    res = skill.start_session()
+    assert res.ok is False and "open spotify" in res.text.lower()
+
+
+def test_the_session_tick_is_scheduled(music):
+    skill, _, _, _ = music
+    ids = {j.id for j in skill.scheduled_jobs()}
+    assert "music.session_tick" in ids, "nothing would ever top the queue up"

@@ -41,6 +41,10 @@ from core.spotify import SpotifyClient, SpotifyError
 log = get_logger("skills.music")
 
 _TASTE_KV = "music.taste"
+_SESSION_KV = "music.session"
+# How many tracks to keep queued ahead. Small enough that a "stop" takes effect within a
+# track or two -- Spotify has no API to clear a queue, so anything already queued WILL play.
+SESSION_LOOKAHEAD = 4
 TIME_RANGES = ("short_term", "medium_term", "long_term")
 
 # Substring of core.spotify's 404 message. Matched rather than typed as its own exception
@@ -98,11 +102,20 @@ class MusicSkill(BaseSkill):
             "play": self.play, "pause": self.pause, "next": self.next_track,
             "previous": self.previous_track, "volume": self.volume, "devices": self.devices,
             "now_playing": self.now_playing,
+            "start_session": self.start_session, "stop_session": self.stop_session,
+            "session_status": self.session_status, "session_tick": self.session_tick,
         }
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
-        return [ScheduledJob(id="music.taste", func=self.taste, trigger="cron",
-                             kwargs={"day_of_week": "sun", "hour": 4})]
+        return [
+            ScheduledJob(id="music.taste", func=self.taste, trigger="cron",
+                         kwargs={"day_of_week": "sun", "hour": 4}),
+            # The heartbeat that makes a session continuous. It no-ops unless one is running,
+            # so this is cheap; 4 minutes is under the length of most tracks, so the queue
+            # never actually runs dry between ticks.
+            ScheduledJob(id="music.session_tick", func=self.session_tick, trigger="interval",
+                         kwargs={"minutes": 4}),
+        ]
 
     def contract(self) -> SkillContract:
         """Declares 'music', so rules like 'no explicit before 8am' finally have a reader."""
@@ -301,6 +314,104 @@ class MusicSkill(BaseSkill):
         return CommandResult(text=f"▶️ Queued {len(queued)} track(s){note}:\n" +
                                   "\n".join(f"  • {q}" for q in queued),
                              data={"queued": queued, "filters": filters})
+
+    # ------------------------------------------------------------- continuous session
+    def start_session(self, cue: str = "", **_: Any) -> CommandResult:
+        """Keep music going until told to stop, driven from the SERVER.
+
+        The point is that it survives Calvin's laptop sleeping: the droplet holds the session
+        and tops the queue up on a timer, so playback continues on whichever Spotify device is
+        active. The droplet has no speakers and is not a playback device -- it is the DJ, not
+        the stereo.
+        """
+        cue = (cue or "").strip()
+        try:
+            devices = self.sp.devices()
+        except SpotifyError as exc:
+            return self._no_device(exc) if _NO_DEVICE in str(exc) else CommandResult(
+                text=str(exc), ok=False)
+        if not devices:
+            return CommandResult(
+                text="No active Spotify device. Open Spotify on your laptop or phone and play "
+                     "anything for a second, then say 'start the session' again.", ok=False)
+
+        self.mem.kv_set(_SESSION_KV, json.dumps({
+            "active": True, "cue": cue, "started_at": self._now(),
+            "last_topup": 0.0, "queued_total": 0}))
+        first = self.auto_queue(cue=cue, count=SESSION_LOOKAHEAD)
+        try:
+            self.sp.play()
+        except SpotifyError:
+            pass                      # already playing is fine
+        where = devices[0].get("name", "your device")
+        return CommandResult(
+            text=(f"🎵 Session started on {where}"
+                  + (f" — {cue}" if cue else "") + ".\n"
+                  "I'll keep the queue topped up until you say 'stop music'."),
+            data={"session": True, "cue": cue, "device": where,
+                  "queued": first.data.get("queued", [])})
+
+    def stop_session(self, **_: Any) -> CommandResult:
+        """End the session and pause. Honest about what Spotify cannot do."""
+        raw = self.mem.kv_get(_SESSION_KV)
+        was_active = bool(json.loads(raw).get("active")) if raw else False
+        self.mem.kv_set(_SESSION_KV, json.dumps({"active": False, "stopped_at": self._now()}))
+        paused = True
+        try:
+            self.sp.pause()
+        except SpotifyError:
+            paused = False
+        if not was_active:
+            return CommandResult(text="No session was running." +
+                                      ("" if paused else " (Couldn't pause — nothing playing?)"))
+        # The Web API has no "clear queue" call, so tracks already queued still exist. Saying
+        # "stopped" while 4 more songs play would be a small lie.
+        return CommandResult(
+            text=("⏹ Session stopped — I won't queue anything more."
+                  + ("" if paused else " (Couldn't pause playback.)")
+                  + f"\nUp to {SESSION_LOOKAHEAD} already-queued track(s) may still play: "
+                    "Spotify has no API to clear a queue, so skip them if you want silence."),
+            data={"session": False})
+
+    def session_status(self, **_: Any) -> CommandResult:
+        raw = self.mem.kv_get(_SESSION_KV)
+        state = json.loads(raw) if raw else {}
+        if not state.get("active"):
+            return CommandResult(text="🔇 No music session running.", data={"active": False})
+        mins = int((self._now() - float(state.get("started_at", self._now()))) / 60)
+        cue = state.get("cue") or "your taste"
+        return CommandResult(
+            text=f"🎵 Session running {mins} min — {cue}. "
+                 f"{state.get('queued_total', 0)} track(s) queued so far. Say 'stop music' to end.",
+            data={"active": True, **state})
+
+    def session_tick(self, **_: Any) -> CommandResult:
+        """Scheduled top-up. The thing that makes the session CONTINUOUS.
+
+        Runs on the droplet, so it keeps working while the laptop is closed. Does nothing
+        unless a session is active -- this is on a timer, and a timer that acts without being
+        asked is how you get music starting by itself at 3am.
+        """
+        raw = self.mem.kv_get(_SESSION_KV)
+        state = json.loads(raw) if raw else {}
+        if not state.get("active"):
+            return CommandResult(text="No session active.", data={"topped_up": 0})
+        try:
+            playing = self.sp.now_playing()
+        except SpotifyError as exc:
+            # Device went away (laptop closed, phone off). Keep the session ALIVE rather than
+            # killing it: he'll reopen Spotify and expect it to resume.
+            return CommandResult(text=f"Session paused — {exc}", data={"topped_up": 0}, ok=False)
+        if not playing or not playing.get("item"):
+            return CommandResult(text="Nothing playing right now; leaving the session alone.",
+                                 data={"topped_up": 0})
+
+        res = self.auto_queue(cue=state.get("cue", ""), count=SESSION_LOOKAHEAD)
+        n = len(res.data.get("queued", []))
+        state["last_topup"] = self._now()
+        state["queued_total"] = int(state.get("queued_total", 0)) + n
+        self.mem.kv_set(_SESSION_KV, json.dumps(state))
+        return CommandResult(text=f"Topped up {n} track(s).", data={"topped_up": n})
 
     # ------------------------------------------------------------- playlists
     def playlist(self, theme: str = "", count: int = 20, **_: Any) -> CommandResult:

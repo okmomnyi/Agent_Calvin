@@ -68,6 +68,9 @@ INTENTS: dict[str, tuple[str, str]] = {
     "close_app":       ("desktop", "close"),
     "focus_app":       ("desktop", "focus"),
     "list_apps":       ("desktop", "apps"),
+    "music_start":     ("music", "start_session"),
+    "music_stop":      ("music", "stop_session"),
+    "music_status":    ("music", "session_status"),
     "chit_chat":       ("chat", "reply"),
 }
 
@@ -141,6 +144,18 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     # and anchored to the end of the utterance: "start"/"open" are common verbs elsewhere
     # ("start a mock interview"), so these must never win ahead of a real skill. An app we
     # don't know still lands here and gets an honest "I don't have that set up".
+    # Music session (Phase 27). Ahead of the desktop open/close rules, whose generic verbs
+    # ("close ...", "start ...") would otherwise swallow "stop the music".
+    ("music_stop", re.compile(
+        r"\b(?:stop|kill|end|pause)\s+(?:the\s+)?music\b"
+        r"|\bstop\s+(?:the\s+)?(?:music\s+)?session\b|\bmusic\s+off\b", re.I), None),
+    ("music_status", re.compile(
+        r"\b(?:music|listening)\s+session\s+status\b|\bwhat(?:'?s| is)\s+playing\b"
+        r"|\bis\s+(?:the\s+)?music\s+(?:still\s+)?(?:on|running|playing)\b", re.I), None),
+    ("music_start", re.compile(
+        r"\b(?:start|play|put\s+on)\s+(?:some\s+|the\s+)?music\b"
+        r"|\bstart\s+(?:a\s+|the\s+)?(?:music\s+)?session\b"
+        r"|\bkeep\s+(?:the\s+)?music\s+(?:going|playing)\b", re.I), None),
     ("list_apps", re.compile(r"\b(?:what|which) apps\b|\blist apps\b", re.I), None),
     ("open_app", re.compile(
         r"\b(?:open|launch|fire up)\s+(?:the\s+|my\s+)?(?P<a>[\w .+-]{1,30})$", re.I), "app"),
