@@ -30,11 +30,35 @@ class Score:
     unpaid: bool = False
 
 
-def _profile_text() -> str:
+def _profile_lists() -> tuple[list, list, list]:
+    """Primary/secondary/also — from MEMORY if Calvin has overridden them, else config.
+
+    The config lists are the seed, not the source of truth: a runtime override in the kv table
+    (set via `/profile primary ...`) wins, so his focus can shift without a redeploy. This is
+    the "should be memory, not hardcoded" point -- the profile follows him.
+    """
     s = get_settings()
     primary = s.get("jobs", "primary", default=[])
     secondary = s.get("jobs", "secondary", default=[])
     also = s.get("jobs", "also", default=[])
+    try:
+        from core.memory import get_memory
+
+        override = get_memory().kv_get("jobs.profile_override")
+        if override:
+            import json
+
+            data = json.loads(override)
+            primary = data.get("primary", primary)
+            secondary = data.get("secondary", secondary)
+            also = data.get("also", also)
+    except Exception:  # noqa: BLE001 - a bad/absent override just means use config
+        pass
+    return primary, secondary, also
+
+
+def _profile_text() -> str:
+    primary, secondary, also = _profile_lists()
     return (
         "Calvin's target profile:\n"
         f"- PRIMARY (score high): {primary}\n"

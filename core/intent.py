@@ -118,9 +118,16 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     ("answer_form", re.compile(r"\b(?:answer|help me (?:with|answer)) (?:this )?form\b", re.I), None),
     ("summarize_inbox", re.compile(r"\bsummari[sz]e (?:my )?inbox\b", re.I), None),
     ("restore_email", re.compile(r"\b(?:undo|restore) (?:the )?(?:last )?(?:email )?trash\b", re.I), None),
+    # Robust to real phrasing. The old rule needed "emails" immediately after the verb, so
+    # "delete all THE emails related to okx", "delete all LINKEDIN emails", and "CLEAR ..."
+    # (clear wasn't even a verb) all missed and got guessed as 'tutor'. Now: any delete-ish
+    # verb + the word email(s) anywhere -> capture the whole span as the query. email_agent
+    # strips the filler and previews; nothing is deleted without a second confirmation.
     ("trash_email", re.compile(
-        r"\b(?:delete|trash|remove)\s+(?:some\s+)?(?:of\s+)?(?:my\s+)?emails?"
-        r"(?:\s+(?P<t>.+))?$", re.I), "query"),
+        r"\b(?:delete|trash|remove|clear|clean\s+(?:up|out)|get\s+rid\s+of)\b"
+        r"(?P<t>.*\bemails?\b.*)", re.I), "query"),
+    ("trash_email", re.compile(
+        r"\b(?:delete|trash|remove|clear)\b(?P<t>.*)", re.I), "query"),
     ("check_email", re.compile(r"\bcheck (?:my )?(?:email|inbox|mail)\b|\bany (?:new )?email\b", re.I), None),
     # Desktop app control (Phase 23) — laptop-side, voice only. Deliberately late in the list
     # and anchored to the end of the utterance: "start"/"open" are common verbs elsewhere

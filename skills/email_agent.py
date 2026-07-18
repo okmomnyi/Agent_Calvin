@@ -406,8 +406,23 @@ def _extract_email(addr: str) -> str:
 
 
 def _clean_delete_query(text: str) -> str:
+    """Reduce a spoken delete request to the thing being searched for.
+
+    "all the emails related to okx that are not transactional" -> "okx". Calvin talks in
+    sentences; Gmail wants a term. We strip the command scaffolding and keep the entity, then
+    the PREVIEW shows exactly what matched so he confirms before anything moves.
+    """
     cleaned = (text or "").strip().strip(".?!")
-    if re.fullmatch(r"(?:some\s+)?(?:of\s+)?(?:my\s+)?emails?", cleaned, re.I):
+    # peel leading command scaffolding: "all/the/some/of/my ... emails ... related to/about/from"
+    cleaned = re.sub(r"^\s*(?:can you\s+|please\s+)?", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b(?:all|any|the|some|of|my)\b", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bemails?\b", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b(?:related to|about|regarding|to do with|associated with)\b", " ",
+                     cleaned, flags=re.I)
+    # drop trailing qualifiers we can't express in a Gmail query ("that are not transactional")
+    cleaned = re.sub(r"\bthat (?:are|is)?\s*not\b.*$", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.")
+    if re.fullmatch(r"(?:some\s+)?(?:of\s+)?(?:my\s+)?emails?", cleaned, re.I) or not cleaned:
         return ""
     return cleaned
 
@@ -428,8 +443,12 @@ def _gmail_query(text: str) -> str:
         suffix = {"day": "d", "days": "d", "month": "m", "months": "m",
                   "year": "y", "years": "y"}[match.group(2).lower()]
         return f"older_than:{match.group(1)}{suffix}"
-    if cleaned.lower() in {"promotions", "promotion", "promotional emails"}:
+    if cleaned.lower() in {"promotions", "promotion", "promotional", "promotional emails"}:
         return "category:promotions"
+    if cleaned.lower() in {"social", "social emails"}:
+        return "category:social"
+    # A bare brand/word ("linkedin", "okx", "facebook", "indie games") -> full-text search,
+    # which matches the sender domain and the body. Preview lets Calvin see what it caught.
     return cleaned
 
 

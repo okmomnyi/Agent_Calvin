@@ -165,3 +165,51 @@ def test_interview_watcher_alerts_on_invite(fake_settings, mem):
     again = skill.interview_check(messages=msgs)
     assert again.data["alerts"] == 0
     assert notify.call_count == 1
+
+
+def test_approve_auto_tailors_cv_and_notifies(fake_settings, mem):
+    """Calvin's ask: on approval, tailor the CV to the role, then apply, then notify.
+
+    The tailorer and notifier are injected, so no LLM/Telegram is touched. The master CV is
+    never involved here -- cv_tailor writes variants only -- so this asserts the wiring:
+    tailor is called with the job id, and a confirmation goes out.
+    """
+    llm = _HuntLLM({"DevOps Engineer": (85, "cloud_devops")})
+    mailer = MagicMock()
+    notify = MagicMock()
+    tailor = MagicMock()
+    tailor.tailor.return_value = type("R", (), {
+        "ok": True, "data": {"variant": "data/cv/variants/acme.md",
+                             "ats_before": 40, "ats_after": 72}})()
+    skill = _skill([_FakeSource("remoteok", [_email_job()])], llm, mem, mailer,
+                   notify=notify)
+    skill._cv_tailor = tailor
+    skill.hunt(notify=False)
+    job_id = mem.get_job_by_ref("remoteok", "e1")["id"]
+
+    result = skill.approve(selection=[job_id])
+    # tailored to THIS job before applying
+    tailor.tailor.assert_called_once()
+    assert tailor.tailor.call_args.kwargs["job_id"] == job_id
+    # applied, and a confirmation was pushed
+    assert job_id in result.data["applied"]
+    notify.assert_called_once()
+    assert "Application update" in notify.call_args.args[0]
+    assert "72" in notify.call_args.args[0]        # the ATS lift is reported
+
+
+def test_approve_still_applies_when_tailoring_fails(fake_settings, mem):
+    """A tailoring failure (LLM down, like the NIM timeouts) must not block the application."""
+    llm = _HuntLLM({"DevOps Engineer": (85, "cloud_devops")})
+    mailer = MagicMock()
+    tailor = MagicMock()
+    tailor.tailor.side_effect = RuntimeError("NIM timed out")
+    skill = _skill([_FakeSource("remoteok", [_email_job()])], llm, mem, mailer,
+                   notify=MagicMock())
+    skill._cv_tailor = tailor
+    skill.hunt(notify=False)
+    job_id = mem.get_job_by_ref("remoteok", "e1")["id"]
+
+    result = skill.approve(selection=[job_id])
+    assert job_id in result.data["applied"]        # applied anyway
+    assert mailer.send_application.call_count == 1

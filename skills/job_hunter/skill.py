@@ -43,6 +43,7 @@ class JobHunterSkill(BaseSkill):
         mailer: ApplicationMailer | None = None,
         prep: Any | None = None,
         notify: Callable[[str], bool] | None = None,
+        cv_tailor: Any | None = None,
     ) -> None:
         self._llm = llm
         self._mem = memory
@@ -55,6 +56,7 @@ class JobHunterSkill(BaseSkill):
         self._sources = list(sources) if sources is not None else None
         self._mailer = mailer
         self._prep = prep
+        self._cv_tailor = cv_tailor
 
     # lazy deps
     @property
@@ -90,6 +92,15 @@ class JobHunterSkill(BaseSkill):
             self._prep = prep_skill
         return self._prep
 
+    @property
+    def cv_tailor(self):
+        """CV tailoring skill (Phase 15), injected in tests so no live LLM call happens."""
+        if self._cv_tailor is None:
+            from skills.cv_tailor import SKILL as cv_skill
+
+            self._cv_tailor = cv_skill
+        return self._cv_tailor
+
     def contract(self) -> SkillContract:
         return SkillContract(reads_categories=["jobs", "cv", "tone", "notifications"])
 
@@ -102,7 +113,41 @@ class JobHunterSkill(BaseSkill):
             "report": self.report,
             "watch": self.watch,
             "interview_check": self.interview_check,
+            "profile": self.profile,
         }
+
+    def profile(self, tier: str = "", roles: str = "", **_: Any) -> CommandResult:
+        """View or edit the job target profile at runtime (stored in memory, survives deploys).
+
+        `profile` alone shows it. `profile primary <roles>` rewrites a tier -- so Calvin can
+        steer what "related jobs" means without a redeploy. This is the "not hardcoded, more
+        like memory" ask: the config lists are only the seed; whatever he sets here wins.
+        """
+        import json
+
+        from skills.job_hunter.scoring import _profile_lists
+
+        current = self.mem.kv_get("jobs.profile_override")
+        data = json.loads(current) if current else {}
+        p, s, a = _profile_lists()
+        if not tier:
+            return CommandResult(
+                text=("🎯 Job target profile"
+                      + (" (customised)" if current else " (from config)") + ":\n"
+                      f"PRIMARY: {'; '.join(p)}\n"
+                      f"SECONDARY: {'; '.join(s)}\n"
+                      f"ALSO: {'; '.join(a)}\n\n"
+                      "Edit: `profile primary cloud engineer, DevOps, SRE`"),
+                data={"primary": p, "secondary": s, "also": a})
+        tier = tier.lower().strip()
+        if tier not in ("primary", "secondary", "also"):
+            return CommandResult(text="Tier must be primary, secondary or also.", ok=False)
+        if not roles.strip():
+            return CommandResult(text=f"Give me the roles for {tier}, comma-separated.", ok=False)
+        data[tier] = [r.strip() for r in roles.split(",") if r.strip()]
+        self.mem.kv_set("jobs.profile_override", json.dumps(data))
+        return CommandResult(text=f"✅ Updated {tier}. Next hunt scores against your new profile.",
+                             data={tier: data[tier]})
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
         return [
@@ -259,21 +304,31 @@ class JobHunterSkill(BaseSkill):
         if not ids:
             return CommandResult(text="Nothing to approve — give me job numbers (e.g. approve 1,3).",
                                  ok=False)
-        applied, manual, missing = [], [], []
+        applied, manual, missing, tailored_notes = [], [], [], []
         for job_id in ids:
             job = self.mem.get_job(int(job_id))
             if job is None:
                 missing.append(job_id)
                 continue
+            # Auto-tailor the CV to THIS role before applying (Calvin's ask): a variant that
+            # mirrors the job's terminology and lifts the ATS score, built only from verified
+            # facts, saved to data/cv/variants/. The master CV is never touched -- cv_tailor
+            # only ever writes variants. If tailoring can't run (LLM down) it falls back to the
+            # master, so an application is never blocked on it.
+            tailored_note = self._auto_tailor(job)
+            job = self.mem.get_job(int(job_id)) or job     # re-read: variant path now linked
+
             keeper = {
                 "id": job["id"], "company": job["company"], "source": job["source"],
                 "category": job["category"], "apply_kind": job["apply_kind"],
                 "apply_target": job["apply_target"], "title": job["title"],
                 "cover": job["cover_text"] or "", "cv_variant": job["cv_variant"],
+                "tailored_note": tailored_note,
             }
             if job["apply_kind"] == "email" and job["apply_target"]:
                 if self._send_application(keeper):
                     applied.append(job_id)
+                    tailored_notes.append(f"[{job_id}] {tailored_note}")
             else:  # portal / notify_only — Calvin applies via the link; we just track it
                 self.mem.record_application(
                     job_id=job["id"], company=job["company"], source=job["source"],
@@ -281,16 +336,45 @@ class JobHunterSkill(BaseSkill):
                     notes=f"{job['apply_kind']} apply: {job['apply_target']}",
                 )
                 manual.append(job_id)
+                tailored_notes.append(f"[{job_id}] {tailored_note} (apply via link)")
 
         parts = []
         if applied:
-            parts.append(f"Sent {len(applied)} application(s) by email: {applied}.")
+            parts.append(f"✅ Sent {len(applied)} application(s) by email: {applied}.")
         if manual:
-            parts.append(f"Tracked {len(manual)} portal/notify job(s) — apply via the link: {manual}.")
+            parts.append(f"📌 Tracked {len(manual)} portal/notify job(s) — apply via the link: {manual}.")
+        if tailored_notes:
+            parts.append("CV: " + "; ".join(tailored_notes) + ".")
         if missing:
             parts.append(f"Unknown job id(s): {missing}.")
-        return CommandResult(text=" ".join(parts) or "Nothing approved.",
+        summary = " ".join(parts) or "Nothing approved."
+        # Confirm the application back to Calvin (his ask: notified in Telegram AND on /status).
+        # Only when something actually happened, and never from a test (injected notifier).
+        if applied or manual:
+            self._notify(f"📨 Application update:\n{summary}")
+        return CommandResult(text=summary,
                              data={"applied": applied, "manual": manual, "missing": missing})
+
+    def _auto_tailor(self, job: dict[str, Any]) -> str:
+        """Tailor the CV to this job on approval. Returns a short note for the confirmation.
+
+        Best-effort: a tailoring failure (LLM down, no master CV) must never block the
+        application -- _send_application falls back to the master CV. Only runs if there is a
+        master CV to tailor from.
+        """
+        if job.get("cv_variant"):
+            return "used your existing tailored CV"
+        try:
+            res = self.cv_tailor.tailor(job_id=int(job["id"]), company=job.get("company") or "")
+            if res.ok and res.data.get("variant"):
+                before = res.data.get("ats_before")
+                after = res.data.get("ats_after")
+                if before is not None and after is not None:
+                    return f"tailored CV to the role (ATS {before}→{after}/100)"
+                return "tailored CV to the role"
+        except Exception:  # noqa: BLE001 - never block an application on tailoring
+            log.exception("auto-tailor failed for job %s", job.get("id"))
+        return "used your master CV (tailoring unavailable)"
 
     def _send_application(self, keeper: dict[str, Any]) -> bool:
         subject = f"Application: {keeper['title']}"

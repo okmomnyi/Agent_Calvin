@@ -35,10 +35,16 @@ llm:
 
 # --- Job hunter target profile (Phase 3) — editable ---
 jobs:
+  # PRIMARY is what the scorer ranks highest. Cloud/DevOps leads because that is the field
+  # Calvin is building toward -- the digests were surfacing transcription voice-artist roles
+  # over SRE/DevOps ones purely because this list said so. Editable at runtime, not just here:
+  # `/profile primary cloud engineer, DevOps` rewrites it (stored in memory, survives deploys),
+  # so it can track where his focus actually goes instead of staying frozen in this file.
   primary:
-    - remote transcription (general, Swahili/English bilingual, audio QC, subtitling, captioning, audio data annotation)
+    - cloud computing & DevOps (junior/associate cloud engineer, DevOps engineer, cloud support engineer, SRE, site reliability, platform engineer, Linux sysadmin, NOC, IT support, AWS/GCP/Azure, Docker, Kubernetes, Terraform, CI/CD)
+    - full-stack / backend software (TypeScript, JavaScript, Node, Python, React, Next.js) — matches his GitHub
   secondary:
-    - cloud computing & DevOps (junior/associate cloud engineer, DevOps engineer, cloud support, SRE, Linux sysadmin, NOC, IT support)
+    - remote transcription (general, Swahili/English bilingual, audio QC, subtitling, captioning, audio data annotation)
   also:
     - paid internships (software, data, cloud/DevOps, localization/transcription) — remote or Nairobi
   score_threshold: 60

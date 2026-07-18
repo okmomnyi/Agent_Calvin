@@ -138,13 +138,37 @@ def test_due_is_not_confused_with_events():
 
 
 def test_email_trash_and_restore_intents(router):
+    from skills.email_agent import _clean_delete_query
+
     trash = router.route("delete some of my emails", use_llm=False)
     assert trash.name == "trash_email" and trash.skill == "email_agent"
-    assert trash.args == {}
+    # A bare "delete some of my emails" carries no real target: whatever is captured must
+    # clean to empty, so request_trash asks which ones instead of trashing everything.
+    assert _clean_delete_query(trash.args.get("query", "")) == ""
     filtered = router.route("delete my emails from LinkedIn", use_llm=False)
-    assert filtered.args["query"] == "from LinkedIn"
+    assert "linkedin" in _clean_delete_query(filtered.args["query"]).lower()
     restore = router.route("undo email trash", use_llm=False)
     assert restore.name == "restore_email"
+
+
+def test_real_delete_phrasings_route_to_trash(router):
+    """The phrasings Calvin actually used, which the old rule missed and sent to 'tutor'."""
+    from skills.email_agent import _clean_delete_query, _gmail_query
+
+    cases = {
+        "Can you delete all the emails related to okx that are not transactional": "okx",
+        "delete all linkedin emails": "linkedin",
+        "clear all facebook emails": "facebook",
+        "get rid of indie games emails": "indie games",
+    }
+    for utterance, expected_entity in cases.items():
+        got = router.route(utterance, use_llm=False)
+        assert got.skill == "email_agent" and got.name == "trash_email", utterance
+        q = _clean_delete_query(got.args.get("query", ""))
+        assert expected_entity in q.lower(), f"{utterance!r} -> {q!r}"
+    # promotional maps to Gmail's category, not a literal text search
+    promo = router.route("delete promotional emails", use_llm=False)
+    assert _gmail_query(_clean_delete_query(promo.args["query"])) == "category:promotions"
 
 
 def test_event_action_intents_extract_exact_id(router):
