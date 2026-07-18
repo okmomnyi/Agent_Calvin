@@ -17,7 +17,12 @@ llm:
   # never changes (Principle 2: routing, never hardcoding).
   # Model IDs verified against this account's NIM catalog (GET /v1/models), then bench-tested
   # on the droplet for STRUCTURED OUTPUT -- which is what most of these tasks actually need:
-  #   qwen3.5-122b-a10b   3/3 valid JSON,  3.3s   <- chosen for write/persona/code/research
+  #   llama-3.3-70b       3/3 valid JSON, ~32s   <- write/persona/research: NOT a reasoning
+  #                                                  model, so tokens buy output, not thinking
+  #   qwen3.5-122b-a10b   3/3 valid JSON,  3.3s tiny / 60-131s real  <- reasoning model: it
+  #                       spends most of its budget thinking. Fine for code review, far too
+  #                       slow for CV tailoring (blew even a 150s timeout and silently
+  #                       demoted every tailor to the fallback -> ATS 30->30).
   #   llama-3.1-8b        3/3 valid JSON,  1.1s   <- classify/voice: fast, cheap, reliable
   #   mistral-nemotron    2/3 valid JSON, 22.5s   <- flaky AND slow; rejected
   #   nemotron-3-120b     0/3 valid JSON,  3.6s   <- cannot hold a JSON contract; rejected
@@ -28,10 +33,10 @@ llm:
   routes:
     default:     { model: "meta/llama-3.1-8b-instruct" }
     classify:    { model: "meta/llama-3.1-8b-instruct", api_key_env: NVIDIA_API_KEY_FAST,     temperature: 0.0 }
-    write:       { model: "qwen/qwen3.5-122b-a10b", api_key_env: NVIDIA_API_KEY_WRITE }
-    persona:     { model: "qwen/qwen3.5-122b-a10b", api_key_env: NVIDIA_API_KEY_WRITE }
+    write:       { model: "meta/llama-3.3-70b-instruct", api_key_env: NVIDIA_API_KEY_WRITE }
+    persona:     { model: "meta/llama-3.3-70b-instruct", api_key_env: NVIDIA_API_KEY_WRITE }
     code_review: { model: "qwen/qwen3.5-122b-a10b", api_key_env: NVIDIA_API_KEY_CODE }
-    research:    { model: "qwen/qwen3.5-122b-a10b", api_key_env: NVIDIA_API_KEY_RESEARCH, max_tokens: 1500 }
+    research:    { model: "meta/llama-3.3-70b-instruct", api_key_env: NVIDIA_API_KEY_RESEARCH, max_tokens: 1500 }
     voice_chat:  { model: "meta/llama-3.1-8b-instruct", api_key_env: NVIDIA_API_KEY_FAST }
 
   # generation defaults (used when a route/call doesn't override them)
