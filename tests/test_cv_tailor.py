@@ -104,9 +104,12 @@ def test_tailor_never_adds_unverified_flags_gap(cv, mem):
     res = skill.tailor(target=jd, company="Acme")
     assert "kubernetes" in res.data["fabricated"]           # unsupported term flagged
     assert any("Kubernetes" in g for g in res.data["gaps"]) # gap surfaced, not silently added
-    assert Path(res.data["variant"]).exists()               # variant saved (never touches master)
+    variant = Path(res.data["variant"])
+    assert variant.exists()                                 # variant saved (never touches master)
+    assert variant.suffix == ".pdf"                         # what an employer receives
     assert res.data["ats_after"] >= res.data["ats_before"]
-    saved = Path(res.data["variant"]).read_text(encoding="utf-8").lower()
+    # the .md sibling is the editable source; read that for content assertions
+    saved = variant.with_suffix(".md").read_text(encoding="utf-8").lower()
     assert "kubernetes" not in saved
 
 

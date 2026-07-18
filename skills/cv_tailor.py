@@ -308,13 +308,36 @@ class CvTailorSkill(BaseSkill):
         return target, None
 
     def _save_variant(self, job_id: int | str, company: str, markdown: str) -> Path:
+        """Write the variant and return the PDF -- the thing an employer actually receives.
+
+        The markdown is kept alongside as the editable source, but the RETURNED path is the
+        PDF, because this path is what gets attached to applications. It used to return the
+        .md, so a real employer would have been sent a raw markdown file, and Calvin's own
+        copies arrived as unformatted text pasted into an email body.
+
+        Falls back to the markdown only if rendering genuinely fails -- an application should
+        never be blocked, but it should also never silently go out as .md when a PDF was
+        possible, so the failure is logged loudly.
+        """
         vdir = self.cv_dir / "variants"
         vdir.mkdir(parents=True, exist_ok=True)
         safe = "".join(c for c in str(company) if c.isalnum() or c in " -_").strip().replace(" ", "_") or "job"
         stamp = time.strftime("%Y%m%d", time.localtime(self._now()))
-        out = vdir / f"{job_id or 'jd'}_{safe}_{stamp}.md"     # never overwrites master_cv.*
-        out.write_text(markdown, encoding="utf-8")
-        return out
+        stem = f"{job_id or 'jd'}_{safe}_{stamp}"
+        md_out = vdir / f"{stem}.md"          # never overwrites master_cv.*
+        md_out.write_text(markdown, encoding="utf-8")
+
+        try:
+            from core.cv_pdf import build_cv_pdf, extract_contact
+
+            # _master_path(), not job_hunter.find_master_cv(): job_hunter imports this module,
+            # so reaching back into it would be a circular import.
+            master = self._master_path()
+            contact = extract_contact(master) if master else None
+            return build_cv_pdf(markdown, vdir / f"{stem}.pdf", contact)
+        except Exception:  # noqa: BLE001
+            log.exception("CV PDF rendering failed — falling back to markdown for %s", stem)
+            return md_out
 
 
 SKILL = CvTailorSkill()
