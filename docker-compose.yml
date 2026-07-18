@@ -21,6 +21,11 @@ x-agentos-base: &agentos-base
     # container `localhost` is the container itself — the app would dial itself and hang.
     # Compose resolves `environment` after `env_file`, so this wins.
     DATABASE_URL: postgresql://${POSTGRES_USER:-agentos}:${POSTGRES_PASSWORD:-agentos}@db:5432/${POSTGRES_DB:-agentos}
+    # Same reason as DATABASE_URL: .env holds a HOST dsn (localhost:5433) and inside a
+    # container localhost is the container. Without this override `manage.py selftest` run in
+    # the api container fails every service with psycopg.OperationalError — the tests are
+    # fine, they just cannot reach a database.
+    TEST_DATABASE_URL: postgresql://${POSTGRES_USER:-agentos}:${POSTGRES_PASSWORD:-agentos}@db:5432/${POSTGRES_DB:-agentos}_test
     # On a volume, not in the image: the Gmail client rewrites it on every token refresh.
     GOOGLE_TOKEN_PATH: /app/secrets/token.json
     TZ: ${AGENTOS_TZ:-Africa/Nairobi}
