@@ -86,14 +86,18 @@ def _parse(output: str) -> tuple[int, int, list[str]]:
         line = raw.strip()
         if line.startswith("FAILED ") or line.startswith("ERROR "):
             names.append(line.split(" - ")[0].replace("FAILED ", "").replace("ERROR ", "")[:80])
-        # e.g. "12 passed, 2 failed in 3.4s"
+        # e.g. "12 passed, 2 failed in 3.4s" -- a count only counts when a NUMBER precedes the
+        # word. `last` starts as None because pytest also prints bare prose containing these
+        # words ("ERROR: file or directory not found: tests/x.py"), and reading a number that
+        # was never there crashed the whole run with UnboundLocalError.
         if " passed" in line or " failed" in line or " error" in line:
+            last: str | None = None
             for chunk in line.replace(",", " ").split():
                 if chunk.isdigit():
                     last = chunk
-                elif chunk.startswith("passed"):
+                elif last is not None and chunk.startswith("passed"):
                     passed = max(passed, int(last))
-                elif chunk.startswith(("failed", "error")):
+                elif last is not None and chunk.startswith(("failed", "error")):
                     failed = max(failed, int(last))
     return passed, failed, names
 

@@ -157,3 +157,31 @@ def test_a_pass_must_carry_a_real_test_count(tmp_path):
     assert res.ok, res.error
     assert res.passed == 3, f"counts not parsed (got {res.passed}) — the report would be hollow"
     assert "3 tests" in res.line()
+
+
+@pytest.mark.parametrize("line", [
+    "ERROR: file or directory not found: tests/test_job_hunter.py",
+    "ERROR: usage: pytest [options]",
+    "INTERNALERROR> something failed",
+    "no tests ran in 0.01s",
+])
+def test_prose_containing_error_words_does_not_crash_the_parser(line):
+    """pytest prints plenty of prose containing 'error'/'passed' with no number attached.
+
+    Reading a count that was never there raised UnboundLocalError and took down the ENTIRE
+    self-test run -- the reporter crashing is the one failure it cannot report.
+    """
+    passed, failed, names = _parse(line + "\n")
+    assert isinstance(passed, int) and isinstance(failed, int)
+
+
+def test_a_run_that_cannot_find_its_tests_is_reported_not_crashed(tmp_path):
+    """No tests dir at all: must come back as ❌ with a reason, not an exception."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("def test_x():\n    assert True\n", "utf-8")
+    # point at a module that exists on disk but delete it after the check, forcing pytest's
+    # "file or directory not found" path
+    (tmp_path / "tests" / "test_gone.py").write_text("def test_g():\n    assert True\n", "utf-8")
+    (tmp_path / "tests" / "test_gone.py").unlink()
+    res = run_service("demo", ["test_x.py"], root=tmp_path, timeout=120)
+    assert res.ok  # the surviving module still runs cleanly
