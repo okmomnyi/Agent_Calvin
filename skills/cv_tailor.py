@@ -260,6 +260,12 @@ class CvTailorSkill(BaseSkill):
                     "out the detail the job asks about. Where a verified fact adds supporting "
                     "evidence (projects, languages, tooling), fold it in as its own bullet rather "
                     "than a bare list.\n"
+                    "THE FACTS ARE AS TRUE AS THE MASTER. The verified facts below are confirmed "
+                    "by Calvin and evidenced in his own repositories — they carry exactly the same "
+                    "weight as the master CV. If the job asks for something that appears in EITHER "
+                    "source, it is NOT a gap: claim it, and give it a concrete bullet naming the "
+                    "project or repository that demonstrates it. Only list something in 'gaps' when "
+                    "it appears in NEITHER source.\n"
                     "ATS-safe plain markdown (standard section headers, no tables/columns/images). "
                     "Return JSON."},
                  {"role": "user", "content":
@@ -268,7 +274,11 @@ class CvTailorSkill(BaseSkill):
                     # bullets ("Performed web security testing on ... intentionally vulnerable
                     # applications", OWASP work, project detail) never reached the model at all.
                     f"MASTER CV (source of truth — preserve this depth):\n{master_text[:6000]}\n\n"
-                    f"VERIFIED FACTS (additional, all confirmed):\n{self._facts_text()[:3000]}\n\n"
+                    # Not truncated to 3000: the facts are now ~4.5k and the cut was dropping
+                    # own_projects and deployed_apps_count -- 45 repos and 9 live deployments,
+                    # the strongest evidence Calvin has, silently invisible to the tailor.
+                    f"VERIFIED FACTS (confirmed by Calvin, evidenced in his repos — as "
+                    f"authoritative as the master):\n{self._facts_text()[:8000]}\n\n"
                     f"JOB DESCRIPTION:\n{jd[:3000]}"}],
                 schema_hint=_TAILOR_SCHEMA, temperature=0.3, max_tokens=4000)
         except LLMError:
