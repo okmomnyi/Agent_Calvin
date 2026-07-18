@@ -119,3 +119,50 @@ def test_default_route_failure_is_not_retried_forever():
     with pytest.raises(LLMError):
         c.chat("write", [{"role": "user", "content": "hi"}])
     assert len(calls) == 2        # route once, default once, then give up
+
+
+def test_reasoning_model_content_is_recovered_not_treated_as_a_failure():
+    """qwen3.5 returns `reasoning_content`; with a tight max_tokens `content` is absent.
+
+    That raised KeyError('content') -> "Unexpected NIM response shape" -> the route was judged
+    dead and every CV tailor and cover letter was silently demoted to the fallback model. The
+    answer was there all along, in the other field.
+    """
+    from core.llm import LLMClient
+
+    c = LLMClient()
+
+    class _R:
+        status_code = 200
+        headers: dict = {}
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"reasoning_content": "the answer"},
+                                 "finish_reason": "length"}]}
+
+    c.session = type("S", (), {"post": staticmethod(lambda *a, **k: _R())})()
+    assert c._post("qwen/qwen3.5-122b-a10b", [{"role": "user", "content": "hi"}]) == "the answer"
+
+
+def test_a_genuinely_empty_response_says_why():
+    """No content and no reasoning: the error must name the likely cause, not just 'shape'."""
+    import pytest
+
+    from core.llm import LLMClient, LLMError
+
+    c = LLMClient()
+
+    class _R:
+        status_code = 200
+        headers: dict = {}
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "  "}, "finish_reason": "length"}]}
+
+    c.session = type("S", (), {"post": staticmethod(lambda *a, **k: _R())})()
+    with pytest.raises(LLMError, match="max_tokens"):
+        c._post("qwen/qwen3.5-122b-a10b", [{"role": "user", "content": "hi"}], max_tokens=24)

@@ -307,8 +307,11 @@ class EmailAgentSkill(BaseSkill):
     def _compose_subject(self, source: str) -> str:
         """A short subject line. Falls back to a trimmed instruction if the model is unavailable."""
         try:
+            # 'classify' (llama-3.1-8b), not 'write' (qwen): this wants ~8 words, and a
+            # reasoning model spends a 24-token budget entirely on thinking, returning no
+            # content at all. Small deterministic outputs belong on the small fast model.
             line = self.llm.chat(
-                "write",
+                "classify",
                 [{"role": "system", "content":
                     "Write ONLY a concise email subject line (max 8 words). No quotes, no "
                     "prefix like 'Subject:', no punctuation at the end."},

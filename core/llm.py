@@ -164,9 +164,29 @@ class LLMClient:
 
             try:
                 data = resp.json()
-                return data["choices"][0]["message"]["content"]
+                message = data["choices"][0]["message"]
             except (ValueError, KeyError, IndexError) as exc:
                 raise LLMError(f"Unexpected NIM response shape: {exc}") from exc
+
+            # Reasoning models (qwen3.5 and friends) put their chain of thought in
+            # `reasoning_content` and the answer in `content` -- but when max_tokens is tight
+            # the whole budget is spent thinking and `content` is absent entirely. That raised
+            # KeyError('content'), which read as "the model is broken" and silently demoted
+            # every CV tailor and cover letter to the fallback model. Prefer content; fall back
+            # to reasoning_content; only then complain -- and say what actually happened.
+            text = message.get("content") or ""
+            if not text.strip():
+                text = (message.get("reasoning_content") or "").strip()
+                if text:
+                    log.warning("%s returned only reasoning_content (max_tokens=%s may be too "
+                                "low for a reasoning model)", model, params.get("max_tokens"))
+            if not text.strip():
+                finish = data["choices"][0].get("finish_reason")
+                raise LLMError(
+                    f"{model} returned no content (finish_reason={finish!r}). For a reasoning "
+                    f"model this usually means max_tokens={params.get('max_tokens')} was spent "
+                    f"on reasoning — raise it or use a non-reasoning model for short outputs.")
+            return text
 
         raise LLMError(f"NIM request failed after {self.max_retries} attempts: {last_err}")
 
