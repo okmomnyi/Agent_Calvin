@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from core.ats import ats_score, fabrication_terms, keywords, missing_keywords
 from core.config import get_settings
-from core.doc_extract import extract
+from core.doc_extract import clean_pdf_artifacts, extract
 from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
@@ -118,7 +118,12 @@ class CvTailorSkill(BaseSkill):
                 text=f"No master CV found. Drop it at {self.cv_dir}/master_cv.<pdf|docx|md> then run /cv update.",
                 ok=False)
         passages = extract(src)
-        text = "\n".join(p.text for p in passages)
+        # Repair the column-mashing and kerning damage pypdf does to two-column CVs before a
+        # parser sees it. Without this, "…and T echnologyMeru, KE" and "Computer Pride
+        # Mombasa, KE" ran together and Calvin's degree was recorded as a BSc from Computer
+        # Pride lasting June–July 2024 (that was his CompTIA course); his actual BSc is Meru
+        # University, Sept 2024 – Apr 2028.
+        text = clean_pdf_artifacts("\n".join(p.text for p in passages))
         if not text.strip():
             return CommandResult(text="Couldn't extract text from that CV file.", ok=False)
         try:
@@ -126,7 +131,12 @@ class CvTailorSkill(BaseSkill):
                 "write",
                 [{"role": "system", "content":
                     "Parse this CV into structured facts. Extract ONLY what is written — do not infer or "
-                    "embellish. Sections: summary, experience, skills, education, projects, certs. Return JSON."},
+                    "embellish. Sections: summary, experience, skills, education, projects, certs. "
+                    "Each education/experience entry belongs to exactly ONE institution or employer: "
+                    "never merge two entries, and never attach one entry's dates or location to "
+                    "another's. A qualification's dates are the ones on its OWN line. Where a line "
+                    "contains ' | ', the left side is the institution/role and the right side is its "
+                    "location or dates. Return JSON."},
                  {"role": "user", "content": text[:8000]}],
                 schema_hint=_CV_SCHEMA, temperature=0.0, max_tokens=1800)
         except LLMError:

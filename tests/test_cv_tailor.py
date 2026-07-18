@@ -221,3 +221,50 @@ def test_the_master_cv_file_is_never_modified_by_tailoring(cv, mem):
     assert master.stat().st_mtime == mtime_before, "master CV was touched"
     # and the variant is a genuinely separate file
     assert Path(res.data["variant"]).resolve() != master.resolve()
+
+
+# ============================================================ PDF extraction damage
+def test_two_column_cv_extraction_is_repaired_before_parsing():
+    """pypdf mashes a two-column CV's columns together and breaks words on kerning.
+
+    Unrepaired, "Meru University of Science and T echnologyMeru, KE" followed by "Computer
+    Pride Mombasa, KE" led the parser to record Calvin's DEGREE as a BSc from Computer Pride
+    lasting June-July 2024 -- that was his CompTIA course. His BSc is Meru University,
+    Sept 2024 - Apr 2028. Wrong education on a document employers read.
+    """
+    from core.doc_extract import clean_pdf_artifacts
+
+    raw = ("Education\n"
+           "Meru University of Science and T echnologyMeru, KE\n"
+           "Bachelor of Science in Computer Science Sept. 2024 - Apr 2028\n"
+           "Computer Pride Mombasa, KE\n"
+           "CompTIA network+ June. 2024 - July 2024\n"
+           "Experience\nIndependent Cybersecurity & Cloud Projects2024 - Present\n")
+    out = clean_pdf_artifacts(raw)
+    assert "Technology" in out and "T echnology" not in out      # kerning repaired
+    assert "Technology  |  Meru, KE" in out                      # location separated
+    assert "Projects  |  2024 - Present" in out                  # dates separated
+    # the two institutions stay on their own lines, not merged
+    assert "Meru University of Science and Technology" in out
+    assert "Computer Pride" in out
+
+
+def test_repair_does_not_invent_or_drop_words():
+    """Only separators and kerning change -- never the words themselves (§0 P5)."""
+    from core.doc_extract import clean_pdf_artifacts
+
+    import re as _re
+
+    raw = "Meru University of Science and T echnologyMeru, KE"
+    out = clean_pdf_artifacts(raw)
+    # Compare the letters themselves, not tokens: the repair deliberately changes word
+    # BOUNDARIES (that is the fix), but must never add or lose a character.
+    strip = lambda t: _re.sub(r"[^A-Za-z0-9]", "", t)
+    assert strip(raw) == strip(out), "the repair changed the actual content"
+
+
+def test_single_letter_words_are_not_glued():
+    """'I am' and 'A test' must survive the kerning repair."""
+    from core.doc_extract import clean_pdf_artifacts
+
+    assert clean_pdf_artifacts("I applied to A team") == "I applied to A team"

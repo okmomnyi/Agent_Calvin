@@ -8,6 +8,7 @@ heavy parsers import lazily; an unsupported/failed file is skipped gracefully, n
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -111,3 +112,37 @@ def chunk_passages(passages: list[Passage], size_words: int = 500, overlap: int 
                 break
             start += size_words - overlap
     return chunks
+
+
+# ------------------------------------------------------------------ PDF text repair
+# A single capital stranded from its word by PDF kerning: "T echnology" -> "Technology".
+# "I" and "A" are excluded because they are real one-letter words.
+_SPLIT_WORD = re.compile(r"\b(?![IA]\b)([A-Z]) ([a-z]{2,})")
+# A location glued straight onto the preceding word: "TechnologyMeru, KE".
+_GLUED_PLACE = re.compile(r"([a-z])([A-Z][a-z]+,\s*[A-Z]{2}\b)")
+# A date range glued onto a role: "Cloud Projects2024 - Present".
+_GLUED_DATE = re.compile(r"([A-Za-z])((?:[A-Z][a-z]{2,8}\.?\s*)?\d{4}\s*[-–—])")
+
+
+def clean_pdf_artifacts(text: str) -> str:
+    """Repair the text damage PDF extraction does to CV-style layouts.
+
+    Two-column CVs (institution left, location right) come out of pypdf with the columns
+    concatenated and words broken by kerning:
+
+        "Meru University of Science and T echnologyMeru, KE"
+        "Independent Cybersecurity & Cloud Projects2024 - Present"
+
+    Fed to a parser that is (correctly) told not to infer anything, this produced a CV fact
+    claiming Calvin's degree was from Computer Pride in June-July 2024 -- his CompTIA course --
+    when his BSc is Meru University, Sept 2024 - Apr 2028. Two entries merged into one wrong
+    one, on a document employers read.
+
+    Only separators and kerning are touched: no word is added, removed or reordered.
+    """
+    if not text:
+        return text
+    out = _SPLIT_WORD.sub(r"\1\2", text)
+    out = _GLUED_PLACE.sub(r"\1  |  \2", out)
+    out = _GLUED_DATE.sub(r"\1  |  \2", out)
+    return out
