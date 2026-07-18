@@ -91,6 +91,49 @@ class CvTailorSkill(BaseSkill):
         # fall back to assembling from stored cv_facts
         return self._facts_text()
 
+    def _relevant_facts(self, query: str, budget_chars: int = 2600) -> str:
+        """Facts that bear on THIS job, not every fact on file.
+
+        All 23 verified facts used to go into every tailor prompt -- 4,725 chars, ~1,181
+        tokens -- so a Node.js role received his Docker work, his Spotify listening and his
+        collaborator list. That is noise the model has to weigh, latency on every call, and it
+        grows with every fact learned: the system would degrade as it improved.
+
+        Falls back to the full dump when semantic recall is unavailable or finds nothing, so a
+        missing pgvector makes tailoring slower, never wrong.
+        """
+        try:
+            from core.semantic import KIND_FACT, get_semantic
+
+            sem = get_semantic(self._mem)
+            recalled = sem.recall_text(query, kind=KIND_FACT, k=14, budget_chars=budget_chars)
+            if recalled.strip():
+                return recalled
+        except Exception:  # noqa: BLE001 - recall is an optimisation, never a dependency
+            log.exception("semantic recall failed — using all facts")
+        return self._facts_text()
+
+    def index_facts(self) -> int:
+        """(Re)index verified facts for recall. Cheap, idempotent, safe to call after changes."""
+        try:
+            from core.semantic import KIND_FACT, get_semantic
+            from core.persona_store import get_engine
+
+            sem = get_semantic(self._mem)
+            items: list[tuple[str, str, dict]] = []
+            for r in self.mem.get_cv_facts():
+                items.append((f"cv:{r['section']}:{r['key']}",
+                              f"[{r['section']}] {r['key']}: {r['value']}",
+                              {"source": "cv", "section": r["section"]}))
+            for r in get_engine().get_facts(verified_only=True):
+                items.append((f"persona:{r['category']}:{r['key']}",
+                              f"[{r['category']}] {r['key']}: {r['value']}",
+                              {"source": "persona", "category": r["category"]}))
+            return sem.index_many(items, kind=KIND_FACT)
+        except Exception:  # noqa: BLE001
+            log.exception("fact indexing failed")
+            return 0
+
     def _facts_text(self) -> str:
         """Verified facts the tailor may draw on: the master CV PLUS confirmed persona facts.
 
@@ -278,7 +321,7 @@ class CvTailorSkill(BaseSkill):
                     # own_projects and deployed_apps_count -- 45 repos and 9 live deployments,
                     # the strongest evidence Calvin has, silently invisible to the tailor.
                     f"VERIFIED FACTS (confirmed by Calvin, evidenced in his repos — as "
-                    f"authoritative as the master):\n{self._facts_text()[:8000]}\n\n"
+                    f"authoritative as the master):\n{self._relevant_facts(jd)}\n\n"
                     f"JOB DESCRIPTION:\n{jd[:3000]}"}],
                 schema_hint=_TAILOR_SCHEMA, temperature=0.3, max_tokens=4000)
         except LLMError:

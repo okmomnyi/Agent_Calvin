@@ -519,6 +519,37 @@ class Memory:
         with self.tx():
             self.conn.execute(SCHEMA)      # psycopg runs multi-statement SQL when no params
         self._migrate()
+        self._init_vector()
+
+    def _init_vector(self) -> None:
+        """Semantic recall (Phase 33). Optional by design.
+
+        Kept OUT of the main SCHEMA block because it needs the pgvector extension: on a
+        database that lacks it, one failing statement inside a multi-statement transaction
+        would roll back the whole schema and take the entire app down. Semantic search is a
+        quality improvement, not a prerequisite for AgentOS running -- so it is attempted
+        separately and its absence degrades to keyword recall (see core.semantic).
+        """
+        try:
+            with self.tx() as conn:
+                conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS semantic_index ("
+                    " id SERIAL PRIMARY KEY,"
+                    " kind TEXT NOT NULL,"           # fact | note | doc
+                    " ref TEXT NOT NULL,"            # stable id in its own table
+                    " text TEXT NOT NULL,"
+                    " meta JSONB NOT NULL DEFAULT '{}'::jsonb,"
+                    " embedding vector(1024),"       # bge-m3 via NIM; hashing fallback matches it
+                    " dim INTEGER NOT NULL,"
+                    " UNIQUE(kind, ref))")
+                # HNSW over cosine: this is what makes recall an index lookup rather than a
+                # scan of every row, which is the whole reason for pgvector over BYTEA.
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_semantic_hnsw ON semantic_index "
+                    "USING hnsw (embedding vector_cosine_ops)")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("pgvector unavailable (%s) — semantic recall will use keywords", exc)
 
     def _migrate(self) -> None:
         """Add columns introduced after a DB was first created (additive only, never drops)."""

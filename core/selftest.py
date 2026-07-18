@@ -39,6 +39,7 @@ SERVICES: dict[str, list[str]] = {
     "job queue / workers": ["test_queue.py"],
     "approvals": ["test_approvals.py"],
     "proactive triage": ["test_proactive.py"],
+    "semantic memory": ["test_semantic.py"],
     "interview prep": ["test_interview_prep.py", "test_form_assist.py"],
     "study vault": ["test_vault.py", "test_lecture_capture.py", "test_spaced_rep.py"],
     "semester planner": ["test_semester_planner.py"],

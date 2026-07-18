@@ -43,7 +43,11 @@ x-agentos-base: &agentos-base
 
 services:
   db:
-    image: postgres:17-alpine
+    # pgvector/pgvector:pg17 is stock Postgres 17 WITH the vector extension, so it is a
+    # drop-in for postgres:17-alpine on the same data directory -- no dump/restore needed.
+    # Semantic recall needs real ANN indexing; cosine in Python over every row was fine at
+    # 23 facts and would not be at 2,000.
+    image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-agentos}

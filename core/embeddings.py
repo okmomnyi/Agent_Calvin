@@ -38,7 +38,7 @@ class HashingEmbedder:
 
     name = "hashing"
 
-    def __init__(self, dim: int = 512) -> None:
+    def __init__(self, dim: int = 1024) -> None:
         self.dim = dim
 
     def embed(self, text: str) -> list[float]:
@@ -79,6 +79,18 @@ class SentenceTransformerEmbedder:
 def get_embedder(strategy: str | None = None) -> Embedder:
     """Return an embedder per config (auto tries sentence-transformers, falls back to hashing)."""
     strategy = strategy or get_settings().get("vault", "embedder", default="auto")
+    # NIM first under "auto": it gives real semantic embeddings with no local model, which is
+    # the only way to get them on a 961MB droplet. sentence-transformers stays ahead of it
+    # only when explicitly requested -- local is better when the machine can actually hold it.
+    if strategy in ("nim", "auto"):
+        try:
+            emb = NimEmbedder()
+            if emb._post(["ping"], "query"):        # prove it answers before committing to it
+                log.info("Semantic recall using NIM embeddings (%s, dim=%d)", emb.model, emb.dim)
+                return emb
+            log.info("NIM embeddings did not respond — trying local options")
+        except Exception as exc:  # noqa: BLE001
+            log.info("NIM embeddings unavailable (%s)", exc)
     if strategy in ("sentence-transformers", "auto"):
         try:
             emb = SentenceTransformerEmbedder()
@@ -113,3 +125,57 @@ def cosine(a: list[float], b: list[float]) -> float:
     if na == 0 or nb == 0:
         return 0.0
     return dot / (na * nb)
+
+
+class NimEmbedder:
+    """Real semantic embeddings via NVIDIA NIM (Phase 33). No local model, no RAM cost.
+
+    The droplet has 961MB of RAM and one CPU, so sentence-transformers (~2GB of torch) will
+    never run there. That left the hashing embedder, which is LEXICAL: it matched "Docker"
+    only because the word literally appeared. It cannot connect "containerisation experience"
+    to a Docker fact, which is most of what semantic recall is for.
+
+    bge-m3 is hosted, already covered by the NIM key, and returns in ~1.1s -- so the quality
+    ceiling stops being set by what fits in a 1GB droplet. Falls back to hashing on any
+    failure, because recall degrading is survivable and recall crashing is not.
+    """
+
+    def __init__(self, model: str = "baai/bge-m3", dim: int = 1024) -> None:
+        self.model = model
+        self.dim = dim
+        self._fallback = HashingEmbedder(dim=dim)
+
+    def _post(self, texts: list[str], input_type: str) -> list[list[float]] | None:
+        import requests
+
+        from core.config import get_settings
+
+        settings = get_settings()
+        key = settings.nvidia_api_key
+        if not key:
+            return None
+        try:
+            resp = requests.post(
+                f"{settings.llm.get('base_url', 'https://integrate.api.nvidia.com/v1')}/embeddings",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"input": texts, "model": self.model,
+                      # bge-m3 distinguishes the two sides of a search: indexing a document
+                      # and asking a question are not the same operation, and telling it
+                      # which is which measurably improves the match.
+                      "input_type": input_type, "encoding_format": "float"},
+                timeout=30)
+            if resp.status_code != 200:
+                log.warning("NIM embeddings %s: %s", resp.status_code, resp.text[:120])
+                return None
+            return [d["embedding"] for d in resp.json()["data"]]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("NIM embeddings unavailable (%s) — falling back to hashing", exc)
+            return None
+
+    def embed(self, text: str) -> list[float]:
+        got = self._post([text], "query")
+        return got[0] if got else self._fallback.embed(text)
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        got = self._post(list(texts), "passage")
+        return got if got else self._fallback.embed_batch(list(texts))

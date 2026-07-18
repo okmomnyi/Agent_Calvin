@@ -49,6 +49,19 @@ def fake_llm() -> FakeLLM:
 
 
 @pytest.fixture(autouse=True)
+def _no_network_embeddings(monkeypatch, request):
+    """The suite is offline. `vault.embedder: auto` now resolves to NIM, so any test touching
+    semantic recall would quietly make a network call -- slow, flaky, and a breach of the
+    guarantee that `pytest` needs no API keys. Pinned to the deterministic hashing embedder;
+    mark a test @pytest.mark.allow_embedding_api to opt out."""
+    if "allow_embedding_api" in request.keywords:
+        return
+    from core.embeddings import HashingEmbedder
+
+    monkeypatch.setattr("core.embeddings.get_embedder", lambda *a, **k: HashingEmbedder())
+
+
+@pytest.fixture(autouse=True)
 def _no_real_telegram(monkeypatch, request):
     """Nothing in the suite may push to the real Telegram. Autouse, so it cannot be forgotten.
 
