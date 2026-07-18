@@ -385,7 +385,10 @@ def cmd_persona_github(args: argparse.Namespace) -> int:
     """Derive CANDIDATE persona facts from Calvin's public repos (he confirms each)."""
     from skills.persona import SKILL
 
-    res = SKILL.import_github(user=args.user or "", notify=not args.no_send)
+    if getattr(args, "detailed", False):
+        res = SKILL.import_github_detailed(user=args.user or "", notify=not args.no_send)
+    else:
+        res = SKILL.import_github(user=args.user or "", notify=not args.no_send)
     print(res.text)
     return 0 if res.ok else 1
 
@@ -734,6 +737,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- Phase 5: form assistant ---
     p_pg = sub.add_parser("persona-github", help="import CANDIDATE facts from public GitHub repos")
+    p_pg.add_argument("--detailed", action="store_true",
+                      help="deterministic deep read: languages, deployed apps, collaborations")
     p_pg.add_argument("user", nargs="?", help="GitHub username (default: $GITHUB_USER)")
     p_pg.add_argument("--no-send", action="store_true", help="don't push a Telegram summary")
     p_pg.set_defaults(func=cmd_persona_github)

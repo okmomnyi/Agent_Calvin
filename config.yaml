@@ -156,6 +156,20 @@ infra:
   targets: {}
   #   agent.example.com: [80, 443]
 
+# --- GitHub profile import (Phase 25) ---
+# Calvin's public repos seed his persona (skills, projects). `collaborations` lists repos he
+# contributes to but does NOT own -- the contributor graph is public, so his commit count and
+# teammates are read from there. Add a repo full-name and it's picked up on the next import.
+github:
+  user: okmomnyi
+  collaborations:
+    - Techtoxic/ums               # UMS — University Management System (live)
+    - David-0chieng/Project47
+    - yarrbakr/ZameenEye-AI
+    - Kainat90/ZKSentinel         # trustless AI trading agent, ZK proofs
+    - 13getid/Moderno
+    - Mark254-creator/fixit-app   # FastAPI + React + MySQL booking platform
+
 # --- Desktop app control (Phase 23) — laptop-side, voice-triggered ---
 # App KEYS only. The droplet never learns an executable path: it just names one of these, and
 # the laptop (client/apps.yaml) decides what it means and can refuse. That file is the real

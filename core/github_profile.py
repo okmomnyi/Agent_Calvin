@@ -46,6 +46,16 @@ class GitHubError(RuntimeError):
     pass
 
 
+_BOTS = {"copilot", "dependabot", "github-actions", "renovate", "snyk-bot"}
+
+
+def _is_bot(login: str) -> bool:
+    """Bots are not collaborators. Copilot/dependabot show up in contributor graphs but naming
+    them as Calvin's teammates would be a small lie in a cover letter."""
+    lo = login.lower()
+    return lo in _BOTS or lo.endswith("[bot]") or lo.endswith("-bot")
+
+
 @dataclass
 class Repo:
     name: str
@@ -55,6 +65,7 @@ class Repo:
     fork: bool = False
     stars: int = 0
     pushed_at: str = ""
+    homepage: str = ""
     readme: str = ""
 
     @property
@@ -97,7 +108,8 @@ def repos(user: str, *, http: Callable[..., Any] | None = None,
     out = [
         Repo(name=r["name"], language=r.get("language"), description=r.get("description"),
              topics=r.get("topics") or [], fork=bool(r.get("fork")),
-             stars=r.get("stargazers_count", 0), pushed_at=r.get("pushed_at", ""))
+             stars=r.get("stargazers_count", 0), pushed_at=r.get("pushed_at", ""),
+             homepage=r.get("homepage") or "")
         for r in raw
     ]
     own = [r for r in out if r.is_own_work]
@@ -109,6 +121,101 @@ def repos(user: str, *, http: Callable[..., Any] | None = None,
         except GitHubError:
             continue                            # a repo with no README is not an error
     return own
+
+
+@dataclass
+class Collaboration:
+    """A repo Calvin contributes to but does not own -- real teamwork, not solo projects."""
+    full_name: str
+    description: str | None
+    language: str | None
+    homepage: str | None
+    my_commits: int
+    teammates: list[str] = field(default_factory=list)
+
+
+def collaborations(user: str, repos_full_names: list[str], *,
+                   http: Callable[..., Any] | None = None) -> list[Collaboration]:
+    """For each named repo, Calvin's commit count and who he worked with.
+
+    The contributors endpoint is PUBLIC, so this needs no token -- only listing *which* repos
+    someone collaborates on requires auth, and that list is supplied (config.github.collaborations).
+    """
+    out: list[Collaboration] = []
+    for full_name in repos_full_names:
+        try:
+            meta = _get(f"/repos/{full_name}", http=http)
+            contribs = _get(f"/repos/{full_name}/contributors?per_page=15", http=http)
+        except GitHubError:
+            continue
+        mine = next((c["contributions"] for c in contribs
+                     if c.get("login", "").lower() == user.lower()), 0)
+        teammates = [c["login"] for c in contribs
+                     if c.get("login", "").lower() != user.lower() and not _is_bot(c.get("login", ""))]
+        out.append(Collaboration(
+            full_name=full_name, description=meta.get("description"),
+            language=meta.get("language"), homepage=meta.get("homepage"),
+            my_commits=mine, teammates=teammates))
+    return out
+
+
+def derive_facts(user: str, repos_full_names: list[str] | None = None, *,
+                 http: Callable[..., Any] | None = None) -> list[dict[str, str]]:
+    """Build persona-fact candidates DETERMINISTICALLY from GitHub -- no LLM, so no NIM timeout.
+
+    Everything here is verbatim from the API: languages by repo count, deployed projects with
+    their live URLs, and each collaboration with its commit count and teammates. Facts stay
+    candidates until Calvin confirms them (§0 P5); this just spares him the typing.
+    """
+    p = profile(user, http=http)
+    rs = repos(user, http=http, with_readmes=0)
+    facts: list[dict[str, str]] = []
+
+    langs: dict[str, int] = {}
+    for r in rs:
+        if r.language:
+            langs[r.language] = langs.get(r.language, 0) + 1
+    if langs:
+        ranked = ", ".join(f"{k} ({v} repo{'s' if v > 1 else ''})"
+                           for k, v in sorted(langs.items(), key=lambda x: -x[1]))
+        facts.append({"category": "skills", "key": "languages_by_repo_count", "value": ranked,
+                      "evidence": f"{len(rs)} own public repos"})
+
+    # notable own projects: name + language + live URL + description
+    named = [f"{r.name} [{r.language}]"
+             + (f" (live: {r.homepage})" if r.homepage else "")
+             + (f" — {r.description}" if r.description else "")
+             for r in rs if r.language][:15]
+    if named:
+        facts.append({"category": "work_history", "key": "own_projects",
+                      "value": "; ".join(named), "evidence": "GitHub repositories"})
+    live_count = sum(1 for r in rs if r.homepage)
+    if live_count:
+        facts.append({"category": "work_history", "key": "deployed_apps_count",
+                      "value": f"{live_count} own projects deployed live (mostly Vercel)",
+                      "evidence": "GitHub homepage URLs"})
+
+    if p.get("blog"):
+        facts.append({"category": "preferences", "key": "portfolio_site",
+                      "value": p["blog"], "evidence": "GitHub profile"})
+
+    collabs = collaborations(user, repos_full_names or [], http=http)
+    all_teammates: set[str] = set()
+    for c in collabs:
+        all_teammates.update(c.teammates)
+        detail = c.description or "collaborative project"
+        note = (f"{c.full_name} ({c.language or 'mixed'}): {detail[:120]} — "
+                f"{c.my_commits} commit(s) by Calvin"
+                + (f", live at {c.homepage}" if c.homepage else "")
+                + (f"; team: {', '.join(c.teammates[:8])}" if c.teammates else ""))
+        key = "collab_" + c.full_name.split("/")[-1].lower().replace("-", "_")
+        facts.append({"category": "work_history", "key": key, "value": note,
+                      "evidence": c.full_name})
+    if all_teammates:
+        facts.append({"category": "work_history", "key": "collaborators",
+                      "value": "Has collaborated with: " + ", ".join(sorted(all_teammates)),
+                      "evidence": "GitHub contributor graphs"})
+    return facts
 
 
 def evidence(user: str, *, http: Callable[..., Any] | None = None) -> str:

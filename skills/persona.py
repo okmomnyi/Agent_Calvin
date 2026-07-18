@@ -128,7 +128,49 @@ class PersonaSkill(BaseSkill):
     def _default_gh_user() -> str:
         import os
 
-        return os.getenv("GITHUB_USER", "").strip()
+        from core.config import get_settings
+
+        return (os.getenv("GITHUB_USER", "").strip()
+                or str(get_settings().get("github", "user", default="")).strip())
+
+    def import_github_detailed(self, user: str = "", notify: bool = True,
+                               **_: Any) -> CommandResult:
+        """Rich, deterministic seed: languages, deployed projects, and every collaboration.
+
+        Unlike import_github (which asks an LLM to summarise), this reads structured facts
+        straight from the API -- so it can't be broken by a NIM timeout, and every fact is
+        verbatim from GitHub. Collaborations (UMS, Project47, ZameenEye-AI, ZKSentinel, ...)
+        come from config.github.collaborations: the contributor graph is public, so Calvin's
+        commit count and teammates are real. Still candidates until he confirms (§0 P5).
+        """
+        from core.config import get_settings
+        from core.github_profile import derive_facts
+
+        user = (user or "").strip() or self._default_gh_user()
+        if not user:
+            return CommandResult(text="Which GitHub username?", ok=False)
+        collab = list(get_settings().get("github", "collaborations", default=[]) or [])
+        try:
+            facts = derive_facts(user, collab)
+        except Exception as exc:  # noqa: BLE001
+            return CommandResult(text=f"Couldn't read GitHub for '{user}': {exc}", ok=False)
+
+        added = 0
+        for f in facts:
+            cat, key, val = f.get("category"), f.get("key"), f.get("value")
+            if not (cat and key and val) or cat not in _GH_CATEGORIES:
+                continue
+            ev = f.get("evidence", "")
+            self.engine.add_fact(cat, key, f"{val}" + (f" (from GitHub: {ev})" if ev else ""),
+                                 confidence=0.7, source=f"github:{user}", verified=False)
+            added += 1
+        text = (f"📦 Deep GitHub read of {user} → {added} detailed candidate fact(s), "
+                f"UNVERIFIED.\nIncludes your languages, deployed projects, and every "
+                f"collaboration (with commit counts + teammates).\nConfirm with `/facts` or "
+                f"`persona verify <category> <key>`; nothing reaches a cover letter unconfirmed.")
+        if notify and added:
+            self._notify(text)
+        return CommandResult(text=text, data={"user": user, "candidates": added})
 
     def verify(self, category: str = "", key: str = "", accept: bool = True,
                **_: Any) -> CommandResult:
@@ -154,6 +196,7 @@ class PersonaSkill(BaseSkill):
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {
             "github": self.import_github,
+            "github_detailed": self.import_github_detailed,
             "import_github": self.import_github,
             "verify": self.verify,
             "candidates": self.candidates,

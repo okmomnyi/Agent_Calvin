@@ -224,3 +224,109 @@ def test_nothing_here_touches_linkedin():
         assert "linkedin.com" not in src or "forbids" in src or "blocks" in src, \
             f"{f.name} appears to fetch LinkedIn"
         assert "api.linkedin" not in src
+
+
+# ================================================================= detailed / deterministic
+def _detailed_http():
+    """Fake API covering own repos + two collaboration repos with contributor graphs."""
+    import base64 as _b64
+
+    own = [
+        {"name": "Agent_Calvin", "language": "Python", "fork": False, "topics": [],
+         "description": "24/7 agentic system", "homepage": "", "stargazers_count": 1,
+         "pushed_at": "2026-07-18T00:00:00Z"},
+        {"name": "Forge-Vault", "language": "JavaScript", "fork": False, "topics": [],
+         "description": None, "homepage": "https://forge-vault.vercel.app",
+         "stargazers_count": 0, "pushed_at": ""},
+        {"name": "a-fork", "language": "Go", "fork": True, "topics": [], "description": None,
+         "homepage": "", "stargazers_count": 0, "pushed_at": ""},
+    ]
+    pages = {
+        "/users/okmomnyi": {"login": "okmomnyi", "name": "Kelvin Momanyi", "bio": None,
+                            "blog": "https://kelvinmomanyi.codes", "public_repos": 45},
+        "/users/okmomnyi/repos?per_page=100&sort=pushed": own,
+        "/repos/Techtoxic/ums": {"description": None, "language": "HTML",
+                                 "homepage": "https://ums-three-mu.vercel.app"},
+        "/repos/Techtoxic/ums/contributors?per_page=15": [
+            {"login": "Techtoxic", "contributions": 4}, {"login": "okmomnyi", "contributions": 3}],
+        "/repos/David-0chieng/Project47": {"description": "team build", "language": "TypeScript",
+                                           "homepage": "https://project47.vercel.app"},
+        "/repos/David-0chieng/Project47/contributors?per_page=15": [
+            {"login": "David-0chieng", "contributions": 10},
+            {"login": "okmomnyi", "contributions": 7},
+            {"login": "philipkiema6", "contributions": 1}],
+    }
+
+    def http(url, **kw):
+        path = url.replace("https://api.github.com", "")
+        if path in pages:
+            return _Resp(pages[path])
+        return _Resp({}, status=404, text="nf")
+    return http
+
+
+def test_collaborations_report_commits_and_teammates():
+    from core.github_profile import collaborations
+
+    cs = collaborations("okmomnyi", ["Techtoxic/ums", "David-0chieng/Project47"],
+                        http=_detailed_http())
+    by_name = {c.full_name: c for c in cs}
+    assert by_name["David-0chieng/Project47"].my_commits == 7
+    assert "David-0chieng" in by_name["David-0chieng/Project47"].teammates
+    assert "okmomnyi" not in by_name["David-0chieng/Project47"].teammates  # not his own teammate
+
+
+def test_derive_facts_is_deterministic_and_factual():
+    from core.github_profile import derive_facts
+
+    facts = derive_facts("okmomnyi", ["Techtoxic/ums", "David-0chieng/Project47"],
+                         http=_detailed_http())
+    keyed = {f["key"]: f["value"] for f in facts}
+    # languages counted from own repos only (fork excluded)
+    assert "languages_by_repo_count" in keyed
+    assert "Go" not in keyed["languages_by_repo_count"]        # the fork's language is not his
+    # a live deployment surfaced
+    assert "collab_ums" in keyed and "ums-three-mu" in keyed["collab_ums"]
+    assert "7 commit" in keyed["collab_project47"]
+    # aggregate collaborators, himself excluded
+    assert "collaborators" in keyed and "philipkiema6" in keyed["collaborators"]
+    assert "okmomnyi" not in keyed["collaborators"]
+
+
+def test_detailed_import_seeds_candidates_never_verified(mem):
+    import core.github_profile as gp
+    from core.persona_store import PersonaEngine, is_seeded
+    from skills.persona import PersonaSkill
+
+    engine = PersonaEngine(llm=None, memory=mem)
+    skill = PersonaSkill(engine=engine, notify=lambda t: True)
+    skill.import_github_detailed = skill.import_github_detailed  # bind
+    # inject the fake http by monkeypatching derive_facts via the module
+    orig = gp.derive_facts
+    gp.derive_facts = lambda user, collab=None, **kw: orig(
+        user, ["Techtoxic/ums"], http=_detailed_http())
+    try:
+        res = skill.import_github_detailed(user="okmomnyi", notify=False)
+    finally:
+        gp.derive_facts = orig
+    assert res.data["candidates"] >= 3
+    assert all(not f["verified"] for f in engine.get_facts())
+    assert is_seeded(mem) is False        # detailed import alone must not seed
+
+
+def test_bots_are_not_listed_as_teammates():
+    from core.github_profile import collaborations
+
+    http = _detailed_http.__wrapped__ if hasattr(_detailed_http, "__wrapped__") else None
+    # add Copilot to the ums contributor list
+    def with_bot(url, **kw):
+        base = _detailed_http()
+        path = url.replace("https://api.github.com", "")
+        if path == "/repos/Techtoxic/ums/contributors?per_page=15":
+            return _Resp([{"login": "Techtoxic", "contributions": 4},
+                          {"login": "okmomnyi", "contributions": 3},
+                          {"login": "Copilot", "contributions": 2},
+                          {"login": "dependabot[bot]", "contributions": 1}])
+        return base(url, **kw)
+    cs = collaborations("okmomnyi", ["Techtoxic/ums"], http=with_bot)
+    assert cs[0].teammates == ["Techtoxic"], cs[0].teammates
