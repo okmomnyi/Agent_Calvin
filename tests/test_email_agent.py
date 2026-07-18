@@ -174,3 +174,61 @@ def test_spoken_email_filters_are_deterministic():
     assert _gmail_query("older than 30 days") == "older_than:30d"
     assert _gmail_query("subject newsletter") == "subject:(newsletter)"
     assert _gmail_query("promotions") == "category:promotions"
+
+
+# ================================================================= compose + confirmed send
+def test_compose_previews_and_sends_nothing_until_confirmed(fake_llm, mem):
+    """Calvin authorized a test send, but sending is two-step by design (§0 P3)."""
+    from unittest.mock import MagicMock
+
+    mailer = MagicMock()
+    skill = EmailAgentSkill(gmail=GmailClient(service=_mock_service(_message())),
+                            llm=fake_llm, memory=mem, mailer=mailer)
+    res = skill.compose(to="okmomanyi56@gmail.com", body="Deploy is live.")
+    assert res.data["requires_confirmation"] is True
+    assert "not sent yet" in res.text.lower()
+    mailer.send_email.assert_not_called()          # nothing sent on compose
+
+
+def test_confirm_send_actually_sends(fake_llm, mem):
+    from unittest.mock import MagicMock
+
+    mailer = MagicMock()
+    skill = EmailAgentSkill(gmail=GmailClient(service=_mock_service(_message())),
+                            llm=fake_llm, memory=mem, mailer=mailer)
+    skill.compose(to="okmomanyi56@gmail.com", subject="Test", body="Hello from AgentOS.")
+    out = skill.continue_send(text="confirm send")
+    mailer.send_email.assert_called_once()
+    kw = mailer.send_email.call_args.kwargs
+    assert kw["to"] == "okmomanyi56@gmail.com" and kw["body"] == "Hello from AgentOS."
+    assert "Sent" in out.text
+
+
+def test_cancel_send_sends_nothing(fake_llm, mem):
+    from unittest.mock import MagicMock
+
+    mailer = MagicMock()
+    skill = EmailAgentSkill(gmail=GmailClient(service=_mock_service(_message())),
+                            llm=fake_llm, memory=mem, mailer=mailer)
+    skill.compose(to="okmomanyi56@gmail.com", body="Hi.")
+    out = skill.continue_send(text="no wait, cancel")
+    mailer.send_email.assert_not_called()
+    assert "ancel" in out.text
+
+
+def test_compose_parses_recipient_from_a_spoken_instruction(fake_llm, mem):
+    from unittest.mock import MagicMock
+
+    mailer = MagicMock()
+    fake_llm.post_result = "Body drafted by the model."
+    skill = EmailAgentSkill(gmail=GmailClient(service=_mock_service(_message())),
+                            llm=fake_llm, memory=mem, mailer=mailer)
+    res = skill.compose(instruction="to okmomanyi56@gmail.com saying the deploy is live")
+    assert res.data["to"] == "okmomanyi56@gmail.com"
+    assert res.data["requires_confirmation"] is True
+
+
+def test_reply_drafting_is_still_draft_only():
+    """The new send path must not have loosened the reply path -- GmailClient still can't send."""
+    assert not hasattr(GmailClient, "send")
+    assert not hasattr(GmailClient, "send_message")

@@ -35,6 +35,7 @@ ARCHIVE_CATEGORIES = {"promotion", "newsletter", "social"}
 ACTION_CATEGORIES = {"important", "job_related"}
 _TRASH_SESSION_KEY = "email_agent.trash_session"
 _LAST_TRASH_KEY = "email_agent.last_trash"
+_SEND_SESSION_KEY = "email_agent.send_session"
 
 
 class EmailAgentSkill(BaseSkill):
@@ -47,11 +48,16 @@ class EmailAgentSkill(BaseSkill):
         memory: Memory | None = None,
         notify: Callable[[str], bool] | None = None,
         clock: Callable[[], float] = time.time,
+        mailer: Any | None = None,
     ) -> None:
         self._gmail = gmail
         self._llm = llm
         self._mem = memory
         self._now = clock
+        # The ONLY send path (core.mailer). Injected so tests can never send a real email.
+        # Reply-drafting stays draft-only; this is used exclusively by the confirmed compose
+        # flow, which requires a second 'confirm send' before it is ever called.
+        self._mailer = mailer
         # Injectable: anything that can reach Calvin's phone must be replaceable by a
         # test, or the suite texts him. See tests/test_voice.py's injection-point test.
         self._notify = notify or send_telegram
@@ -75,6 +81,14 @@ class EmailAgentSkill(BaseSkill):
             self._mem = get_memory()
         return self._mem
 
+    @property
+    def mailer(self):
+        if self._mailer is None:
+            from core.mailer import ApplicationMailer
+
+            self._mailer = ApplicationMailer()
+        return self._mailer
+
     # ------------------------------------------------------------- skill wiring
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {
@@ -85,11 +99,17 @@ class EmailAgentSkill(BaseSkill):
             "trash": self.request_trash,
             "continue_trash": self.continue_trash,
             "restore": self.restore_last,
+            "compose": self.compose,
+            "continue_send": self.continue_send,
         }
 
     def contract(self) -> SkillContract:
+        # replies_are_drafts_only still holds: draft() only ever creates a Gmail draft.
+        # outbound_send_requires_confirmation covers compose(): it drafts, previews, and sends
+        # only after an explicit second 'confirm send' -- nothing is emailed in one step.
         return SkillContract(reads_categories=["tone", "notifications"],
-                             hard_invariants=["replies_are_drafts_only"])
+                             hard_invariants=["replies_are_drafts_only",
+                                              "outbound_send_requires_confirmation"])
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
         # Note: the standalone 07:00 digest is subsumed by the Phase 13 unified morning
@@ -396,6 +416,64 @@ class EmailAgentSkill(BaseSkill):
             text=f"Restored {restored} message(s) from Gmail Trash."
                  + (f" {failed} could not be restored." if failed else ""),
             data={"restored": restored, "failed": failed}, ok=restored > 0 and failed == 0)
+
+
+    # ------------------------------------------------------------- compose + confirmed send
+    def compose(self, to: str = "", subject: str = "", body: str = "", instruction: str = "",
+                **_: Any) -> CommandResult:
+        """Draft an email and PREVIEW it. Sends nothing until a separate 'confirm send'.
+
+        `instruction` (natural language) is turned into a body by the LLM; `body` is used
+        verbatim if given. This is the only path that can send mail on Calvin's behalf, and it
+        is two-step by construction (§0 P3).
+        """
+        # From "to okmomanyi56@gmail.com saying the deploy is live", pull out the recipient and
+        # leave the rest as the instruction. Routed utterances arrive whole in `instruction`.
+        if not to and instruction:
+            m = re.search(r"\b([\w.+-]+@[\w-]+\.[\w.-]+)\b", instruction)
+            if m:
+                to = m.group(1)
+                instruction = (instruction[:m.start()] + instruction[m.end():])
+        instruction = re.sub(r"^\s*(?:to\b|,)?\s*", "", instruction or "", flags=re.I)
+        instruction = re.sub(r"^\s*(?:saying|that says|with|about|telling (?:them|him|her))\b\s*",
+                             "", instruction, flags=re.I).strip()
+        to = _extract_email(to.strip())
+        if not to or "@" not in to:
+            return CommandResult(text="Who should I email? Give me an address.", ok=False)
+        if not body and instruction:
+            body = self._compose_reply(sender=to, subject=subject or "", snippet="",
+                                       instruction=instruction)
+        if not body:
+            return CommandResult(text="What should the email say? Give me a body or an instruction.",
+                                 ok=False)
+        subject = subject or (instruction[:60] if instruction else "(no subject)")
+        self.mem.kv_set(_SEND_SESSION_KEY, json.dumps({
+            "to": to, "subject": subject, "body": body, "created_at": self._now()}))
+        return CommandResult(
+            text=(f"✉️ DRAFT — not sent yet.\nTo: {to}\nSubject: {subject}\n\n{body}\n\n"
+                  "Say 'confirm send' to send it, or 'cancel'."),
+            data={"to": to, "subject": subject, "requires_confirmation": True})
+
+    def continue_send(self, text: str = "", **_: Any) -> CommandResult:
+        """Second step of compose: 'confirm send' sends; anything else cancels."""
+        raw = self.mem.kv_get(_SEND_SESSION_KEY) or ""
+        try:
+            draft = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            draft = {}
+        if not draft:
+            return CommandResult(text="No email is waiting to send.", ok=False)
+        answer = (text or "").strip().lower()
+        if answer not in {"confirm send", "confirm", "send it", "yes send", "send"}:
+            self.mem.kv_set(_SEND_SESSION_KEY, "")
+            return CommandResult(text="Cancelled — nothing was sent.")
+        try:
+            self.mailer.send_email(to=draft["to"], subject=draft["subject"], body=draft["body"])
+        except Exception as exc:  # noqa: BLE001
+            return CommandResult(text=f"Couldn't send it: {exc}", ok=False)
+        self.mem.kv_set(_SEND_SESSION_KEY, "")
+        return CommandResult(text=f"📤 Sent to {draft['to']}.",
+                             data={"sent_to": draft["to"], "subject": draft["subject"]})
 
 
 def _extract_email(addr: str) -> str:

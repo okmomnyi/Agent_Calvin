@@ -81,6 +81,7 @@ _MOCK_KEY = "interview_prep.mock"
 _QUIZ_KEY = "spaced_rep.session"
 _TUTOR_KEY = "code_tutor.session"
 _TRASH_KEY = "email_agent.trash_session"
+_SEND_KEY = "email_agent.send_session"
 
 
 def parse_callback(data: str) -> tuple[str | None, int | None]:
@@ -187,6 +188,8 @@ class BotCore:
     def route_text(self, text: str) -> str:
         """Free text: continue an active mock/quiz if one is running, else route via intent engine."""
         if not text.startswith("/"):
+            if self.mem.kv_get(_SEND_KEY):   # "confirm send" / "cancel" after a compose preview
+                return self._dispatch("email_agent", "continue_send", {"text": text})
             if self.mem.kv_get(_TRASH_KEY):  # "confirm trash" / "cancel" / a follow-up filter
                 return self._dispatch("email_agent", "continue_trash", {"text": text})
             if self.mem.kv_get(_MOCK_KEY):

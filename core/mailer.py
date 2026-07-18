@@ -37,6 +37,17 @@ class ApplicationMailer:
             self._service = build_service()
         return self._service
 
+    def send_email(
+        self, *, to: str, subject: str, body: str, attachments: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Send a plain email. Same transport as an application; the CALLER owns the gate.
+
+        Kept distinct from send_application only so intent is legible in the logs. Every caller
+        must have an explicit confirmation first -- email_agent.compose requires a second
+        'confirm send' step before this is ever reached (§0 P3).
+        """
+        return self.send_application(to=to, subject=subject, body=body, attachments=attachments)
+
     def send_application(
         self, *, to: str, subject: str, body: str, attachments: list[str] | None = None
     ) -> dict[str, Any]:

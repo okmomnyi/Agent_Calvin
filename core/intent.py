@@ -37,6 +37,7 @@ INTENTS: dict[str, tuple[str, str]] = {
     "prep_pack":       ("interview_prep", "prep"),
     "mock_interview":  ("interview_prep", "mock"),
     "check_email":     ("email_agent", "check"),
+    "compose_email":   ("email_agent", "compose"),
     "summarize_inbox": ("email_agent", "digest"),
     "trash_email":     ("email_agent", "trash"),
     "restore_email":   ("email_agent", "restore"),
@@ -128,6 +129,13 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
         r"(?P<t>.*\bemails?\b.*)", re.I), "query"),
     ("trash_email", re.compile(
         r"\b(?:delete|trash|remove|clear)\b(?P<t>.*)", re.I), "query"),
+    # Compose a NEW email (distinct from draft, which replies to an existing thread). The whole
+    # "to X saying Y" span is captured and parsed inside compose(); it only ever previews, then
+    # waits for 'confirm send'. Placed before check_email so "send an email to ..." doesn't read
+    # as "check email".
+    ("compose_email", re.compile(
+        r"\b(?:write|send|compose)\s+(?:an?\s+)?(?:email|mail|message)\b(?P<t>.*)", re.I),
+     "instruction"),
     ("check_email", re.compile(r"\bcheck (?:my )?(?:email|inbox|mail)\b|\bany (?:new )?email\b", re.I), None),
     # Desktop app control (Phase 23) — laptop-side, voice only. Deliberately late in the list
     # and anchored to the end of the utterance: "start"/"open" are common verbs elsewhere
