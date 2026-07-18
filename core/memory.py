@@ -448,6 +448,30 @@ CREATE INDEX IF NOT EXISTS idx_queue_claim ON job_queue(status, run_at, id);
 CREATE INDEX IF NOT EXISTS idx_queue_dedupe ON job_queue(dedupe_key)
     WHERE dedupe_key IS NOT NULL;
 
+-- Tiered actions + learned permissions (Phase 30). The approval gate used to be all-or-
+-- nothing; this lets "always trash mail from this sender" be remembered per PATTERN while
+-- anything that speaks in Calvin's voice keeps asking every time.
+CREATE TABLE IF NOT EXISTS action_permissions (
+    permission_key TEXT PRIMARY KEY,        -- e.g. 'email_trash:from:linkedin.com'
+    decision       TEXT NOT NULL,           -- always_approve | always_deny | ask
+    updated_at     DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pending_actions (
+    id             SERIAL PRIMARY KEY,
+    kind           TEXT NOT NULL,           -- e.g. 'email_trash'
+    description    TEXT NOT NULL,
+    payload        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    tier           TEXT NOT NULL,           -- trivial | low | medium | high
+    permission_key TEXT NOT NULL,
+    status         TEXT NOT NULL,           -- pending | approved | denied | executed | failed
+    reasoning      TEXT,
+    error          TEXT,
+    created_at     DOUBLE PRECISION NOT NULL,
+    resolved_at    DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_actions(status, id);
+
 -- Every skill's declared scope, persisted at registration so it's inspectable/auditable.
 CREATE TABLE IF NOT EXISTS skill_contracts (
     skill_name       TEXT PRIMARY KEY,

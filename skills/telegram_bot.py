@@ -207,9 +207,53 @@ class BotCore:
             return False
         return True
 
+    def _try_approval_reply(self, text: str) -> str | None:
+        """Handle "3 yes" / "always no 3" / "yes all" against pending actions (Phase 30).
+
+        Returns None when the message isn't an approval reply, so ordinary conversation still
+        routes normally. Only consulted when something is actually pending -- otherwise a bare
+        "3" in conversation would be read as approving action 3.
+        """
+        from core.approvals import get_store, parse_approval_reply
+
+        try:
+            store = get_store(self.mem)
+            pending = store.pending()
+            if not pending:
+                return None
+            parsed = parse_approval_reply(text)
+            if not parsed:
+                return None
+        except Exception:  # noqa: BLE001 - approvals must never break normal messaging
+            return None
+
+        if parsed.get("bulk"):
+            n = store.resolve_all(approve=parsed["approve"])
+            verb = "Approved" if parsed["approve"] else "Denied"
+            return f"{verb} all {n} pending action(s)."
+
+        action = store.resolve(parsed["id"], approve=parsed["approve"],
+                               always=parsed.get("always", False))
+        if action is None:
+            return f"No pending action #{parsed['id']}."
+        verb = "✅ Approved" if parsed["approve"] else "🚫 Denied"
+        note = ""
+        if parsed.get("always"):
+            if action.tier == "high" and parsed["approve"]:
+                # Told him rather than silently ignoring it: a safety rule he thinks he
+                # turned off, but didn't, is worse than one that says no out loud.
+                note = ("\n(Not remembered — this acts in your name, so it will keep asking. "
+                        "§0 P3.)")
+            else:
+                note = "\n(Remembered — I won't ask about this pattern again.)"
+        return f"{verb}: {action.description}{note}"
+
     def route_text(self, text: str) -> str:
         """Free text: continue an active (FRESH) session if one is running, else route via intent."""
         if not text.startswith("/"):
+            approval = self._try_approval_reply(text)
+            if approval is not None:
+                return approval
             if self._session_fresh(_SEND_KEY):   # "confirm send" / "cancel" after a compose preview
                 return self._dispatch("email_agent", "continue_send", {"text": text})
             if self._session_fresh(_TRASH_KEY):  # "confirm trash" / "cancel" / a follow-up filter
