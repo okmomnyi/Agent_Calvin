@@ -330,3 +330,41 @@ def test_bots_are_not_listed_as_teammates():
         return base(url, **kw)
     cs = collaborations("okmomnyi", ["Techtoxic/ums"], http=with_bot)
     assert cs[0].teammates == ["Techtoxic"], cs[0].teammates
+
+
+def test_infrastructure_signals_are_not_hidden_by_dominant_language():
+    """GitHub reports Dockerfile/PLpgSQL/Shell as languages, but only in the per-repo
+    /languages breakdown -- never as a repo's dominant `language`.
+
+    Reading only the dominant language is why a CV tailored for an SRE role listed Docker as a
+    GAP for someone whose own repo ships a Dockerfile. The evidence was there; we weren't
+    looking at it.
+    """
+    from core.github_profile import derive_facts
+
+    def http(url, **kw):
+        path = url.replace("https://api.github.com", "")
+        if path.endswith("/languages"):
+            return _Resp({"Python": 90000, "Dockerfile": 1200, "PLpgSQL": 4000, "Shell": 800})
+        return _detailed_http()(url, **kw)
+
+    facts = {f["key"]: f["value"] for f in derive_facts("okmomnyi", [], http=http)}
+    assert "infrastructure_tooling" in facts
+    tooling = facts["infrastructure_tooling"]
+    assert "Docker" in tooling and "PostgreSQL" in tooling and "Linux" in tooling
+    # and the dominant-language view alone would have shown only Python
+    assert "Dockerfile" not in facts.get("languages_by_repo_count", "")
+
+
+def test_infrastructure_claims_require_actual_bytes():
+    """No Terraform in the repos means no Terraform on the CV (§0 P5)."""
+    from core.github_profile import derive_facts
+
+    def http(url, **kw):
+        path = url.replace("https://api.github.com", "")
+        if path.endswith("/languages"):
+            return _Resp({"Python": 90000})       # no Dockerfile, no HCL
+        return _detailed_http()(url, **kw)
+
+    facts = {f["key"]: f["value"] for f in derive_facts("okmomnyi", [], http=http)}
+    assert "infrastructure_tooling" not in facts, "claimed tooling with no evidence"

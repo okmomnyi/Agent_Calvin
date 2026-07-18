@@ -40,6 +40,9 @@ API = "https://api.github.com"
 # READMEs are one request each. Enough to characterise someone, few enough to stay well inside
 # the unauthenticated 60/hr budget alongside everything else.
 README_LIMIT = 5
+# One /languages call per repo. Capped so a full import stays inside GitHub's unauthenticated
+# 60 requests/hour budget alongside everything else (GITHUB_TOKEN raises it to 5000/hr).
+LANG_DETAIL_REPOS = 25
 
 
 class GitHubError(RuntimeError):
@@ -180,6 +183,39 @@ def derive_facts(user: str, repos_full_names: list[str] | None = None, *,
                            for k, v in sorted(langs.items(), key=lambda x: -x[1]))
         facts.append({"category": "skills", "key": "languages_by_repo_count", "value": ranked,
                       "evidence": f"{len(rs)} own public repos"})
+
+    # FULL per-repo language breakdown, not just each repo's dominant language. GitHub reports
+    # Dockerfile, PLpgSQL, Shell and PowerShell as languages, and they only ever appear here --
+    # the dominant-language view hid every one of them. That is why a CV tailored for an SRE
+    # role listed "Docker" as a GAP for someone whose own repo ships a Dockerfile: the evidence
+    # existed and we simply were not reading it.
+    byte_totals: dict[str, int] = {}
+    for r in rs[:LANG_DETAIL_REPOS]:
+        try:
+            for lang, size in (_get(f"/repos/{user}/{r.name}/languages", http=http) or {}).items():
+                byte_totals[lang] = byte_totals.get(lang, 0) + int(size)
+        except (GitHubError, ValueError, TypeError):
+            continue
+    if byte_totals:
+        ranked_bytes = ", ".join(
+            f"{k}" for k, _ in sorted(byte_totals.items(), key=lambda x: -x[1]))
+        facts.append({"category": "skills", "key": "full_language_breakdown",
+                      "value": f"Languages/technologies across his repos, by volume: {ranked_bytes}",
+                      "evidence": f"GitHub /languages across {min(len(rs), LANG_DETAIL_REPOS)} repos"})
+        # Call out the infrastructure signals explicitly: an ATS scanner and a human reviewer
+        # both look for these words, and "PLpgSQL" buried in a list is not the same as saying
+        # PostgreSQL. Only named when GitHub actually reports the bytes.
+        infra_map = {"Dockerfile": "Docker / containerisation",
+                     "PLpgSQL": "PostgreSQL (stored procedures/SQL)",
+                     "Shell": "Shell scripting / Linux",
+                     "PowerShell": "PowerShell scripting / Windows automation",
+                     "Makefile": "Make build tooling",
+                     "HCL": "Terraform / infrastructure-as-code"}
+        found = [label for key, label in infra_map.items() if byte_totals.get(key)]
+        if found:
+            facts.append({"category": "tools", "key": "infrastructure_tooling",
+                          "value": "; ".join(found),
+                          "evidence": "committed files in his own repos"})
 
     # notable own projects: name + language + live URL + description
     named = [f"{r.name} [{r.language}]"
