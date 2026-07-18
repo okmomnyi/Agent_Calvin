@@ -247,15 +247,30 @@ class CvTailorSkill(BaseSkill):
             data = self.llm.chat_json(
                 "write",
                 [{"role": "system", "content":
-                    "Tailor this candidate's CV to the job. HARD RULES: use ONLY the verified CV facts "
-                    "provided; you may reorder, emphasize, and rephrase, and mirror the job's terminology "
-                    "ONLY where it is genuinely true of the candidate. NEVER add a skill, tool, employer, "
-                    "or qualification not in the facts — if the job wants something missing, list it in "
-                    "'gaps' instead. ATS-safe plain markdown (standard section headers, no tables/columns/"
-                    "images). Return JSON."},
+                    "Tailor this candidate's CV to the job.\n"
+                    "HARD RULES: use ONLY what the MASTER CV and VERIFIED FACTS support; you may "
+                    "reorder, emphasize, expand and rephrase, and mirror the job's terminology ONLY "
+                    "where it is genuinely true of the candidate. NEVER add a skill, tool, employer, "
+                    "or qualification that is not there — if the job wants something missing, list it "
+                    "in 'gaps' instead.\n"
+                    "DEPTH: the result must be at least as detailed as the master CV. Keep EVERY "
+                    "relevant bullet and its specifics (technologies, scope, what was actually built "
+                    "or tested); do not compress prose into one-line summaries and do not drop "
+                    "sections. Where a master bullet is relevant to this job, lead with it and draw "
+                    "out the detail the job asks about. Where a verified fact adds supporting "
+                    "evidence (projects, languages, tooling), fold it in as its own bullet rather "
+                    "than a bare list.\n"
+                    "ATS-safe plain markdown (standard section headers, no tables/columns/images). "
+                    "Return JSON."},
                  {"role": "user", "content":
-                    f"VERIFIED CV FACTS:\n{self._facts_text()}\n\nJOB DESCRIPTION:\n{jd[:3000]}"}],
-                schema_hint=_TAILOR_SCHEMA, temperature=0.3, max_tokens=2000)
+                    # The MASTER TEXT is the depth. Facts alone are terse key:value pairs -- feeding
+                    # only those produced a CV markedly thinner than Calvin's own, because the rich
+                    # bullets ("Performed web security testing on ... intentionally vulnerable
+                    # applications", OWASP work, project detail) never reached the model at all.
+                    f"MASTER CV (source of truth — preserve this depth):\n{master_text[:6000]}\n\n"
+                    f"VERIFIED FACTS (additional, all confirmed):\n{self._facts_text()[:3000]}\n\n"
+                    f"JOB DESCRIPTION:\n{jd[:3000]}"}],
+                schema_hint=_TAILOR_SCHEMA, temperature=0.3, max_tokens=4000)
         except LLMError:
             return CommandResult(text="Couldn't tailor the CV right now.", ok=False)
 
