@@ -197,6 +197,45 @@ class ApprovalStore:
             conn.execute("UPDATE pending_actions SET status=%s, error=%s, resolved_at=%s "
                          "WHERE id=%s", (status, error[:500], self._now(), action_id))
 
+    def seen_ids(self, kind_prefix: str = "") -> set[str]:
+        """Source ids already proposed, so a re-run never asks about the same thing twice.
+
+        Idempotency is what makes a scheduled triage safe to run hourly: without it, every
+        pass re-proposes the same fifty emails and the summary becomes noise Calvin ignores.
+        """
+        sql = "SELECT payload FROM pending_actions"
+        params: tuple[Any, ...] = ()
+        if kind_prefix:
+            sql += " WHERE kind LIKE %s"
+            params = (f"{kind_prefix}%",)
+        out: set[str] = set()
+        for r in self.mem.execute(sql, params).fetchall():
+            payload = r["payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload or "{}")
+                except json.JSONDecodeError:
+                    continue
+            for key in ("doc_id", "message_id", "id"):
+                if payload and payload.get(key):
+                    out.add(str(payload[key]))
+        return out
+
+    def expire_stale(self, older_than_hours: float = 72.0) -> int:
+        """Retire pending actions Calvin never answered.
+
+        A three-day-old "shall I archive this?" is no longer a useful question, and a list
+        that only grows is a list nobody reads. Expired rows are kept (§0 P4) -- they just
+        stop appearing in `pending()`.
+        """
+        cutoff = self._now() - older_than_hours * 3600
+        with self.mem.tx() as conn:
+            rows = conn.execute(
+                "UPDATE pending_actions SET status='expired', resolved_at=%s "
+                "WHERE status=%s AND created_at < %s RETURNING id",
+                (self._now(), PENDING, cutoff)).fetchall()
+        return len(rows)
+
     def approved(self, limit: int = 50) -> list[Action]:
         rows = self.mem.execute(
             "SELECT * FROM pending_actions WHERE status=%s ORDER BY id LIMIT %s",
