@@ -92,7 +92,23 @@ class CvTailorSkill(BaseSkill):
         return self._facts_text()
 
     def _facts_text(self) -> str:
-        return "\n".join(f"[{r['section']}] {r['key']}: {r['value']}" for r in self.mem.get_cv_facts())
+        """Verified facts the tailor may draw on: the master CV PLUS confirmed persona facts.
+
+        The master CV is general, but Calvin's GitHub-derived skills (Docker, TypeScript,
+        PostgreSQL, his deployed projects and collaborations) are ALSO verified -- so a DevOps
+        JD can be matched honestly instead of the tailor being blind to skills he has proven.
+        Only VERIFIED persona facts are included (§0 P5): a candidate never reaches a CV.
+        """
+        lines = [f"[{r['section']}] {r['key']}: {r['value']}" for r in self.mem.get_cv_facts()]
+        try:
+            from core.persona_store import get_engine
+
+            for r in get_engine().get_facts(verified_only=True):
+                if r["category"] in ("skills", "tools", "languages", "work_history", "education"):
+                    lines.append(f"[{r['category']}] {r['key']}: {r['value']}")
+        except Exception:  # noqa: BLE001 - persona facts are a bonus, never required
+            pass
+        return "\n".join(lines)
 
     def update(self, path: str = "", **_: Any) -> CommandResult:
         """Ingest the master CV → structured cv_facts; return a diff + persona cross-check."""
