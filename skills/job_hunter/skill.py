@@ -21,6 +21,7 @@ from core.logging_setup import get_logger
 from core.mailer import ApplicationMailer
 from core.memory import Memory, get_memory
 from core.notify import send_telegram
+from core.queue import get_queue, handler
 from core.persona_store import get_engine, is_seeded, verified_facts_text
 from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 from skills.job_hunter.fetcher import Fetcher
@@ -177,7 +178,21 @@ class JobHunterSkill(BaseSkill):
 
         # Cap scoring per run to control LLM volume; report anything deferred (no silent cap).
         to_process = new_jobs[: self.max_score_per_run]
-        deferred = len(new_jobs) - len(to_process)
+        overflow = new_jobs[self.max_score_per_run:]
+        # The overflow used to be dropped with "(438 more deferred to the next run)" and, since
+        # the next run scraped fresh jobs too, much of it was never scored at all -- 432 jobs
+        # sat unscored for days. The cap exists to keep ONE pass bounded, not to discard work,
+        # so the rest goes on the queue and workers drain it. Deduped by job id: re-running a
+        # hunt while the backlog drains must not queue the same job twice.
+        queued = 0
+        for job_id, _raw in overflow:
+            try:
+                if get_queue().enqueue("job_hunter.score_one", {"job_id": int(job_id)},
+                                       dedupe_key=f"score:{job_id}") is not None:
+                    queued += 1
+            except Exception:  # noqa: BLE001 - a queue outage must not abort the hunt
+                log.exception("could not enqueue job %s for scoring", job_id)
+        deferred = len(overflow) - queued
 
         keepers: list[dict[str, Any]] = []
         for job_id, raw in to_process:
@@ -186,7 +201,7 @@ class JobHunterSkill(BaseSkill):
                 keepers.append(keeper)
 
         auto_applied = self._maybe_auto_apply(keepers)
-        digest = self._render_digest(keepers, deferred, auto_applied)
+        digest = self._render_digest(keepers, deferred, auto_applied, queued=queued)
         if notify and keepers:
             self._notify(digest)
         for k in keepers:
@@ -195,7 +210,7 @@ class JobHunterSkill(BaseSkill):
         return CommandResult(
             text=digest,
             data={"new": len(new_jobs), "scored": len(to_process), "kept": len(keepers),
-                  "deferred": deferred, "auto_applied": auto_applied},
+                  "queued": queued, "deferred": deferred, "auto_applied": auto_applied},
         )
 
     def _scrape_new(self) -> list[tuple[int, RawJob]]:
@@ -504,7 +519,8 @@ class JobHunterSkill(BaseSkill):
             return None
 
     # ------------------------------------------------------------- digest render
-    def _render_digest(self, keepers: list[dict[str, Any]], deferred: int, auto_applied: int) -> str:
+    def _render_digest(self, keepers: list[dict[str, Any]], deferred: int, auto_applied: int,
+                       queued: int = 0) -> str:
         if not keepers:
             return "Hunt complete — no postings cleared the score threshold this run."
         name = get_settings().my_name
@@ -522,9 +538,32 @@ class JobHunterSkill(BaseSkill):
                      "or use the Telegram buttons (Phase 8).")
         if auto_applied:
             lines.append(f"🤖 AUTO_APPLY sent {auto_applied} email application(s) automatically.")
+        if queued:
+            lines.append(f"(⚙️ {queued} more posting(s) queued — workers are scoring them now.)")
         if deferred:
-            lines.append(f"({deferred} more new posting(s) deferred to the next run to limit scoring cost.)")
+            lines.append(f"({deferred} more new posting(s) deferred to the next run.)")
         return "\n".join(lines)
+
+
+@handler("job_hunter.score_one")
+def score_one(job_id: int) -> str:
+    """Score+draft ONE already-scraped job. The unit of work the queue drains.
+
+    Module-level and resolved by name so a worker running a newer image can still drain rows
+    enqueued by an older one -- the queue stores a string, never a pickled callable.
+    """
+    from skills.job_hunter import SKILL as hunter
+
+    row = hunter.mem.get_job(int(job_id))
+    if row is None:
+        return f"job {job_id} no longer exists"
+    if row["status"] not in ("new", None):
+        return f"job {job_id} already {row['status']}"
+    raw = RawJob.from_dict(json.loads(row["raw_json"])) if row.get("raw_json") else None
+    if raw is None:
+        return f"job {job_id} has no raw payload to score"
+    keeper = hunter._score_and_draft(int(job_id), raw)
+    return f"scored {job_id}" + (" (keeper)" if keeper else " (below threshold)")
 
 
 def find_master_cv() -> Path | None:

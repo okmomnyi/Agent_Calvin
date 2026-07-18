@@ -182,6 +182,16 @@ def _current_voice() -> dict[str, Any]:
     return {"voice": "guy", "voice_id": "en-US-GuyNeural", "rate": "+0%", "rate_percent": 0}
 
 
+def _queue_stats() -> dict[str, int]:
+    """Queue depth for /api/health. Never raises: health must work with the DB flaky."""
+    try:
+        from core.queue import get_queue
+
+        return get_queue().stats()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _client_actions(result: Any) -> list[dict[str, str]]:
     """App ops a skill wants the laptop to run (Phase 23).
 
@@ -229,6 +239,9 @@ async def api_health() -> dict[str, Any]:
     return {
         "status": "ok" if (db_ok and scheduler.running) else "degraded",
         "scheduler_running": scheduler.running,
+        # Phase 26: a backlog or a
+        # pile of failures should be visible here, not discovered in a log.
+        "queue": _queue_stats(),
         "scheduled_jobs": len(scheduler.get_jobs()) if scheduler.running else 0,
         "db_ok": db_ok,
         "nim_key_present": bool(settings.nvidia_api_key),

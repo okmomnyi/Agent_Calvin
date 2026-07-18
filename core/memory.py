@@ -424,6 +424,30 @@ CREATE TABLE IF NOT EXISTS infra_scan_results (
 );
 CREATE INDEX IF NOT EXISTS idx_infra_status ON infra_scan_results(status, severity);
 
+-- Durable job queue (Phase 26): the api/scheduler enqueue, worker processes drain.
+-- Rows are never deleted -- a failed job keeps its error so it can be inspected and requeued.
+CREATE TABLE IF NOT EXISTS job_queue (
+    id           SERIAL PRIMARY KEY,
+    kind         TEXT NOT NULL,              -- handler name, e.g. 'job_hunter.score'
+    payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status       TEXT NOT NULL DEFAULT 'queued',  -- queued | running | done | failed
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    dedupe_key   TEXT,                       -- optional: don't queue the same work twice
+    run_at       DOUBLE PRECISION NOT NULL,  -- earliest execution (used for retry backoff)
+    created_at   DOUBLE PRECISION NOT NULL,
+    started_at   DOUBLE PRECISION,
+    finished_at  DOUBLE PRECISION,
+    worker       TEXT,
+    last_error   TEXT,
+    result       TEXT
+);
+-- The claim query orders by (run_at, id) over queued rows; this index is what keeps
+-- FOR UPDATE SKIP LOCKED cheap as the table grows.
+CREATE INDEX IF NOT EXISTS idx_queue_claim ON job_queue(status, run_at, id);
+CREATE INDEX IF NOT EXISTS idx_queue_dedupe ON job_queue(dedupe_key)
+    WHERE dedupe_key IS NOT NULL;
+
 -- Every skill's declared scope, persisted at registration so it's inspectable/auditable.
 CREATE TABLE IF NOT EXISTS skill_contracts (
     skill_name       TEXT PRIMARY KEY,

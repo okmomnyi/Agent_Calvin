@@ -381,6 +381,25 @@ def cmd_persona_init(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_queue(args: argparse.Namespace) -> int:
+    """Inspect the job queue: depth, recent failures, requeue after a fix."""
+    from core.queue import get_queue
+
+    q = get_queue()
+    if args.requeue:
+        n = q.requeue_failed(None if args.requeue == "all" else args.requeue)
+        print(f"Requeued {n} failed job(s).")
+        return 0
+    stats = q.stats()
+    print("Queue: " + "  ".join(f"{k}={v}" for k, v in stats.items()))
+    fails = q.recent_failures()
+    if fails:
+        print("\nRecent failures:")
+        for f in fails:
+            print(f"  [{f['id']}] {f['kind']} (x{f['attempts']}): {str(f['last_error'])[:110]}")
+    return 0
+
+
 def cmd_persona_github(args: argparse.Namespace) -> int:
     """Derive CANDIDATE persona facts from Calvin's public repos (he confirms each)."""
     from skills.persona import SKILL
@@ -736,6 +755,10 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_persona_init)
 
     # --- Phase 5: form assistant ---
+    p_q = sub.add_parser("queue", help="job queue depth, failures, and requeue")
+    p_q.add_argument("--requeue", help="requeue failed jobs: a kind name, or 'all'")
+    p_q.set_defaults(func=cmd_queue)
+
     p_pg = sub.add_parser("persona-github", help="import CANDIDATE facts from public GitHub repos")
     p_pg.add_argument("--detailed", action="store_true",
                       help="deterministic deep read: languages, deployed apps, collaborations")

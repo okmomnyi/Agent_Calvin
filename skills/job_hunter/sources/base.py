@@ -8,7 +8,7 @@ level `parse_*` functions) lets tests exercise parsers against saved fixtures of
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Protocol
 
 
@@ -35,6 +35,18 @@ class RawJob:
             "location": self.location, "tags": self.tags, "category_hint": self.category_hint,
             "apply_email": self.apply_email, "kind": self.kind,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RawJob:
+        """Rebuild from the stored raw_json.
+
+        The queue (Phase 26) scores a job in a WORKER process, long after the scrape that
+        found it — so the posting has to be reconstructible from the database rather than
+        held in memory. Unknown keys are ignored so an older stored row still loads after a
+        field is added.
+        """
+        allowed = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in (data or {}).items() if k in allowed})
 
 
 class JobSource(Protocol):

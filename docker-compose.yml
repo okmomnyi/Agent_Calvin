@@ -79,6 +79,19 @@ services:
     healthcheck:
       disable: true
 
+  # Drains the job queue (Phase 26). Heavy work — scraping, LLM scoring, CV tailoring —
+  # runs HERE so it never competes with /api/command, which is what Calvin talks to.
+  #
+  #   docker compose up -d --scale worker=3
+  #
+  # is safe: claims use FOR UPDATE SKIP LOCKED, so N workers take N different jobs and never
+  # the same one. No container_name — Docker must be free to name replicas.
+  worker:
+    <<: *agentos-base
+    command: ["python", "-m", "kernel.worker"]
+    healthcheck:
+      disable: true
+
   # ---------------------------------------------------------------- optional: TLS
   caddy:
     profiles: ["tls"]
