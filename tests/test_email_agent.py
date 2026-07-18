@@ -7,6 +7,8 @@ mail keeps its INBOX label, and reply drafting creates a DRAFT and NEVER calls s
 
 from __future__ import annotations
 
+import pytest
+
 from unittest.mock import MagicMock
 
 
@@ -248,3 +250,36 @@ def test_delete_by_sender_uses_from_not_full_text(fake_llm, mem):
     assert _gmail_query("the invoice from acme corp") == "the invoice from acme corp"
     # categories still win
     assert _gmail_query("promotions") == "category:promotions"
+
+
+# ============================================================ compound delete requests
+@pytest.mark.parametrize("said,expected", [
+    # The exact shape that silently failed: a real request to clear LinkedIn mail became
+    # from:(LinkedIn promotional) -- no such sender -- so it reported "No emails matched"
+    # while the inbox was full of them.
+    ("LinkedIn promotional emails", "from:(LinkedIn) category:promotions"),
+    ("all LinkedIn emails and Facebook emails", "from:(LinkedIn OR Facebook)"),
+    ("LinkedIn, Facebook and Indy games emails", "from:(LinkedIn OR Facebook OR Indy games)"),
+    ("all the emails related to okx that are not transactional", "from:(okx)"),
+    # single-term and structured forms must keep working
+    ("linkedin", "from:(linkedin)"),
+    ("promotional emails", "category:promotions"),
+    ("from linkedin", "from:(linkedin)"),
+    ("older than 30 days", "older_than:30d"),
+    ("subject newsletter", "subject:(newsletter)"),
+])
+def test_spoken_delete_requests_become_precise_gmail_queries(said, expected):
+    from skills.email_agent import _clean_delete_query, _gmail_query
+
+    assert _gmail_query(_clean_delete_query(said)) == expected
+
+
+def test_delete_queries_target_the_sender_not_the_body():
+    """Full-text 'linkedin' also matches OKX/Railway (their footers link to LinkedIn).
+
+    On a path whose next step deletes what matched, over-matching is the dangerous failure.
+    """
+    from skills.email_agent import _clean_delete_query, _gmail_query
+
+    q = _gmail_query(_clean_delete_query("linkedin"))
+    assert q.startswith("from:"), f"{q} would match any message mentioning linkedin"

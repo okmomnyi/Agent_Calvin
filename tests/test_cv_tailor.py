@@ -189,3 +189,32 @@ def test_tailor_never_saves_a_lower_scoring_variant(cv, mem):
     result = skill.tailor(target="Docker Linux Git CI/CD cloud engineer")
     assert result.data["ats_after"] == result.data["ats_before"]
     assert "reduced ATS match" in result.data["safeguard"]
+
+
+def test_the_master_cv_file_is_never_modified_by_tailoring(cv, mem):
+    """Calvin: "the mastercv should stay the same ... only be altered when i say so".
+
+    Tailoring writes variants; the master is the source of truth and must come out of a tailor
+    run byte-for-byte identical. Asserted on the FILE, not on intent -- an accidental
+    write-back would be silent and would corrupt every future application.
+    """
+    import hashlib
+
+    skill, tmp = cv
+    master = tmp / "cv" / "master_cv.md"
+    master.parent.mkdir(parents=True, exist_ok=True)
+    master.write_text("# Calvin\n## Skills\nDocker, PM2, Caddy, Nginx\n", encoding="utf-8")
+    before = hashlib.sha256(master.read_bytes()).hexdigest()
+    mtime_before = master.stat().st_mtime
+
+    mem.replace_cv_facts([{"section": "skills", "key": "devops", "value": "Docker, PM2, Caddy"}], "v1")
+    skill._llm = _CvLLM(tailor={
+        "cv_markdown": "## Skills\nDocker, PM2, Caddy, Nginx\n## Summary\nDevOps-focused.",
+        "changelog": ["Reordered for the role"], "gaps": []})
+    res = skill.tailor(target="DevOps role: Docker, Nginx.", company="Acme")
+
+    assert res.ok
+    assert hashlib.sha256(master.read_bytes()).hexdigest() == before, "master CV was rewritten"
+    assert master.stat().st_mtime == mtime_before, "master CV was touched"
+    # and the variant is a genuinely separate file
+    assert Path(res.data["variant"]).resolve() != master.resolve()

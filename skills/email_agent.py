@@ -571,8 +571,31 @@ def _gmail_query(text: str) -> str:
     # `from:(...)` keys on the sender, which is what "delete linkedin emails" actually means.
     # Short, sender-like phrases only; longer content queries ("the invoice from acme") keep
     # full-text so a genuine content search still works.
-    if len(cleaned.split()) <= 2 and "@" not in cleaned:
-        return f"from:({cleaned})"
+    # Compound requests are how Calvin actually talks: "LinkedIn promotional emails",
+    # "LinkedIn and Facebook", "okx, jiji and indie games". Previously the whole phrase became
+    # one sender -- from:(LinkedIn promotional) matches no sender alive, so a real request to
+    # clear LinkedIn mail silently reported "No emails matched" while the inbox was full of it.
+    lowered = cleaned.lower()
+    category = None
+    for words, cat in (({"promotional", "promotions", "promotion"}, "category:promotions"),
+                       ({"social"}, "category:social"),
+                       ({"newsletter", "newsletters", "updates"}, "category:updates")):
+        if words & set(re.findall(r"[a-z]+", lowered)):
+            category = cat
+            # the category word is a qualifier, not part of the sender name
+            cleaned = re.sub(r"\b(?:%s)\b" % "|".join(words), " ", cleaned, flags=re.I)
+            break
+
+    # split on and / commas -> several senders, OR'd together
+    brands = [b.strip() for b in re.split(r"\s*(?:,|\band\b|\bor\b|\+)\s*", cleaned, flags=re.I)
+              if b.strip()]
+    brands = [b for b in brands if "@" not in b and len(b.split()) <= 3]
+    if brands and all(len(b.split()) <= 3 for b in brands):
+        senders = " OR ".join(brands)
+        sender_q = f"from:({senders})"
+        return f"{sender_q} {category}" if category else sender_q
+    if category:
+        return category
     return cleaned
 
 
