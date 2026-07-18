@@ -78,11 +78,33 @@ $WsToken   = Get-EnvValue "AGENT_WS_TOKEN"
 
 if (-not $WsToken) { Log "FATAL: AGENT_WS_TOKEN not found in $EnvFile"; exit 1 }
 if (-not (Test-Path $SshKey)) { Log "FATAL: ssh key not found: $SshKey"; exit 1 }
-if (Test-Path $BundledPython) { $Python = $BundledPython }
-else {
-    $PythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $PythonCommand) { Log "FATAL: no Python found (expected $BundledPython)"; exit 1 }
-    $Python = $PythonCommand.Source
+
+# Pick an interpreter that can actually import tkinter. The window (Phase 24) needs it, and the
+# bundled embeddable python (.python\python.exe) does NOT ship tkinter -- so preferring it made
+# the window crash-loop on "No module named 'tkinter'" while the supervisor kept relaunching it.
+# The client deps (tkinter, pystray, sounddevice, whisper) all live in the full Python install
+# on PATH, so verify each candidate rather than trusting a path.
+function Test-PyTk($py) {
+    if (-not $py -or -not (Test-Path $py)) { return $false }
+    & $py -c "import tkinter" 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+$candidates = @(
+    (Get-Command python -ErrorAction SilentlyContinue).Source,
+    "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+    $BundledPython
+) | Where-Object { $_ } | Select-Object -Unique
+$Python = $null
+foreach ($c in $candidates) { if (Test-PyTk $c) { $Python = $c; break } }
+if (-not $Python) {
+    # Window can't run without tkinter, but voice/--text modes can -- fall back so those work.
+    $Python = if (Test-Path $BundledPython) { $BundledPython }
+              else { (Get-Command python -ErrorAction SilentlyContinue).Source }
+    if (-not $Python) { Log "FATAL: no Python found at all"; exit 1 }
+    Log "WARNING: no python with tkinter; window mode will fail. Using $Python"
+} else {
+    Log "python: $Python (tkinter OK)"
 }
 
 $env:AGENT_WS_URL   = "ws://localhost:$LocalPort/ws/voice"
