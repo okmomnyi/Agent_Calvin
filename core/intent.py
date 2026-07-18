@@ -71,6 +71,7 @@ INTENTS: dict[str, tuple[str, str]] = {
     "music_start":     ("music", "start_session"),
     "music_stop":      ("music", "stop_session"),
     "music_status":    ("music", "session_status"),
+    "music_budget":    ("music", "budget"),
     "chit_chat":       ("chat", "reply"),
 }
 
@@ -149,6 +150,9 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     ("music_stop", re.compile(
         r"\b(?:stop|kill|end|pause)\s+(?:the\s+)?music\b"
         r"|\bstop\s+(?:the\s+)?(?:music\s+)?session\b|\bmusic\s+off\b", re.I), None),
+    ("music_budget", re.compile(
+        r"\b(?:music|listening)\s+(?:budget|minutes|hours)\b"
+        r"|\bhow\s+much\s+(?:music|have i listened)\b", re.I), None),
     ("music_status", re.compile(
         r"\b(?:music|listening)\s+session\s+status\b|\bwhat(?:'?s| is)\s+playing\b"
         r"|\bis\s+(?:the\s+)?music\s+(?:still\s+)?(?:on|running|playing)\b", re.I), None),

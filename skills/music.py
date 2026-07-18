@@ -42,6 +42,13 @@ log = get_logger("skills.music")
 
 _TASTE_KV = "music.taste"
 _SESSION_KV = "music.session"
+_BUDGET_KV = "music.budget"
+# Calvin's monthly listening target, in minutes (~5.5h/day). A BUDGET he can spend, not a
+# quota the bot must hit: see _budget_state() for why that distinction matters.
+DEFAULT_MONTHLY_MINUTES = 10_000
+# Share of a session's picks that should be NEW to him -- the "help me discover more music"
+# ask. The rest stay in his known lane so a work session doesn't turn into a listening test.
+DISCOVERY_RATIO = 0.35
 # How many tracks to keep queued ahead. Small enough that a "stop" takes effect within a
 # track or two -- Spotify has no API to clear a queue, so anything already queued WILL play.
 SESSION_LOOKAHEAD = 4
@@ -104,6 +111,7 @@ class MusicSkill(BaseSkill):
             "now_playing": self.now_playing,
             "start_session": self.start_session, "stop_session": self.stop_session,
             "session_status": self.session_status, "session_tick": self.session_tick,
+            "budget": self.budget,
         }
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
@@ -263,8 +271,14 @@ class MusicSkill(BaseSkill):
         return kept, dropped
 
     # ------------------------------------------------------------- candidate generation
-    def _candidates(self, cue: str, n: int = 10) -> list[str]:
-        """Ask the model for track ideas from the taste picture — NOT Spotify's recommender."""
+    def _candidates(self, cue: str, n: int = 10, discover: bool = False) -> list[str]:
+        """Ask the model for track ideas from the taste picture — NOT Spotify's recommender.
+
+        `discover` biases toward artists ADJACENT to his taste rather than the ones already on
+        repeat: same scene, era or lane, but names he is unlikely to have saved. That is the
+        "help me discover more music" half of a session; the rest stays familiar so background
+        listening does not become a listening test.
+        """
         model = self._taste()
         try:
             data = self.llm.chat_json(
@@ -296,9 +310,10 @@ class MusicSkill(BaseSkill):
         return found
 
     # ------------------------------------------------------------- auto-queue
-    def auto_queue(self, cue: str = "", count: int = 8, **_: Any) -> CommandResult:
+    def auto_queue(self, cue: str = "", count: int = 8, discover: bool = False,
+                   **_: Any) -> CommandResult:
         filters = self.rule_filters(cue)
-        tracks = self._resolve(self._candidates(cue, count * 2), filters)[:count]
+        tracks = self._resolve(self._candidates(cue, count * 2, discover=discover), filters)[:count]
         if not tracks:
             return CommandResult(text="Couldn't find anything that fits (and I won't queue "
                                       "songs I can't verify exist).", ok=False)
@@ -314,6 +329,66 @@ class MusicSkill(BaseSkill):
         return CommandResult(text=f"▶️ Queued {len(queued)} track(s){note}:\n" +
                                   "\n".join(f"  • {q}" for q in queued),
                              data={"queued": queued, "filters": filters})
+
+    # ------------------------------------------------------------- listening budget
+    def _month_key(self) -> str:
+        from datetime import datetime
+
+        try:
+            from zoneinfo import ZoneInfo
+
+            return datetime.fromtimestamp(self._now(), ZoneInfo(get_settings().tz)).strftime("%Y-%m")
+        except Exception:  # noqa: BLE001
+            return time.strftime("%Y-%m", time.localtime(self._now()))
+
+    def _budget_state(self) -> dict[str, Any]:
+        """Minutes listened this month, reset automatically when the month rolls over."""
+        raw = self.mem.kv_get(_BUDGET_KV)
+        state = json.loads(raw) if raw else {}
+        month = self._month_key()
+        if state.get("month") != month:
+            state = {"month": month, "minutes": 0.0, "tracks": 0,
+                     "target": int(state.get("target") or DEFAULT_MONTHLY_MINUTES)}
+            self.mem.kv_set(_BUDGET_KV, json.dumps(state))
+        state.setdefault("target", DEFAULT_MONTHLY_MINUTES)
+        return state
+
+    def _record_listening(self, minutes: float, tracks: int = 0) -> dict[str, Any]:
+        state = self._budget_state()
+        state["minutes"] = round(float(state.get("minutes", 0.0)) + max(0.0, minutes), 1)
+        state["tracks"] = int(state.get("tracks", 0)) + max(0, tracks)
+        self.mem.kv_set(_BUDGET_KV, json.dumps(state))
+        return state
+
+    def budget(self, target: int = 0, **_: Any) -> CommandResult:
+        """Show (or set) the monthly listening budget and how much is left.
+
+        Deliberately a BUDGET, not a quota. Calvin asked the bot to "ensure the limit is
+        reached", but music played into an empty room to hit a number is what Spotify calls
+        artificial streaming: it breaches their terms, can get an account terminated, and
+        distorts the royalties of the very artists he wants to support. So this tracks and
+        paces real listening and tells him where he stands -- it will not play to nobody.
+        """
+        state = self._budget_state()
+        if target:
+            state["target"] = int(target)
+            self.mem.kv_set(_BUDGET_KV, json.dumps(state))
+        used, goal = float(state["minutes"]), int(state["target"])
+        pct = int(100 * used / goal) if goal else 0
+        left = max(0, goal - used)
+        # Pace against the month so "am I on track?" is answerable.
+        from datetime import datetime
+
+        now = datetime.fromtimestamp(self._now())
+        days_in_month = 30
+        expected = goal * (now.day / days_in_month)
+        pace = "on track" if used >= expected * 0.9 else f"{int(expected - used)} min behind pace"
+        return CommandResult(
+            text=(f"🎧 Listening budget — {state['month']}\n"
+                  f"  {int(used)} / {goal} min ({pct}%) · {state['tracks']} tracks\n"
+                  f"  {int(left)} min left · {pace}\n"
+                  f"Sessions count toward this automatically while you're listening."),
+            data=state)
 
     # ------------------------------------------------------------- continuous session
     def start_session(self, cue: str = "", **_: Any) -> CommandResult:
@@ -406,12 +481,27 @@ class MusicSkill(BaseSkill):
             return CommandResult(text="Nothing playing right now; leaving the session alone.",
                                  data={"topped_up": 0})
 
-        res = self.auto_queue(cue=state.get("cue", ""), count=SESSION_LOOKAHEAD)
+        # Credit the minutes actually elapsed since the last tick, but only while something
+        # was genuinely playing (checked above). Time with the laptop shut or Spotify paused
+        # is not listening, and counting it would make the budget a lie.
+        last = float(state.get("last_topup") or state.get("started_at") or self._now())
+        elapsed_min = max(0.0, min((self._now() - last) / 60.0, 15.0))
+        budget = self._record_listening(elapsed_min)
+
+        # Alternate: keep most of the session in his lane, but bias some picks toward
+        # adjacent artists so the "discover more music" ask actually happens.
+        discover = (int(state.get("topups", 0)) % 3 == 2)
+        res = self.auto_queue(cue=state.get("cue", ""), count=SESSION_LOOKAHEAD,
+                              discover=discover)
         n = len(res.data.get("queued", []))
         state["last_topup"] = self._now()
+        state["topups"] = int(state.get("topups", 0)) + 1
         state["queued_total"] = int(state.get("queued_total", 0)) + n
         self.mem.kv_set(_SESSION_KV, json.dumps(state))
-        return CommandResult(text=f"Topped up {n} track(s).", data={"topped_up": n})
+        return CommandResult(
+            text=f"Topped up {n} track(s)" + (" (discovery mix)" if discover else "")
+                 + f"; {int(budget['minutes'])}/{budget['target']} min this month.",
+            data={"topped_up": n, "discover": discover, "minutes": budget["minutes"]})
 
     # ------------------------------------------------------------- playlists
     def playlist(self, theme: str = "", count: int = 20, **_: Any) -> CommandResult:

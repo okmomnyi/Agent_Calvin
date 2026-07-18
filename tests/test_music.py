@@ -582,3 +582,91 @@ def test_the_session_tick_is_scheduled(music):
     skill, _, _, _ = music
     ids = {j.id for j in skill.scheduled_jobs()}
     assert "music.session_tick" in ids, "nothing would ever top the queue up"
+
+
+# ================================================================= listening budget (Phase 29)
+def test_budget_starts_empty_with_the_monthly_target(music):
+    skill, _, _, _ = music
+    b = skill.budget()
+    assert b.data["target"] == 10_000
+    assert b.data["minutes"] == 0
+    assert "10000" in b.text or "10,000" in b.text.replace(",", "")
+
+
+def test_budget_target_is_settable(music):
+    skill, _, _, _ = music
+    assert skill.budget(target=6000).data["target"] == 6000
+    assert skill.budget().data["target"] == 6000        # persisted
+
+
+def test_listening_time_accrues_only_while_something_plays(music):
+    """Time with the laptop shut or Spotify paused is not listening.
+
+    Counting it would make the budget a lie -- and a budget you cannot trust is worse than
+    no budget, because it silently tells you you are on track when you are not.
+    """
+    skill, sp, _, _ = music
+    skill.start_session()
+    t = skill._now()
+    skill._now = lambda: t + 600          # ten minutes pass
+
+    def nothing_playing():
+        return {}
+
+    sp.now_playing = nothing_playing
+    skill.session_tick()
+    assert skill.budget().data["minutes"] == 0, "credited minutes with nothing playing"
+
+
+def test_listening_time_accrues_while_playing(music):
+    skill, _, _, _ = music
+    skill.start_session()
+    t = skill._now()
+    skill._now = lambda: t + 300          # five minutes of actual playback
+    skill.session_tick()
+    assert 4 <= skill.budget().data["minutes"] <= 6
+
+
+def test_a_long_gap_is_capped_not_backfilled(music):
+    """Laptop closed for six hours: do not credit six hours of 'listening' on the next tick."""
+    skill, _, _, _ = music
+    skill.start_session()
+    t = skill._now()
+    skill._now = lambda: t + 6 * 3600
+    skill.session_tick()
+    assert skill.budget().data["minutes"] <= 15
+
+
+def test_budget_resets_when_the_month_rolls_over(music):
+    skill, _, _, _ = music
+    skill._record_listening(500)
+    assert skill.budget().data["minutes"] == 500
+    skill._month_key = lambda: "2099-01"          # next month
+    assert skill.budget().data["minutes"] == 0
+
+
+def test_sessions_mix_in_discovery(music):
+    """The 'help me discover more music' half — adjacent artists, not the same rotation."""
+    skill, sp, _, _ = music
+    skill.start_session()
+    seen = []
+    orig = skill._candidates
+    skill._candidates = lambda cue, n=10, discover=False: seen.append(discover) or orig(cue, n)
+    for _ in range(3):
+        skill.session_tick()
+    assert any(seen), "no discovery pass in three top-ups"
+    assert not all(seen), "every pick was discovery — background listening became a test"
+
+
+def test_the_budget_is_never_a_reason_to_play_into_silence(music):
+    """Calvin asked the bot to 'ensure the limit is reached'.
+
+    Music played to an empty room to hit a number is artificial streaming: against Spotify's
+    terms, risks account termination, and distorts the royalties of the artists he wants to
+    support. Being behind target must never itself start playback.
+    """
+    skill, sp, _, _ = music
+    skill._record_listening(1)                    # far behind a 10,000 target
+    sp.queued.clear()
+    skill.session_tick()                          # no session running
+    assert sp.queued == [], "queued music purely to chase the monthly number"

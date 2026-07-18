@@ -182,3 +182,25 @@ def test_current_time_never_uses_llm_fallback(router):
     assert intent.name == "current_time"
     assert intent.skill == "chat"
     assert intent.via == "keyword"
+
+
+def test_no_rule_contains_a_literal_control_character():
+    """A regex written through a shell heredoc can pick up REAL control characters.
+
+    `\b` outside a raw string becomes backspace (0x08), which compiles fine and then never
+    matches anything — the rule is silently dead. That is exactly what happened to the
+    music_budget rule: present, imported, and incapable of matching its own examples.
+    """
+    from core.intent import _RULES
+
+    bad = [name for name, pattern, _ in _RULES
+           if any(ord(ch) < 32 and ch not in "\t" for ch in pattern.pattern)]
+    assert not bad, f"rules contain literal control chars (dead regexes): {bad}"
+
+
+def test_every_intent_rule_maps_to_a_registered_intent():
+    """A rule whose name is missing from INTENTS silently falls back to chit_chat."""
+    from core.intent import _RULES, INTENTS
+
+    unknown = sorted({name for name, _, _ in _RULES} - set(INTENTS))
+    assert not unknown, f"rules with no INTENTS entry (they route to chat): {unknown}"
