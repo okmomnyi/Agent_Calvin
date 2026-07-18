@@ -525,8 +525,16 @@ def _gmail_query(text: str) -> str:
         return "category:promotions"
     if cleaned.lower() in {"social", "social emails"}:
         return "category:social"
-    # A bare brand/word ("linkedin", "okx", "facebook", "indie games") -> full-text search,
-    # which matches the sender domain and the body. Preview lets Calvin see what it caught.
+    if cleaned.lower() in {"newsletter", "newsletters"}:
+        return "category:updates"
+    # A bare brand/word ("linkedin", "okx", "facebook") means mail FROM that sender, not any
+    # message that happens to mention it. Full-text "linkedin" also matched OKX and Railway
+    # (their footers link to LinkedIn) -- dangerous when the next step deletes what matched.
+    # `from:(...)` keys on the sender, which is what "delete linkedin emails" actually means.
+    # Short, sender-like phrases only; longer content queries ("the invoice from acme") keep
+    # full-text so a genuine content search still works.
+    if len(cleaned.split()) <= 2 and "@" not in cleaned:
+        return f"from:({cleaned})"
     return cleaned
 
 

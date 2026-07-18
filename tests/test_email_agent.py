@@ -232,3 +232,19 @@ def test_reply_drafting_is_still_draft_only():
     """The new send path must not have loosened the reply path -- GmailClient still can't send."""
     assert not hasattr(GmailClient, "send")
     assert not hasattr(GmailClient, "send_message")
+
+
+def test_delete_by_sender_uses_from_not_full_text(fake_llm, mem):
+    """On a delete, "linkedin" must mean FROM LinkedIn, not any mail mentioning it.
+
+    A live preview of "linkedin" as full text also matched OKX and Railway (footer links),
+    which would then be trashed on confirm. from:() keys on the sender instead.
+    """
+    from skills.email_agent import _gmail_query
+
+    assert _gmail_query("linkedin") == "from:(linkedin)"
+    assert _gmail_query("okx") == "from:(okx)"
+    # a genuine content query keeps full-text so it still works
+    assert _gmail_query("the invoice from acme corp") == "the invoice from acme corp"
+    # categories still win
+    assert _gmail_query("promotions") == "category:promotions"
