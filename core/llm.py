@@ -181,12 +181,28 @@ class LLMClient:
 
     # ------------------------------------------------------------------ public API
     def _post_routed(self, task: str, messages: Sequence[Message], **params: Any) -> str:
-        """Resolve the task's route (model/key/endpoint/params) and POST."""
+        """Resolve the task's route (model/key/endpoint/params) and POST.
+
+        If the task's model fails after its retries, fall back ONCE to the default route
+        rather than failing the whole feature. A single wrong/gated model id (mistral-medium
+        -3.5-128b and deepseek-v4-pro were both dead on this account) otherwise silently broke
+        CV tailoring, cover letters, briefings and the tutor with "Couldn't ... right now".
+        Degrading to the default model keeps the feature working; the miss is logged loudly.
+        """
         route = self.resolve_route(task)
         merged = {**route.params, **params}   # per-call params win over per-route defaults
         log.debug("llm task=%s model=%s endpoint=%s", task, route.model, route.base_url)
-        return self._post(route.model, messages, api_key=route.api_key,
-                          base_url=route.base_url, **merged)
+        try:
+            return self._post(route.model, messages, api_key=route.api_key,
+                              base_url=route.base_url, **merged)
+        except LLMError:
+            default = self.resolve_route("default")
+            if default.model == route.model:
+                raise            # already the default; nothing to fall back to
+            log.error("llm task=%s model=%s failed — falling back to default model %s",
+                      task, route.model, default.model)
+            return self._post(default.model, messages, api_key=default.api_key,
+                              base_url=default.base_url, **{**default.params, **params})
 
     def chat(self, task: str, messages: Sequence[Message], **params: Any) -> str:
         """Route by task class and return the assistant's text response."""

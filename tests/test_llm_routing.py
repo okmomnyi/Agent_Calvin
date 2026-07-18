@@ -76,3 +76,46 @@ def test_post_routed_passes_key_and_endpoint():
     assert captured["base_url"] == "https://code.ep/v1"
     assert captured["api_key"] == "DEFAULT_KEY"
     assert captured["params"]["temperature"] == 0.2   # per-call param passed through
+
+
+def test_a_dead_model_falls_back_to_default_not_failure():
+    """A wrong/gated model id must degrade to the default model, not break the feature.
+
+    mistral-medium-3.5-128b (write) and deepseek-v4-pro (code) were both dead on the real NIM
+    account, silently breaking CV tailoring and covers with "Couldn't ... right now". The
+    fallback keeps those features working on the default model instead.
+    """
+    from core.llm import LLMClient, LLMError
+
+    c = LLMClient()
+    seen = []
+
+    def fake_post(model, messages, **kw):
+        seen.append(model)
+        if model != c.resolve_route("default").model:
+            raise LLMError("timeout on the fancy model")
+        return "ok from default"
+
+    c._post = fake_post
+    out = c.chat("write", [{"role": "user", "content": "hi"}])
+    assert out == "ok from default"
+    assert seen[-1] == c.resolve_route("default").model      # ended on the default
+    assert len(seen) == 2                                     # tried route, then default
+
+
+def test_default_route_failure_is_not_retried_forever():
+    """If even the default model fails, raise -- don't loop."""
+    from core.llm import LLMClient, LLMError
+
+    c = LLMClient()
+    calls = []
+
+    def always_fail(model, messages, **kw):
+        calls.append(model)
+        raise LLMError("everything is down")
+
+    c._post = always_fail
+    import pytest
+    with pytest.raises(LLMError):
+        c.chat("write", [{"role": "user", "content": "hi"}])
+    assert len(calls) == 2        # route once, default once, then give up

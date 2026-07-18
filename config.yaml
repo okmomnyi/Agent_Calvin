@@ -15,12 +15,17 @@ llm:
   # Any unset field falls back to the defaults, so a SINGLE NVIDIA_API_KEY still works everywhere.
   # A route may be a bare model string OR a dict as below. Add a class = add a line; the kernel
   # never changes (Principle 2: routing, never hardcoding).
+  # Model IDs verified against this account's NIM catalog (GET /v1/models) and latency-tested
+  # on 2026-07-18. mistral-medium-3.5-128b (write/persona) did not exist, and deepseek-v4-pro
+  # (code) is listed but times out at 60s -- both consistently broke CV tailoring, cover
+  # letters, briefings and the code tutor, surfacing as "Couldn't ... right now". Replaced with
+  # models that actually answer: qwen3.5-122b-a10b (~1.4s) and mistral-nemotron (~0.3s).
   routes:
     default:     { model: "meta/llama-3.1-8b-instruct" }
     classify:    { model: "meta/llama-3.1-8b-instruct", api_key_env: NVIDIA_API_KEY_FAST,     temperature: 0.0 }
-    write:       { model: "mistralai/mistral-medium-3.5-128b", api_key_env: NVIDIA_API_KEY_WRITE }
-    persona:     { model: "mistralai/mistral-medium-3.5-128b", api_key_env: NVIDIA_API_KEY_WRITE }
-    code_review: { model: "deepseek-ai/deepseek-v4-pro", api_key_env: NVIDIA_API_KEY_CODE }
+    write:       { model: "qwen/qwen3.5-122b-a10b", api_key_env: NVIDIA_API_KEY_WRITE }
+    persona:     { model: "mistralai/mistral-nemotron", api_key_env: NVIDIA_API_KEY_WRITE }
+    code_review: { model: "qwen/qwen3.5-122b-a10b", api_key_env: NVIDIA_API_KEY_CODE }
     research:    { model: "nvidia/nemotron-3-super-120b-a12b", api_key_env: NVIDIA_API_KEY_RESEARCH, max_tokens: 1500 }
     voice_chat:  { model: "meta/llama-3.1-8b-instruct", api_key_env: NVIDIA_API_KEY_FAST }
 
