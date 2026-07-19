@@ -33,13 +33,6 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(fh) or {}
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
 @dataclass(frozen=True)
 class Settings:
     """Resolved runtime settings — a merge of environment secrets and config.yaml."""
@@ -51,7 +44,6 @@ class Settings:
     telegram_bot_token: str
     telegram_chat_id: str
     ws_token: str
-    auto_apply: bool
     serpapi_key: str
 
     # server
@@ -107,7 +99,6 @@ def get_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         ws_token=os.getenv("AGENT_WS_TOKEN", ""),
-        auto_apply=_env_bool("AUTO_APPLY", False),
         serpapi_key=os.getenv("SERPAPI_KEY", ""),
         host=os.getenv("AGENTOS_HOST", "0.0.0.0"),
         port=int(os.getenv("AGENTOS_PORT", "8000")),

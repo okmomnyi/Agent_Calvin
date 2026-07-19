@@ -229,7 +229,6 @@ MY_EMAIL=you@example.com
 TELEGRAM_BOT_TOKEN=...            # from @BotFather
 TELEGRAM_CHAT_ID=...              # your numeric chat id (get it from @userinfobot)
 AGENT_WS_TOKEN=<long-random>      # shared secret for /api/command and the voice WebSocket
-AUTO_APPLY=false                  # true relaxes approval for EMAIL-apply jobs only
 # optional per-task keys (see §3) — blank = fall back to NVIDIA_API_KEY
 NVIDIA_API_KEY_FAST=
 NVIDIA_API_KEY_WRITE=
@@ -395,19 +394,35 @@ Scopes: `gmail.modify` (read/label/archive/draft — *cannot* permanently delete
 
 ## 7. PM2 processes
 
-The API (kernel + scheduler) and the Telegram bot are **independent** processes so one can
-restart without the other. `ecosystem.config.js` defines both:
+The API (kernel + scheduler), the queue worker, and the Telegram bot are **independent**
+processes so one can restart without the others. `ecosystem.config.js` defines all three:
 
 ```bash
 npm install -g pm2
-pm2 start ecosystem.config.js     # starts agentos-api + agentos-bot
+pm2 start ecosystem.config.js     # agentos-api + agentos-worker + agentos-bot
 pm2 logs agentos-api
 pm2 save && pm2 startup           # survive reboots (run the printed command)
 ```
 
-- `agentos-api` → `uvicorn kernel.app:app` on `:8000` (also runs APScheduler: cleanup, hunts,
-  briefing, watchers, digests).
+- `agentos-api` → `uvicorn kernel.app:app` on `:8000` (also runs APScheduler: cleanup,
+  briefing, watchers, digests — and **enqueues** the heavy jobs rather than running them).
+- `agentos-worker` → `python -m kernel.worker`, drains `job_queue`.
 - `agentos-bot` → `manage.py telegram` (long-poll).
+
+> **`agentos-worker` is not optional.** Since Phase 26 the scheduler enqueues the heavy jobs
+> — `job_hunter.hunt`, `vault.ingest`, `lecture.inbox`, `flip.scan`, `events.scan`,
+> `proactive.triage` — instead of running them inline. With no worker those rows are claimed
+> by nobody: the hunt quietly stops finding jobs and the 05:30 triage never runs, with nothing
+> in the logs to say so, because the *enqueue* succeeded. This is the one PM2/Docker
+> difference that fails silently rather than loudly.
+
+Scale it the same way compose does — claims use `FOR UPDATE SKIP LOCKED`, so N workers take
+N different rows and never the same one:
+
+```bash
+pm2 scale agentos-worker 3
+python manage.py queue            # depth + recent failures
+```
 
 Adjust the venv path in `ecosystem.config.js` (`./.venv/bin/python`) if yours differs.
 
@@ -616,7 +631,7 @@ Match Calvin's existing infra pattern — push from the laptop, pull + restart o
 git add -A && git commit -m "…" && git push
 
 # droplet
-cd ~/AgentOS && git pull && pm2 restart agentos-api agentos-bot
+cd ~/AgentOS && git pull && pm2 restart agentos-api agentos-worker agentos-bot
 pm2 logs --lines 50        # verify
 curl -s localhost:8000/api/health | python -m json.tool
 ```
@@ -670,4 +685,4 @@ curl -s localhost:8000/api/health | python -m json.tool
   it scans nothing you haven't explicitly enrolled.
 - **`infra scan` slow** — each enrolled host with an open 80/443 is probed for sensitive paths
   with retry+backoff. Hosts with no web port skip HTTP entirely.
-- **Logs** — `logs/agentos.log` (rotating), plus `pm2 logs agentos-api|agentos-bot`.
+- **Logs** — `logs/agentos.log` (rotating), plus `pm2 logs agentos-api|agentos-worker|agentos-bot`.

@@ -20,7 +20,7 @@ from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.mailer import ApplicationMailer
 from core.persona_store import PersonaEngine, get_engine
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.form_assist")
 
@@ -107,6 +107,17 @@ class FormAssistSkill(BaseSkill):
         if self._mailer is None:
             self._mailer = ApplicationMailer()
         return self._mailer
+
+    def contract(self) -> SkillContract:
+        """Reads `tone` and `jobs` — it writes answers in Calvin's voice on job applications.
+
+        The two skill-specific invariants are the ones no instruction may argue with: an
+        unknown answer is flagged rather than guessed (§0 P5), and a skills test is never
+        solved for him no matter how a rule is phrased.
+        """
+        return SkillContract(reads_categories=["tone", "jobs"],
+                             hard_invariants=["never_guesses_an_unknown_answer",
+                                              "never_solves_an_assessment"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {

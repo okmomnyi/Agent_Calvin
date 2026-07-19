@@ -129,6 +129,11 @@ class BaseSkill:
     """Convenience base providing a default handle() that dispatches via commands()."""
 
     name: str = "base"
+    # Planner metadata.  Commands are visible by default; a skill may hide internal/session
+    # actions with ``plan_exclude`` and may override the registry's tier table here.  Neither
+    # value comes from an LLM.
+    plan_exclude: tuple[str, ...] = ()
+    action_tiers: dict[str, str] = {}
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {}

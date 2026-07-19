@@ -224,12 +224,16 @@ def run_skill(skill: str, action: str, **kwargs: Any) -> str:
     Referenced by NAME from a queued row, so the payload is just strings — a worker running a
     newer image can still drain rows enqueued by an older one. This is what lets any heavy
     scheduled job move off the API process without rewriting the skill.
-    """
-    from kernel.registry import SkillRegistry
 
-    registry = SkillRegistry()
-    registry.discover()
-    target = registry.get(skill)
+    Discovery is the CACHED registry, not a fresh one per job. Building a new SkillRegistry
+    here re-imported and re-instantiated all 22 skills on every single job -- and since the
+    point of the queue is draining hundreds of rows in a burst, that was hundreds of full
+    package walks, each also re-writing every skill contract. The worker already discovers at
+    startup for the @handler side effect; this reuses that.
+    """
+    from kernel.registry import get_registry
+
+    target = get_registry().get(skill)
     if target is None:
         raise RuntimeError(f"unknown skill {skill!r}")
     fn = target.commands().get(action)
@@ -237,3 +241,20 @@ def run_skill(skill: str, action: str, **kwargs: Any) -> str:
         raise RuntimeError(f"skill {skill!r} has no action {action!r}")
     result = fn(**kwargs)
     return getattr(result, "text", str(result))[:2000]
+
+
+@handler("plan.step")
+def run_plan_step(plan_id: str, step_id: str, args: dict[str, Any] | None = None) -> str:
+    """Finish a queued orchestrator step and advance its persisted plan."""
+    from core.orchestrator import Orchestrator
+    from kernel.registry import get_registry
+
+    result = Orchestrator(registry=get_registry()).execute_queued_step(
+        plan_id, step_id, args or {})
+    try:
+        from core.notify import send_telegram
+
+        send_telegram(result.text)
+    except Exception:  # noqa: BLE001 - completion is durable even if notification is down
+        log.exception("could not report completion for plan %s step %s", plan_id, step_id)
+    return result.text

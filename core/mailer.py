@@ -2,8 +2,10 @@
 
 Sends a job application email (cover + optional CV attachment) to a posting's apply
 address. This is deliberately separate from the email-reply path (which stays draft-only):
-send() here is invoked exclusively AFTER Calvin approves an application, or when
-AUTO_APPLY is enabled for that source. Interview/form answers never route through here.
+send() here is invoked exclusively AFTER Calvin approves an application. There is no flag
+that relaxes that -- the AUTO_APPLY bypass was removed, because a config switch reaching
+"never ask before sending in his name" is the same hole Phase 30 closed for learned
+permissions. Interview/form answers never route through here.
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ class ApplicationMailer:
     ) -> dict[str, Any]:
         """Send an application email with optional file attachments. Returns the sent message.
 
-        Caller MUST have obtained approval (or AUTO_APPLY) before invoking this.
+        Caller MUST have obtained Calvin's explicit approval before invoking this.
         """
         mime = MIMEMultipart()
         mime["To"] = to

@@ -330,7 +330,26 @@ def cmd_briefing(args: argparse.Namespace) -> int:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    """Propose the week plan."""
+    """Run/show/resume a goal plan; no arguments preserves the legacy week planner."""
+    if args.goal or args.show or args.resume:
+        from kernel.app import registry
+
+        registry.discover()
+        orchestrator = registry.orchestrator
+        if args.show:
+            plan = orchestrator.load_plan(args.show)
+            if plan is None:
+                print(f"Plan {args.show} was not found.")
+                return 1
+            print(orchestrator.preview(plan))
+            return 0
+        if args.resume:
+            result = orchestrator.resume(args.resume)
+        else:
+            result = orchestrator.run(args.goal, channel="cli", dry_run=args.dry)
+        print(result.text)
+        return 0 if result.ok else 1
+
     from skills.semester_planner import SKILL
 
     print(SKILL.plan(notify=not args.no_send).text)
@@ -908,7 +927,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_brief.add_argument("--no-send", action="store_true")
     p_brief.set_defaults(func=cmd_briefing)
 
-    p_plan = sub.add_parser("plan", help="propose the week plan")
+    p_plan = sub.add_parser("plan", help="plan a goal (no goal: legacy week plan)")
+    p_plan.add_argument("goal", nargs="?", default="", help="open-ended goal to decompose")
+    p_plan.add_argument("--dry", action="store_true", help="validate and preview; do not execute")
+    p_plan.add_argument("--show", metavar="ID", help="show a persisted plan")
+    p_plan.add_argument("--resume", metavar="ID", help="resume a paused plan")
     p_plan.add_argument("--no-send", action="store_true")
     p_plan.set_defaults(func=cmd_plan)
 

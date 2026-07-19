@@ -55,8 +55,15 @@ ACTION_KINDS = {
     "email_label":   TIER_TRIVIAL,  # categorisation only
 }
 
+# Labels are a closed vocabulary for the same reason the action kinds are: an LLM free to
+# invent label names would slowly shard the mailbox into near-duplicates ("Promos", "Promo",
+# "Promotions"), and every one of them is a folder Calvin then has to learn. These are the
+# categories `email_agent` already files under, so both paths land in the same AgentOS/* tree.
+LABEL_CATEGORIES = ("promotion", "newsletter", "social", "job_related", "important", "personal")
+_DEFAULT_LABEL = "promotion"
+
 _SCHEMA = ('{"actions": [{"kind": string, "description": string, "message_id": string, '
-           '"permission_key": string, "tier": string, "reasoning": string}]}')
+           '"permission_key": string, "tier": string, "label": string, "reasoning": string}]}')
 
 _SYSTEM = """\
 You triage a personal inbox. For each message decide whether it can be filed away without \
@@ -74,6 +81,9 @@ promotions, automated receipts already seen. If a message could plausibly need a
 anything from a person, a recruiter, a university, a bank, an invoice, a deadline, a \
 security alert — propose NOTHING for it. When unsure, propose nothing: a missed newsletter \
 costs nothing, a missed interview invite costs a job.
+
+For email_label, also set `label` to exactly one of: promotion, newsletter, social, \
+job_related, important, personal. Any other value is discarded.
 
 permission_key is the PATTERN, formatted `<kind>:from:<sender-domain>`, e.g. \
 `email_trash:from:linkedin.com`. Getting this right matters: it is what lets the owner say \
@@ -218,23 +228,37 @@ class ProactiveSkill(BaseSkill):
             # in a generated payload would be enough to auto-run anything it liked.
             tier = ACTION_KINDS[kind]
             key = str(p.get("permission_key") or f"{kind}:from:{by_id[msg_id]['sender']}")
+            # Same rule as the tier: the label is validated against our own vocabulary rather
+            # than trusted from the payload, so a generated value can only ever pick one of
+            # ours or fall back to the default.
+            label = str(p.get("label") or "").strip().lower()
+            if label not in LABEL_CATEGORIES:
+                label = _DEFAULT_LABEL
             action_id, status = self.store.propose(
                 kind, str(p.get("description") or kind)[:200], tier=tier, permission_key=key,
-                payload={"message_id": msg_id, "doc_id": msg_id},
+                payload={"message_id": msg_id, "doc_id": msg_id, "label": label},
                 reasoning=str(p.get("reasoning") or "")[:200])
             if status == APPROVED:
-                if self._execute(action_id, kind, msg_id):
+                if self._execute(action_id, kind, msg_id, label):
                     done.append(f"{kind.replace('email_', '')}: {by_id[msg_id]['subject'][:60]}")
         return done, self.store.pending()
 
-    def _execute(self, action_id: int, kind: str, msg_id: str) -> bool:
+    def _execute(self, action_id: int, kind: str, msg_id: str,
+                 label: str = _DEFAULT_LABEL) -> bool:
         try:
             if kind == "email_trash":
                 self.gmail.trash(msg_id)
             elif kind == "email_archive":
-                self.gmail.archive(msg_id)
-            else:                       # email_label — categorisation only
-                pass
+                # Archive under the category label too, so archived mail is findable by the
+                # same AgentOS/* folder the labeller uses rather than only in All Mail.
+                self.gmail.archive(msg_id, self.gmail.category_label(label))
+            else:
+                # email_label: categorise in place -- the message stays in the inbox, it just
+                # gains AgentOS/<Category>. This branch used to be a bare `pass`, so every
+                # trivial-tier action was counted, reported to Calvin, and marked executed
+                # while doing nothing at all. A no-op that reports success is worse than an
+                # unimplemented action, because nobody goes looking for it.
+                self.gmail.add_label(msg_id, self.gmail.category_label(label))
             self.store.mark(action_id, "executed")
             return True
         except Exception as exc:  # noqa: BLE001 - one bad message must not stop the run

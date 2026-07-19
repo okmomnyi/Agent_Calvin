@@ -41,14 +41,18 @@ INTENTS: dict[str, tuple[str, str]] = {
     "summarize_inbox": ("email_agent", "digest"),
     "trash_email":     ("email_agent", "trash"),
     "restore_email":   ("email_agent", "restore"),
-    "summarize":       ("router", "summarize"),
     "find_jobs":       ("job_hunter", "hunt"),
     "find_events":     ("event_scout", "find"),
     "event_interested": ("event_scout", "interested"),
     "event_skip":       ("event_scout", "skip"),
     "job_status":      ("job_hunter", "status"),
-    "approve":         ("approvals", "approve"),
-    "review_code":     ("code_review", "review"),
+    # These three named skills that have never existed ("router", "approvals", "code_review"),
+    # so every one of them matched a keyword rule at confidence 0.9, skipped the catalogue
+    # router that would have repaired them, and dead-ended in dispatch_intent's "isn't wired
+    # up yet" branch. `approve 1, 3 and 5` is the exact phrasing the approval digest invites,
+    # and it was dead on /api/command and /ws/voice -- approvals only ever resolved on Telegram.
+    "approve":         ("job_hunter", "approve"),
+    "review_code":     ("code_tutor", "review"),
     "answer_form":     ("form_assist", "answer"),
     "tailor_cv":       ("cv_tailor", "tailor"),
     "refine_cv":       ("cv_tailor", "refine"),
@@ -184,7 +188,11 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
         r"\b(?:close|quit|shut down)\s+(?:the\s+|my\s+)?(?P<a>[\w .+-]{1,30})$", re.I), "app"),
     ("focus_app", re.compile(
         r"\b(?:focus|switch to|bring up)\s+(?:the\s+|my\s+)?(?P<a>[\w .+-]{1,30})$", re.I), "app"),
-    ("summarize", re.compile(r"\bsummari[sz]e\b\s*(?P<t>.+)", re.I), "target"),
+    # No generic "summarize X" rule: there is no skill that summarizes an arbitrary thing, and
+    # the old one claimed a target ("router.summarize") that does not exist -- so it swallowed
+    # the phrase at 0.9 and answered nothing. Specific summaries keep their own rules above
+    # (summarize_inbox); everything else falls to the catalogue router, which can pick vault.ask
+    # or research.search from what is actually being summarized.
     ("research", re.compile(r"\b(?:search|research|look up|find out)(?: for| about)?\s+(?P<t>.+)", re.I), "query"),
 ]
 
@@ -219,6 +227,7 @@ _ARG_NAMES = {
     ("interview_prep", "mock"): "company",
     ("code_tutor", "start"): "topic",
     ("code_tutor", "explain"): "topic",
+    ("code_tutor", "review"): "code",
     ("spaced_rep", "quiz"): "unit",
     ("semester_planner", "cram"): "unit",
     ("persona", "remember"): "instruction",

@@ -23,7 +23,7 @@ from core.embeddings import Embedder, cosine, get_embedder, pack_vector, unpack_
 from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.study_vault")
 
@@ -71,6 +71,17 @@ class VaultSkill(BaseSkill):
     @property
     def min_score(self) -> float:
         return float(get_settings().get("vault", "min_score", default=0.18))
+
+    def contract(self) -> SkillContract:
+        """Reads `study` only — a tone rule must not reach a cited answer about his notes.
+
+        `always_cites_source` and `never_answers_beyond_the_notes` are what make the vault
+        trustworthy: below the score floor it says the answer is not in his notes and offers a
+        clearly-labelled web answer instead of quietly blending the two.
+        """
+        return SkillContract(reads_categories=["study"],
+                             hard_invariants=["always_cites_source",
+                                              "never_answers_beyond_the_notes"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {"ingest": self.ingest, "ask": self.ask, "status": self.status}

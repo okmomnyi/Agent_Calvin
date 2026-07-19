@@ -28,7 +28,7 @@ from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
 from core.notify import send_telegram
 from core.pdf import build_pdf
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 from core.time_context import (format_local, greeting, local_now, parse_local_datetime,
                                relative_due)
 
@@ -62,6 +62,17 @@ class SemesterPlannerSkill(BaseSkill):
         if self._llm is None:
             self._llm = get_client()
         return self._llm
+
+    def contract(self) -> SkillContract:
+        """Reads `study` and `notifications` — it owns the 07:00 briefing, which is the one
+        message Calvin reads every day, so "don't wake me before 8" has to be able to reach it.
+
+        `never_invents_a_deadline` matters more here than anywhere: the briefing is where a
+        hallucinated CAT date would look most official. Dates extracted from email stay
+        `pending` until he confirms them.
+        """
+        return SkillContract(reads_categories=["study", "notifications"],
+                             hard_invariants=["never_invents_a_deadline"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {

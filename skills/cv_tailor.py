@@ -24,7 +24,7 @@ from core.doc_extract import clean_pdf_artifacts, extract
 from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.cv_tailor")
 
@@ -60,6 +60,19 @@ class CvTailorSkill(BaseSkill):
     @property
     def cv_dir(self) -> Path:
         return get_settings().data_dir / "cv"
+
+    def contract(self) -> SkillContract:
+        """Reads `cv` (how he wants his CV written) and `tone` (how he writes).
+
+        This declared nothing until now, which meant the skill that actually writes CVs was
+        the one skill a `cv` rule could never reach -- job_hunter declared `cv` and got them,
+        cv_tailor did not and silently ignored every one. `never_invent_experience` is the
+        skill-specific half of §0 P5: tailoring may reorder, emphasise and rephrase what the
+        master CV and verified facts support, and may never add a technology to please a JD.
+        """
+        return SkillContract(reads_categories=["cv", "tone"],
+                             hard_invariants=["never_invent_experience",
+                                              "never_modifies_master_cv"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {

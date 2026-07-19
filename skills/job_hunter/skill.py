@@ -2,10 +2,10 @@
 
 Pipeline: scrape (modular sources) -> dedupe (DB) -> category-aware score -> for keepers,
 draft a 2-line summary + a cover email grounded only in verified persona facts -> digest
-to Telegram with per-job approve/skip guidance. Approval (or AUTO_APPLY for email-apply
-sources) triggers the application: email-apply jobs are sent with the CV attached; portal
-and notify-only jobs hand Calvin the link + cover. Also tracks applications, produces the
-weekly report, and runs the 15-minute interview watcher.
+to Telegram with per-job approve/skip guidance. Calvin's approval -- and nothing else --
+triggers the application: email-apply jobs are sent with the CV attached; portal and
+notify-only jobs hand him the link + cover. Also tracks applications, produces the weekly
+report, and runs the 15-minute interview watcher.
 """
 
 from __future__ import annotations
@@ -221,8 +221,7 @@ class JobHunterSkill(BaseSkill):
             if keeper:
                 keepers.append(keeper)
 
-        auto_applied = self._maybe_auto_apply(keepers)
-        digest = self._render_digest(keepers, deferred, auto_applied, queued=queued)
+        digest = self._render_digest(keepers, deferred, queued=queued)
         if notify and keepers:
             self._notify(digest)
         for k in keepers:
@@ -231,7 +230,7 @@ class JobHunterSkill(BaseSkill):
         return CommandResult(
             text=digest,
             data={"new": len(new_jobs), "scored": len(to_process), "kept": len(keepers),
-                  "queued": queued, "deferred": deferred, "auto_applied": auto_applied},
+                  "queued": queued, "deferred": deferred},
         )
 
     def _scrape_new(self) -> list[tuple[int, RawJob]]:
@@ -353,19 +352,14 @@ class JobHunterSkill(BaseSkill):
             log.exception("cover draft failed for '%s'", raw.title)
             return f"Hi,\n\nI'm interested in the {raw.title} role. Best,\n{name}"
 
-    # ------------------------------------------------------------- auto-apply
-    def _maybe_auto_apply(self, keepers: list[dict[str, Any]]) -> int:
-        """If AUTO_APPLY is on, auto-send email-apply keepers only. Returns count applied."""
-        if not get_settings().auto_apply:
-            return 0
-        count = 0
-        for k in keepers:
-            if k["apply_kind"] == "email" and k["apply_target"]:
-                if self._send_application(k):
-                    count += 1
-        return count
-
     # ------------------------------------------------------------- approve
+    #
+    # There is deliberately no auto-apply path. `AUTO_APPLY` used to send email-apply keepers
+    # straight out of `hunt()` with no per-job approval -- a single config flag that reached
+    # "never ask before sending in Calvin's name". That is precisely the hole Phase 30 exists
+    # to close: `high` is absent from LEARNABLE_TIERS so no amount of saying yes can teach the
+    # system to stop asking, and a flag that does the same thing in one line is the same hole
+    # spelled differently. Every application now goes through `approve` (§0 P3).
     def approve(self, selection: Sequence[int] | None = None, **_: Any) -> CommandResult:
         """Approve drafted jobs by id: email-apply => send with CV; portal/notify => record + link."""
         ids = list(selection or [])
@@ -572,7 +566,7 @@ class JobHunterSkill(BaseSkill):
             return None
 
     # ------------------------------------------------------------- digest render
-    def _render_digest(self, keepers: list[dict[str, Any]], deferred: int, auto_applied: int,
+    def _render_digest(self, keepers: list[dict[str, Any]], deferred: int,
                        queued: int = 0) -> str:
         if not keepers:
             return "Hunt complete — no postings cleared the score threshold this run."
@@ -589,8 +583,6 @@ class JobHunterSkill(BaseSkill):
             )
         lines.append(f"\n➡️ Reply `approve {','.join(str(k['id']) for k in keepers[:3])}` to apply, "
                      "or use the Telegram buttons (Phase 8).")
-        if auto_applied:
-            lines.append(f"🤖 AUTO_APPLY sent {auto_applied} email application(s) automatically.")
         if queued:
             lines.append(f"(⚙️ {queued} more posting(s) queued — workers are scoring them now.)")
         if deferred:

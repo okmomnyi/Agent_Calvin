@@ -138,11 +138,12 @@ def mem(_db) -> Memory:
 
 
 class _SettingsProxy:
-    """Wraps the real Settings but lets a test override auto_apply without touching env."""
+    """Wraps the real Settings so a test can override a field without touching the env."""
 
-    def __init__(self, real, auto_apply: bool):
+    def __init__(self, real, **overrides):
         self._real = real
-        self.auto_apply = auto_apply
+        for key, value in overrides.items():
+            setattr(self, key, value)
 
     def __getattr__(self, name):  # only hit for attributes not set on the proxy
         return getattr(self._real, name)
@@ -152,15 +153,6 @@ class _SettingsProxy:
 def fake_settings(monkeypatch):
     from core.config import get_settings
 
-    proxy = _SettingsProxy(get_settings(), auto_apply=False)
-    monkeypatch.setattr("skills.job_hunter.skill.get_settings", lambda: proxy)
-    return proxy
-
-
-@pytest.fixture
-def fake_settings_autoapply(monkeypatch):
-    from core.config import get_settings
-
-    proxy = _SettingsProxy(get_settings(), auto_apply=True)
+    proxy = _SettingsProxy(get_settings())
     monkeypatch.setattr("skills.job_hunter.skill.get_settings", lambda: proxy)
     return proxy

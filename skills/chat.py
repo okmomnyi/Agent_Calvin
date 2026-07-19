@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from core.llm import LLMClient, get_client
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 
 class ChatSkill(BaseSkill):
@@ -25,6 +25,11 @@ class ChatSkill(BaseSkill):
         if self._llm is None:
             self._llm = get_client()
         return self._llm
+
+    def contract(self) -> SkillContract:
+        """Reads `tone` and `general` — this is the skill that talks to him most casually,
+        so a preference about how he wants to be spoken to has to land here of all places."""
+        return SkillContract(reads_categories=["tone", "general"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {"reply": self.reply, "time_status": self.time_status}

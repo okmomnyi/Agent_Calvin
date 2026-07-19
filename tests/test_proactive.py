@@ -31,7 +31,8 @@ class _Gmail:
              "snippet": "Your CAT is on Friday"},
         ]
         self.trashed: list[str] = []
-        self.archived: list[str] = []
+        self.archived: list[tuple[str, str | None]] = []
+        self.labelled: list[tuple[str, str]] = []
 
     def list_inbox(self, max_results=40, query=None):
         return [m["id"] for m in self._messages]
@@ -47,7 +48,13 @@ class _Gmail:
         self.trashed.append(msg_id)
 
     def archive(self, msg_id, category_label_id=None):
-        self.archived.append(msg_id)
+        self.archived.append((msg_id, category_label_id))
+
+    def category_label(self, category):
+        return f"Label_AgentOS/{category}"
+
+    def add_label(self, msg_id, label_id):
+        self.labelled.append((msg_id, label_id))
 
 
 class _LLM:
@@ -221,3 +228,53 @@ def test_triage_is_scheduled_and_queued(mem):
     jobs = {j.id: j for j in skill.scheduled_jobs()}
     assert "proactive.triage" in jobs
     assert jobs["proactive.triage"].queued is True, "LLM + Gmail work belongs on the queue"
+
+
+# ================================================================= trivial tier actually acts
+def _label_action(label="promotion"):
+    return [{"kind": "email_label", "description": "File the LinkedIn blast",
+             "message_id": "m1", "permission_key": "email_label:from:linkedin.com",
+             "tier": "trivial", "label": label, "reasoning": "Bulk marketing."}]
+
+
+def test_email_label_actually_labels_the_message(mem):
+    """The trivial tier used to be a bare `pass`.
+
+    `_execute`'s else-branch did nothing, then marked the action executed and counted it into
+    the summary — so every run reported "handled N automatically" for work that never
+    happened. A no-op that reports success is worse than an unimplemented action, because
+    nobody goes looking for it. email_label is auto-approved (trivial), so this is the branch
+    that runs most often and unattended.
+    """
+    skill, gm, _ = _skill(mem, _label_action())
+
+    result = skill.triage(notify=False)
+
+    assert gm.labelled == [("m1", "Label_AgentOS/promotion")]
+    assert gm.trashed == []                      # labelling files in place; it does not remove
+    assert result.data["done"] == 1
+
+
+def test_a_label_the_model_invented_falls_back_to_the_vocabulary(mem):
+    """Same rule as the tier: validated against our table, never trusted from the payload."""
+    from skills.proactive import LABEL_CATEGORIES
+
+    skill, gm, _ = _skill(mem, _label_action(label="Urgent!! Read Now"))
+
+    skill.triage(notify=False)
+
+    (_, label_id), = gm.labelled
+    assert label_id.rsplit("/", 1)[-1] in LABEL_CATEGORIES
+
+
+def test_archiving_files_under_a_category_label_too(mem):
+    """Archived mail should be findable in the same AgentOS/* tree, not only in All Mail."""
+    actions = [{"kind": "email_archive", "description": "Archive the newsletter",
+                "message_id": "m1", "permission_key": "email_archive:from:linkedin.com",
+                "tier": "low", "label": "newsletter", "reasoning": "Bulk."}]
+    skill, gm, store = _skill(mem, actions)
+    store.remember("email_archive:from:linkedin.com", ALWAYS_APPROVE)
+
+    skill.triage(notify=False)
+
+    assert gm.archived == [("m1", "Label_AgentOS/newsletter")]

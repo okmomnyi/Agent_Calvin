@@ -49,7 +49,7 @@ These are hard rules. Each is enforced in code and covered by tests.
 |---|-----------|-------------------|
 | 1 | **Free-first LLMs (NIM only)** | All model calls go through `core/llm.py` → NVIDIA NIM. No other provider is imported anywhere. |
 | 2 | **Model routing, never hardcoding** | Every call passes a *task class*; `config.yaml → llm.routes` maps class→model. No model id is hardcoded in a skill. |
-| 3 | **Approval gates** | Job applications & form submits require approval (`approve`, Telegram buttons) or `AUTO_APPLY` (email-apply only). Email replies are **draft-only**. Tests assert nothing sends pre-approval. |
+| 3 | **Approval gates** | Job applications & form submits require Calvin's approval (`approve`, Telegram buttons) — there is no flag that relaxes this. `AUTO_APPLY` used to, and was removed: a config switch that reaches "never ask before sending in his name" is the same gap Phase 30 closes by keeping `high` out of `LEARNABLE_TIERS`. Email replies are **draft-only**; `compose` sends only after an exact typed confirmation. Tests assert `hunt()` never sends, and that no `auto_apply`-shaped field exists on `Settings`. |
 | 4 | **Never permanently delete data** | Scheduled cleanup only archives+labels. A user's explicit request may move previewed, confirmed messages to recoverable Gmail Trash and offers undo; permanent Gmail deletion is not exposed. DB rows use status changes / soft-deletes (`suspended`, `cancelled`, `active=0`), never `DELETE`. |
 | 5 | **Never fabricate facts about Calvin** | `persona.answer()` returns `NEEDS_INPUT` on any gap; form answers flag unknowns; CV tailoring has an anti-fabrication check (`core/ats.fabrication_terms`). Multiple tests. |
 | 6 | **Everything is a Skill** | Skills live in `skills/`, auto-discovered by `kernel/registry.py`. Adding one never touches the kernel. |
@@ -57,8 +57,8 @@ These are hard rules. Each is enforced in code and covered by tests.
 | 8 | **No face cloning** | No image/avatar generation of Calvin's face anywhere. |
 | 9 | **No voice cloning** | Voice layer is restricted to pre-built edge-tts neural voices; `skills/voice.py` refuses anything else. A test (`test_no_voice_or_face_cloning_code_path`) scans the entire codebase for banned cloning imports/functions and fails if any appear. |
 
-Principles 8 and 9 **cannot be relaxed by `AUTO_APPLY` or any config flag** — there is no
-setting that turns them off. Every skill's contract (§8, Phase 20) re-adds them even if the
+Principles 8 and 9 **cannot be relaxed by any config flag** — there is no setting that turns
+them off. Every skill's contract (§8, Phase 20) re-adds them even if the
 skill omits them, so a skill cannot opt out either.
 
 The addendum phases (16–22) added three more, enforced the same way:

@@ -1,5 +1,5 @@
 """Job hunter pipeline tests: dedupe, approval-gate (never send until approved),
-email vs portal apply routing, AUTO_APPLY, and the interview watcher — all offline."""
+email vs portal apply routing, the approval gate, and the interview watcher — all offline."""
 
 from __future__ import annotations
 
@@ -133,14 +133,41 @@ def test_approve_portal_job_tracks_without_sending(fake_settings, mem):
     assert mem.get_job(job_id)["status"] == "applied"
 
 
-def test_auto_apply_sends_email_jobs_during_hunt(fake_settings_autoapply, mem):
+def test_hunt_never_sends_an_application_by_itself(fake_settings, mem):
+    """§0 P3: a scheduled hunt drafts and notifies. It does not apply.
+
+    `AUTO_APPLY=true` used to make `hunt()` send email-apply keepers outright, with no
+    per-job approval and no cap -- a single config flag that reached "never ask before
+    sending in Calvin's name". Phase 30 keeps `high` out of LEARNABLE_TIERS so that no
+    amount of saying yes can teach the system to stop asking; a flag doing the same thing
+    in one line was the same hole spelled differently, so the bypass was removed.
+
+    Asserting on the *unconditional* behaviour of hunt() means reintroducing any such flag
+    fails here, whatever it ends up being called.
+    """
     llm = _HuntLLM({"DevOps Engineer": (85, "cloud_devops")})
     mailer = MagicMock()
     skill = _skill([_FakeSource("remoteok", [_email_job()])], llm, mem, mailer)
 
     result = skill.hunt(notify=False)
-    assert result.data["auto_applied"] == 1
-    assert mailer.send_application.call_count == 1   # AUTO_APPLY relaxed the gate for email-apply
+
+    assert mailer.send_application.called is False, "hunt() sent an application unprompted"
+    assert result.data["kept"] == 1                  # it still found and drafted the job
+    job_id = mem.get_job_by_ref("remoteok", "e1")["id"]
+    assert mem.get_job(job_id)["status"] == "notified"   # awaiting him, not applied
+
+    # ...and the application still goes out the moment he approves it.
+    skill.approve(selection=[job_id])
+    assert mailer.send_application.call_count == 1
+
+
+def test_no_settings_flag_can_relax_the_application_gate():
+    """The structural half: no `auto_apply`-shaped escape hatch exists on Settings at all."""
+    from core.config import Settings
+
+    fields = set(Settings.__dataclass_fields__)
+    offenders = {f for f in fields if "auto_apply" in f or "auto_send" in f}
+    assert not offenders, f"a send-without-approval flag is back on Settings: {offenders}"
 
 
 def test_interview_watcher_alerts_on_invite(fake_settings, mem):

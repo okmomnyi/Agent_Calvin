@@ -16,7 +16,7 @@ from typing import Any, Callable
 from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.notify import send_telegram
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.research")
 
@@ -110,6 +110,15 @@ class ResearchSkill(BaseSkill):
         if self._searcher is None:
             self._searcher = DuckDuckGoSearcher()
         return self._searcher
+
+    def contract(self) -> SkillContract:
+        """Reads `tone` and `general` — how a synthesis is written, not what it may conclude.
+
+        `never_invents_a_source` is the one thing no instruction may soften: an answer cites
+        pages that were actually fetched, and says so plainly when the search returned nothing.
+        """
+        return SkillContract(reads_categories=["tone", "general"],
+                             hard_invariants=["never_invents_a_source"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {"search": self.search, "research": self.search}

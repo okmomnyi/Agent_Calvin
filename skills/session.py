@@ -51,13 +51,22 @@ class SessionSkill(BaseSkill):
         lines.append(f"Live skill session: {live or 'none'}")
         lines.append(f"Turns remembered: {len(s['turns'])}")
         lines.append(f"Waiting on you: {len(s['pending_approvals'])}")
+        current_plan = None
+        try:
+            current_plan = self.store.mem.current_plan(self.store.session_id)
+        except Exception:  # noqa: BLE001 - status stays useful on an older/degraded store
+            pass
+        lines.append("Current plan: " + (
+            f"{current_plan['id']} ({current_plan['status']}) — {current_plan['goal']}"
+            if current_plan else "none"))
         if s["turns"]:
             last = s["turns"][-1]
             lines.append(f"Last: “{last['text'][:80]}” → “{last['reply'][:80]}”")
         return CommandResult(text="\n".join(lines),
                              data={"active_skill": live, "last_channel": s["last_channel"],
                                    "turns": len(s["turns"]),
-                                   "pending": len(s["pending_approvals"])})
+                                   "pending": len(s["pending_approvals"]),
+                                   "current_plan": current_plan})
 
     # ------------------------------------------------------------- handoff
     def handoff(self, channel: str = "", **_: Any) -> CommandResult:

@@ -20,12 +20,44 @@ from core.skill import CommandResult, ScheduledJob, Skill
 log = get_logger("kernel.registry")
 
 
+# System-owned fallbacks for consequential commands.  Skills can declare a more complete
+# ``action_tiers`` mapping; this table protects existing skills while that metadata is being
+# adopted.  A model never sees or writes these values.
+_ACTION_TIERS: dict[tuple[str, str], str] = {
+    ("email_agent", "trash"): "low",
+    ("email_agent", "continue_trash"): "low",
+    ("email_agent", "restore"): "low",
+    ("email_agent", "continue_send"): "high",
+    ("job_hunter", "approve"): "high",
+    ("form_assist", "submit"): "high",
+    ("deal_broker", "confirm_purchase"): "high",
+    ("desktop", "open"): "medium",
+    ("desktop", "close"): "medium",
+    ("desktop", "focus"): "medium",
+    ("music", "playlist"): "medium",
+    ("music", "playlist_remove"): "medium",
+    ("music", "play"): "low",
+    ("music", "pause"): "low",
+    ("music", "next"): "low",
+    ("music", "previous"): "low",
+    ("music", "volume"): "low",
+}
+
+_PLAN_INTERNAL_ACTIONS = {
+    "continue", "continue_refinement", "continue_send", "continue_trash",
+    "drill_check", "mock_answer", "mocklab_submit", "quiz_answer", "session_tick",
+}
+
+
 class SkillRegistry:
     """Holds discovered skills and routes intents/commands to them."""
 
-    def __init__(self, router: IntentRouter | None = None) -> None:
+    def __init__(self, router: IntentRouter | None = None, *, orchestrator: Any | None = None,
+                 planning_enabled: bool | None = None) -> None:
         self._skills: dict[str, Skill] = {}
         self.router = router or get_router()
+        self._orchestrator = orchestrator
+        self._planning_enabled = planning_enabled
 
     # ------------------------------------------------------------- discovery
     def discover(self) -> None:
@@ -113,6 +145,70 @@ class SkillRegistry:
                 log.exception("scheduled_jobs() failed for skill '%s'", skill.name)
         return jobs
 
+    def manifest(self) -> list[dict[str, Any]]:
+        """Return the real command surface available to the planner.
+
+        The list is generated from registered skills, so a proposed pair can be checked by
+        exact membership.  ``plan_exclude`` is owned by the skill and hides continuations or
+        other commands that should never be selected out of context.
+        """
+        out: list[dict[str, Any]] = []
+        for name, skill in sorted(self._skills.items()):
+            excluded = set(getattr(skill, "plan_exclude", ()))
+            for action, fn in sorted(skill.commands().items()):
+                if action in excluded or action in _PLAN_INTERNAL_ACTIONS or action.startswith("_"):
+                    continue
+                doc = (getattr(fn, "__doc__", "") or "").strip().splitlines()
+                out.append({
+                    "skill": name,
+                    "action": action,
+                    "doc": doc[0] if doc else "",
+                    "args": dict(getattr(fn, "_arg_hints", {}) or {}),
+                })
+        return out
+
+    def action_tier(self, skill_name: str, action: str) -> str:
+        """Resolve authority from code-owned metadata, never from a proposed plan."""
+        skill = self._skills.get(skill_name)
+        declared = getattr(skill, "action_tiers", {}) if skill is not None else {}
+        tier = declared.get(action, _ACTION_TIERS.get((skill_name, action), "trivial"))
+        if tier not in {"trivial", "low", "medium", "high"}:
+            log.warning("Invalid tier %r for %s.%s; failing closed to high", tier,
+                        skill_name, action)
+            return "high"
+        return tier
+
+    def is_queued_action(self, skill_name: str, action: str) -> bool:
+        """Whether this command is already declared heavy by a queued scheduled job."""
+        skill = self._skills.get(skill_name)
+        if skill is None:
+            return False
+        try:
+            return any(job.queued and job.skill == skill_name and job.action == action
+                       for job in skill.scheduled_jobs())
+        except Exception:  # noqa: BLE001 - metadata failure falls back to safe inline dispatch
+            log.exception("scheduled_jobs() failed while checking %s.%s", skill_name, action)
+            return False
+
+    @property
+    def orchestrator(self):
+        """Lazily construct the planner so ordinary command startup remains unchanged."""
+        if self._orchestrator is None:
+            from core.orchestrator import Orchestrator
+
+            self._orchestrator = Orchestrator(registry=self)
+        return self._orchestrator
+
+    def planning_enabled(self) -> bool:
+        if self._planning_enabled is not None:
+            return self._planning_enabled
+        try:
+            from core.config import get_settings
+
+            return bool(get_settings().get("orchestrator", "enabled", default=True))
+        except Exception:  # noqa: BLE001 - config trouble must preserve command routing
+            return False
+
     # ------------------------------------------------------------- dispatch
     def dispatch_intent(self, intent: Intent) -> CommandResult:
         """Run a resolved Intent against its target skill, with graceful fallbacks."""
@@ -133,11 +229,39 @@ class SkillRegistry:
             log.exception("Skill '%s' action '%s' raised", intent.skill, intent.action)
             return CommandResult(text=f"'{intent.skill}' failed: {exc}", ok=False)
 
-    def handle_command(self, text: str, *, use_llm: bool = True) -> tuple[Intent, CommandResult]:
-        """Full path: raw text -> intent -> skill result."""
+    def handle_command(self, text: str, *, use_llm: bool = True,
+                       channel: str = "cli") -> tuple[Intent, CommandResult]:
+        """Full path: raw text -> keyword dispatch or goal plan or single dispatch."""
+        if self.planning_enabled():
+            try:
+                from core.orchestrator import is_plan_reply
+
+                reply = self.orchestrator.handle_reply(text) if is_plan_reply(text) else None
+                if reply is not None:
+                    intent = Intent("plan_reply", "orchestrator", "reply", {"text": text},
+                                    confidence=1.0, via="plan")
+                    return intent, reply
+            except Exception:  # noqa: BLE001 - planner state must not break ordinary routing
+                log.debug("could not inspect active plan", exc_info=True)
         continuation = self._active_continuation(text)
         if continuation is not None:
             return continuation
+
+        # Keyword rules always win.  The unmatched keyword-only fallback has confidence .2;
+        # a real table hit has .9, so no private router internals need to leak into the kernel.
+        fast = self.router.route(text, use_llm=False)
+        if fast.confidence >= 0.9:
+            return fast, self.dispatch_intent(fast)
+
+        if self.planning_enabled():
+            from core.orchestrator import should_plan
+
+            if should_plan(text):
+                result = self.orchestrator.run(text, channel=channel)
+                intent = Intent("plan", "orchestrator", "run", {"goal": text},
+                                confidence=1.0, via="plan")
+                return intent, result
+
         intent = self.router.route(text, use_llm=use_llm)
         result = self.dispatch_intent(intent)
         return intent, result

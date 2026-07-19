@@ -25,7 +25,7 @@ from core.memory import Memory, get_memory
 from core.notify import send_telegram
 from core.pdf import build_pdf
 from core.transcribe import Transcriber, transcribe_audio
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.lecture_capture")
 
@@ -78,6 +78,17 @@ class LectureCaptureSkill(BaseSkill):
     @property
     def lectures_dir(self) -> Path:
         return get_settings().data_dir / "lectures"
+
+    def contract(self) -> SkillContract:
+        """Reads `study` and `notifications` — how notes are made, and when he hears about it.
+
+        `never_deletes_source_audio` is the local reading of §0 P4: a processed recording is
+        MOVED to processed/, never removed, because a bad transcription is only recoverable
+        while the audio still exists.
+        """
+        return SkillContract(reads_categories=["study", "notifications"],
+                             hard_invariants=["never_deletes_source_audio",
+                                              "never_auto_activates_cards"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {"capture": self.capture, "process_inbox": self.process_inbox}

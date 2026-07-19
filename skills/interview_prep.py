@@ -21,7 +21,7 @@ from core.memory import Memory, get_memory
 from core.notify import send_telegram
 from core.pdf import build_pdf
 from core.persona_store import verified_facts_text
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.interview_prep")
 
@@ -63,6 +63,11 @@ class InterviewPrepSkill(BaseSkill):
 
             self._research = ResearchSkill()
         return self._research
+
+    def contract(self) -> SkillContract:
+        """Reads `tone` and `jobs` — prep answers are written in his voice, for his applications."""
+        return SkillContract(reads_categories=["tone", "jobs"],
+                             hard_invariants=["answers_grounded_in_verified_facts"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {

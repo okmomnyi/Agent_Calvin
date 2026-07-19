@@ -103,12 +103,18 @@ async function api(path, opts = {}) {
 
 function renderSession(s) {
   const live = s.live_skill_session || s.active_skill;
+  const plan = s.current_plan;
   $("#session").innerHTML =
     `<div>Last active on <b class="teal">${esc(s.last_channel || "—")}</b>` +
     (live ? ` · live: <b class="teal">${esc(live)}</b>` : " · nothing mid-flight") +
-    `</div><div class="dim mono">${(s.turns||[]).length} turns remembered</div>`;
+    `</div>` + (plan ? `<div>Plan <b class="teal">${esc(plan.id)}</b> ` +
+      `<span class="tag">${esc(plan.status)}</span> ${esc(plan.goal)}</div>` : "") +
+    `<div class="dim mono">${(s.turns||[]).length} turns remembered</div>`;
   const ul = $("#approvals");
-  const items = s.pending_approvals || [];
+  const items = [...(s.pending_approvals || [])];
+  if (plan && ["awaiting_approval", "paused"].includes(plan.status)) {
+    items.unshift({kind:"plan", what:plan.goal, action:plan.status});
+  }
   ul.innerHTML = items.length
     ? items.map(i => `<li><span class="tag">${esc(i.kind)}</span><span>${esc(i.what)}</span>
                       <span class="dim">— ${esc(i.action)}</span></li>`).join("")

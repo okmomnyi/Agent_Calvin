@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import secrets
+import inspect
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any
@@ -123,6 +124,14 @@ class CommandResponse(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+def _handle_command(text: str, *, use_llm: bool = True, channel: str = "cli"):
+    """Pass channel context when supported (test doubles from older phases need not accept it)."""
+    handler = registry.handle_command
+    if "channel" in inspect.signature(handler).parameters:
+        return handler(text, use_llm=use_llm, channel=channel)
+    return handler(text, use_llm=use_llm)
+
+
 def _authorize_remote_command(authorization: str | None, x_agent_token: str | None) -> None:
     """Require the shared agent token for the remotely exposed command endpoint."""
     expected = get_settings().ws_token
@@ -154,7 +163,7 @@ async def api_command(
 ) -> CommandResponse:
     """Authenticate and route a text command through the intent router and target skill."""
     _authorize_remote_command(authorization, x_agent_token)
-    intent, result = registry.handle_command(req.text, use_llm=req.use_llm)
+    intent, result = _handle_command(req.text, use_llm=req.use_llm, channel=req.channel)
     text = to_spoken(result.text) if req.spoken else result.text
     _record_turn(req.text, text, req.channel, intent.skill)
     return CommandResponse(
@@ -184,6 +193,12 @@ async def api_session(
     store = SessionStore()
     s = store.get()
     s["live_skill_session"] = store.live_skill_session()
+    try:
+        current = get_memory().current_plan(store.session_id)
+        s["current_plan"] = ({"id": current["id"], "goal": current["goal"],
+                              "status": current["status"]} if current else None)
+    except Exception:  # noqa: BLE001 - session visibility must degrade, not fail
+        s["current_plan"] = None
     return s
 
 
@@ -238,15 +253,33 @@ def _client_actions(result: Any) -> list[dict[str, str]]:
 
 
 @app.get("/api/voice")
-async def api_voice() -> dict[str, Any]:
-    """Return the active pre-built voice + rate for the laptop client to synthesize with."""
+async def api_voice(
+    authorization: str | None = Header(default=None),
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Return the active pre-built voice + rate for the laptop client to synthesize with.
+
+    Token-authed like every other /api/* route. It was public, which nothing needed: the
+    client receives voice_id and rate on the /ws/voice reply itself and never calls this.
+    """
+    _authorize_remote_command(authorization, x_agent_token)
     return _current_voice()
 
 
 @app.get("/api/health")
-async def api_health() -> dict[str, Any]:
-    """Report kernel subsystem health: scheduler, DB, NIM key, skills discovered."""
-    settings = get_settings()
+async def api_health(
+    authorization: str | None = Header(default=None),
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Kernel health. Liveness is public; the detail requires the agent token.
+
+    Split deliberately. The container HEALTHCHECK and any uptime monitor only need a 200 and
+    ok/degraded, and requiring a token there would mean shipping the token to every probe.
+    Everything else is a description of the deployment -- which capabilities exist, which
+    credentials are configured, how deep the work queue is, what timezone the owner lives in
+    -- and that is reconnaissance, not health. It was all served to anyone who asked, on the
+    same box whose weekly recon scan exists to catch exactly this (§0 P12).
+    """
     db_ok = True
     try:
         get_memory().conn.execute("SELECT 1")
@@ -254,6 +287,18 @@ async def api_health() -> dict[str, Any]:
         db_ok = False
         log.warning("Health: DB check failed: %s", exc)
 
+    public = {
+        "status": "ok" if (db_ok and scheduler.running) else "degraded",
+        "scheduler_running": scheduler.running,
+        "db_ok": db_ok,
+    }
+
+    try:
+        _authorize_remote_command(authorization, x_agent_token)
+    except HTTPException:
+        return public          # unauthenticated probes get liveness, and nothing else
+
+    settings = get_settings()
     try:
         from core.gmail_client import GmailClient
 
@@ -262,13 +307,11 @@ async def api_health() -> dict[str, Any]:
         gmail_token = {"present": None, "error": str(exc)}
 
     return {
-        "status": "ok" if (db_ok and scheduler.running) else "degraded",
-        "scheduler_running": scheduler.running,
+        **public,
         # Phase 26: a backlog or a
         # pile of failures should be visible here, not discovered in a log.
         "queue": _queue_stats(),
         "scheduled_jobs": len(scheduler.get_jobs()) if scheduler.running else 0,
-        "db_ok": db_ok,
         "nim_key_present": bool(settings.nvidia_api_key),
         "gmail_token": gmail_token,
         "telegram_configured": bool(settings.telegram_bot_token and settings.telegram_chat_id),
@@ -303,7 +346,7 @@ async def ws_voice(websocket: WebSocket) -> None:
                 await websocket.send_json({"ok": False, "text": "I didn't catch that."})
                 continue
 
-            intent, result = registry.handle_command(text)
+            intent, result = _handle_command(text, channel="voice")
             _record_turn(text, result.text, "voice", intent.skill)
             voice = _current_voice()
             await websocket.send_json(

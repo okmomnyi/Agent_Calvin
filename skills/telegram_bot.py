@@ -13,6 +13,7 @@ so importing this module never requires the library or starts polling.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import time
@@ -181,6 +182,18 @@ class BotCore:
         if cmd == "approve":
             ids = [int(n) for n in arg.replace(",", " ").split() if n.strip().isdigit()]
             return self._dispatch("job_hunter", "approve", {"selection": ids})
+        if cmd == "plan":
+            try:
+                orchestrator = self.registry.orchestrator
+                if arg.strip():
+                    return orchestrator.run(arg.strip(), channel="telegram").text
+                rows = self.mem.list_plans(active_only=True)
+                if not rows:
+                    return "No active plans. Use /plan <goal> to start one."
+                return "Active plans:\n" + "\n".join(
+                    f"- {r['id']} [{r['status']}] {r['goal']}" for r in rows)
+            except Exception as exc:  # noqa: BLE001
+                return f"I couldn't open plans right now: {exc}"
         if cmd in ("voiceoff", "voiceon"):
             return self._dispatch("voice", "mute" if cmd == "voiceoff" else "unmute", {})
         if cmd == "summarize":
@@ -313,6 +326,12 @@ class BotCore:
     def route_text(self, text: str) -> str:
         """Free text: continue an active (FRESH) session if one is running, else route via intent."""
         if not text.startswith("/"):
+            try:
+                plan_reply = self.registry.orchestrator.handle_reply(text)
+                if plan_reply is not None:
+                    return plan_reply.text
+            except Exception:  # noqa: BLE001 - normal chat survives an unavailable plan store
+                pass
             approval = self._try_approval_reply(text)
             if approval is not None:
                 return approval
@@ -335,7 +354,11 @@ class BotCore:
                 return self._consume(_QUIZ_KEY, "spaced_rep", "quiz_answer", {"answer": text})
             if self._session_fresh(_TUTOR_KEY, ttl=_LIVE_SESSION_TTL):  # drill/socratic/lab
                 return self._consume(_TUTOR_KEY, "code_tutor", "continue", {"text": text})
-        _intent, result = self.registry.handle_command(text)
+        handler = self.registry.handle_command
+        if "channel" in inspect.signature(handler).parameters:
+            _intent, result = handler(text, channel="telegram")
+        else:
+            _intent, result = handler(text)
         return result.text
 
     def quiz_active(self) -> bool:
@@ -461,11 +484,18 @@ class BotCore:
         apps = q("SELECT COUNT(*) c FROM applications").fetchone()["c"]
         emails_today = q("SELECT COUNT(*) c FROM emails WHERE processed_at>=%s", (since,)).fetchone()["c"]
         uptime_h = (time.time() - self.started) / 3600
+        try:
+            current = self.mem.current_plan()
+            plan_line = (f"Current plan: {current['id']} [{current['status']}]\n"
+                         if current else "Current plan: none\n")
+        except Exception:  # noqa: BLE001
+            plan_line = "Current plan: unavailable\n"
         return (f"🟢 AgentOS status\n"
                 f"Skills online: {len(self.registry.skills)}\n"
                 f"Jobs found today: {jobs_today} (awaiting approval: {awaiting})\n"
                 f"Applications tracked: {apps}\n"
                 f"Emails processed today: {emails_today}\n"
+                f"{plan_line}"
                 f"Bot uptime: {uptime_h:.1f}h")
 
     # ------------------------------------------------------------- voice notes

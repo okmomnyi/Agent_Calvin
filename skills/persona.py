@@ -14,7 +14,7 @@ from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.notify import send_telegram
 from core.persona_store import PersonaEngine, get_engine
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.persona")
 
@@ -192,6 +192,18 @@ class PersonaSkill(BaseSkill):
             lines.append(f"  • [{f['category']}] {f['key']}: {str(f['value'])[:90]}")
         lines.append("\nConfirm with `persona verify <category> <key>`.")
         return CommandResult(text="\n".join(lines), data={"count": len(rows)})
+
+    def contract(self) -> SkillContract:
+        """Reads NOTHING, deliberately — and this one is worth stating rather than inheriting.
+
+        Persona is where standing instructions are *stored*. A skill that let those same rules
+        steer how it records and verifies facts about Calvin could be talked into rewriting
+        his own record, so the store stays outside the system it serves. `answer()` refuses to
+        exceed the verified KB no matter what any rule says (§0 P5).
+        """
+        return SkillContract(reads_categories=[],
+                             hard_invariants=["answers_only_from_verified_facts",
+                                              "imported_facts_stay_unverified"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {

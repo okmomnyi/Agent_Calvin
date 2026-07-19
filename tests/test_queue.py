@@ -235,7 +235,7 @@ def test_skill_run_handler_dispatches(mem, monkeypatch):
         def discover(self): pass
         def get(self, name): return _FakeSkill() if name == "faker" else None
 
-    monkeypatch.setattr("kernel.registry.SkillRegistry", lambda: _Reg())
+    monkeypatch.setattr("kernel.registry.get_registry", lambda: _Reg())
     out = run_skill(skill="faker", action="go", n=1)
     assert "ran" in out
 
@@ -247,7 +247,7 @@ def test_skill_run_fails_loudly_on_a_bad_target(mem, monkeypatch):
         def discover(self): pass
         def get(self, name): return None
 
-    monkeypatch.setattr("kernel.registry.SkillRegistry", lambda: _Reg())
+    monkeypatch.setattr("kernel.registry.get_registry", lambda: _Reg())
     with pytest.raises(RuntimeError, match="unknown skill"):
         run_skill(skill="ghost", action="go")
 
@@ -258,3 +258,25 @@ def test_a_slow_scheduled_run_does_not_stack_up_copies(q):
                      dedupe_key="sched:job_hunter.hunt") is not None
     assert q.enqueue("skill.run", {"skill": "job_hunter", "action": "hunt"},
                      dedupe_key="sched:job_hunter.hunt") is None
+
+
+def test_every_deployment_path_runs_a_queue_worker():
+    """A scheduler that enqueues into a queue nobody drains fails SILENTLY.
+
+    `ecosystem.config.js` defined only agentos-api + agentos-bot for the whole of Phase 26,
+    while the scheduler had already been switched to enqueue the heavy jobs (hunt, ingest,
+    lecture inbox, flip/event scans, the 05:30 triage). On the documented PM2 deployment
+    those rows were claimed by nobody: the hunt stopped finding jobs and triage never ran,
+    with nothing in the logs, because the enqueue itself succeeded.
+
+    Docker was always correct; this asserts the two paths cannot drift apart again.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+
+    pm2 = (root / "ecosystem.config.js").read_text(encoding="utf-8")
+    assert "kernel.worker" in pm2, "ecosystem.config.js starts no queue worker"
+
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "kernel.worker" in compose, "docker-compose.yml starts no queue worker"

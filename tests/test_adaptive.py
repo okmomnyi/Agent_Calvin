@@ -267,3 +267,36 @@ def test_contracts_view_lists_scope_and_invariants(mem, adaptive):
     assert "code_tutor: reads [study]" in res.text
     assert "never_emit_finished_assignment" in res.text
     assert "approval_gate" in res.text          # universal invariants restated
+
+
+def test_every_instruction_category_is_read_by_at_least_one_skill():
+    """A category no skill declares is a category Calvin cannot make a rule in.
+
+    `adaptive.check_boundary()` refuses to create a rule whose category no skill reads --
+    correctly, since it would never apply. But that makes INSTRUCTION_CATEGORIES and the
+    declared contracts two halves of one contract, and they had drifted: `cv` was declared
+    only by job_hunter, so a CV rule reached the *hunter* and never reached cv_tailor, the
+    skill that actually writes CVs. Asserting coverage here fails loudly at the seam instead
+    of silently narrowing what he is allowed to ask for.
+    """
+    from kernel.registry import SkillRegistry
+
+    from core.skill import INSTRUCTION_CATEGORIES
+
+    registry = SkillRegistry()
+    registry.discover()
+
+    readers: dict[str, list[str]] = {c: [] for c in INSTRUCTION_CATEGORIES}
+    for name, skill in registry.skills.items():
+        for category in skill.contract().reads_categories:
+            readers[category].append(name)
+
+    orphans = sorted(c for c, who in readers.items() if not who)
+    assert not orphans, f"categories no skill reads (rules there would never apply): {orphans}"
+
+
+def test_the_skill_that_writes_cvs_reads_cv_rules():
+    """The specific regression above, pinned by name so it cannot quietly come back."""
+    from skills.cv_tailor import SKILL
+
+    assert SKILL.contract().reads("cv")

@@ -21,7 +21,7 @@ def router(fake_llm):
         ("summarize my inbox", "summarize_inbox", "email_agent"),
         ("any free events?", "find_events", "event_scout"),
         ("any CTFs coming up?", "find_events", "event_scout"),
-        ("review my last diff", "review_code", "code_review"),
+        ("review my last diff", "review_code", "code_tutor"),
         ("what's due this week", "whats_due", "semester_planner"),
         ("plan my week", "plan_week", "semester_planner"),
         ("job status", "job_status", "job_hunter"),
@@ -204,6 +204,35 @@ def test_every_intent_rule_maps_to_a_registered_intent():
 
     unknown = sorted({name for name, _, _ in _RULES} - set(INTENTS))
     assert not unknown, f"rules with no INTENTS entry (they route to chat): {unknown}"
+
+
+def test_every_intent_targets_a_skill_action_that_actually_exists():
+    """The other half of the mapping: an INTENTS target naming a skill that does not exist.
+
+    Three did -- `router.summarize`, `approvals.approve`, `code_review.review`. None of those
+    skills has ever existed. Because each also had a keyword rule, they matched at confidence
+    0.9, never reached the catalogue router that would have repaired them, and dead-ended in
+    dispatch_intent's "isn't wired up yet" branch. `approve 1, 3 and 5` -- the exact phrasing
+    the approval digest tells Calvin to use -- was dead on every channel except Telegram.
+
+    Asserting on the mapping rather than on one phrase means a renamed action fails here
+    instead of silently becoming unreachable.
+    """
+    from kernel.registry import SkillRegistry
+
+    from core.intent import INTENTS
+
+    registry = SkillRegistry()
+    registry.discover()
+
+    broken: list[str] = []
+    for intent_name, (skill_name, action) in INTENTS.items():
+        skill = registry.skills.get(skill_name)
+        if skill is None:
+            broken.append(f"{intent_name} -> {skill_name}.{action} (no such skill)")
+        elif action not in skill.commands():
+            broken.append(f"{intent_name} -> {skill_name}.{action} (skill has no such action)")
+    assert not broken, "intents pointing at nothing: " + "; ".join(broken)
 
 
 # ================================================ keyword re-entry (one-shot sessions)

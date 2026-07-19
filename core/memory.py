@@ -17,6 +17,7 @@ connection so the scheduler, API, and bot threads can't interleave on one socket
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from contextlib import contextmanager
@@ -479,6 +480,41 @@ CREATE TABLE IF NOT EXISTS skill_contracts (
     hard_invariants  TEXT NOT NULL,       -- comma-separated; always includes the §0 five
     registered_at    DOUBLE PRECISION NOT NULL
 );
+
+-- Phase 35: durable goal plans.  Failed/cancelled rows and failed step payloads stay
+-- inspectable; status transitions replace deletion.
+CREATE TABLE IF NOT EXISTS plans (
+    id         TEXT PRIMARY KEY,
+    goal       TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    channel    TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    reason     TEXT,
+    gaps       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plans_active ON plans(session_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS plan_steps (
+    id         SERIAL PRIMARY KEY,
+    plan_id    TEXT NOT NULL REFERENCES plans(id),
+    step_id    TEXT NOT NULL,
+    skill      TEXT NOT NULL,
+    action     TEXT NOT NULL,
+    args       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    depends_on JSONB NOT NULL DEFAULT '[]'::jsonb,
+    produces   TEXT,
+    rationale  TEXT,
+    tier       TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    output     JSONB,
+    error      TEXT,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    updated_at DOUBLE PRECISION NOT NULL,
+    UNIQUE(plan_id, step_id)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id, id);
 """
 
 
@@ -1492,6 +1528,88 @@ class Memory:
         rows = self.conn.execute("SELECT skill_name, reads_categories FROM skill_contracts").fetchall()
         return [r["skill_name"] for r in rows
                 if category in [c for c in r["reads_categories"].split(",") if c]]
+
+    # -------------------------------------------------------------- plans (Phase 35)
+    @staticmethod
+    def _json_value(value: Any, fallback: Any) -> Any:
+        if value is None:
+            return fallback
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return fallback
+        return value
+
+    def save_plan(self, plan: dict[str, Any]) -> None:
+        """Idempotently persist plan metadata without replacing its creation time."""
+        now = time.time()
+        with self.tx() as conn:
+            conn.execute(
+                "INSERT INTO plans(id, goal, status, channel, session_id, reason, gaps, "
+                "created_at, updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(id) DO UPDATE SET goal=excluded.goal, status=excluded.status, "
+                "channel=excluded.channel, session_id=excluded.session_id, reason=excluded.reason, "
+                "gaps=excluded.gaps, updated_at=excluded.updated_at",
+                (plan["id"], plan["goal"], plan["status"], plan.get("channel", "cli"),
+                 plan.get("session_id", "calvin"), plan.get("reason", ""),
+                 json.dumps(plan.get("gaps") or [], default=str), now, now))
+
+    def save_plan_step(self, plan_id: str, step: dict[str, Any]) -> None:
+        """Persist every transition and output; never remove a plan step."""
+        with self.tx() as conn:
+            conn.execute(
+                "INSERT INTO plan_steps(plan_id, step_id, skill, action, args, depends_on, "
+                "produces, rationale, tier, status, output, error, attempts, updated_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(plan_id, step_id) DO UPDATE SET skill=excluded.skill, "
+                "action=excluded.action, args=excluded.args, depends_on=excluded.depends_on, "
+                "produces=excluded.produces, rationale=excluded.rationale, tier=excluded.tier, "
+                "status=excluded.status, output=excluded.output, error=excluded.error, "
+                "attempts=excluded.attempts, updated_at=excluded.updated_at",
+                (plan_id, step["id"], step["skill"], step["action"],
+                 json.dumps(step.get("args") or {}, default=str),
+                 json.dumps(step.get("depends_on") or [], default=str), step.get("produces"),
+                 step.get("rationale", ""), step.get("tier", "trivial"),
+                 step.get("status", "pending"),
+                 json.dumps(step["output"], default=str) if step.get("output") is not None else None,
+                 step.get("error"), int(step.get("attempts", 0)), time.time()))
+
+    def get_plan(self, plan_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM plans WHERE id=%s", (plan_id,)).fetchone()
+        if not row:
+            return None
+        out = dict(row)
+        out["gaps"] = self._json_value(out.get("gaps"), [])
+        steps = self.conn.execute(
+            "SELECT * FROM plan_steps WHERE plan_id=%s ORDER BY id", (plan_id,)).fetchall()
+        out["steps"] = []
+        for raw in steps:
+            step = dict(raw)
+            step["id"] = step.pop("step_id")
+            step["args"] = self._json_value(step.get("args"), {})
+            step["depends_on"] = self._json_value(step.get("depends_on"), [])
+            step["output"] = self._json_value(step.get("output"), None)
+            out["steps"].append(step)
+        return out
+
+    def current_plan(self, session_id: str = "calvin") -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT id FROM plans WHERE session_id=%s AND status IN "
+            "('planning','awaiting_approval','executing','paused') "
+            "ORDER BY updated_at DESC LIMIT 1", (session_id,)).fetchone()
+        return self.get_plan(str(row["id"])) if row else None
+
+    def list_plans(self, session_id: str = "calvin", *, active_only: bool = False,
+                   limit: int = 20) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM plans WHERE session_id=%s"
+        params: list[Any] = [session_id]
+        if active_only:
+            sql += " AND status IN ('planning','awaiting_approval','executing','paused')"
+        sql += " ORDER BY updated_at DESC LIMIT %s"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
 
     # -------------------------------------------------------------- infra recon (Phase 21)
     def record_finding(self, target: str, check_type: str, detail: str, severity: str,

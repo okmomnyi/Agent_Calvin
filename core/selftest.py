@@ -60,6 +60,7 @@ SERVICES: dict[str, list[str]] = {
     "voice": ["test_voice.py"],
     "telegram bot": ["test_telegram.py"],
     "session continuity": ["test_session.py"],
+    "goal orchestrator": ["test_orchestrator.py"],
     "kernel & routing": ["test_kernel.py", "test_intent.py", "test_router.py",
                          "test_llm_routing.py", "test_memory.py"],
 }

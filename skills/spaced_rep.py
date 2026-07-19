@@ -20,7 +20,7 @@ from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
 from core.notify import send_telegram
 from core.sm2 import CardState, GRADES, schedule
-from core.skill import BaseSkill, CommandResult, ScheduledJob
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.spaced_rep")
 
@@ -51,6 +51,16 @@ class SpacedRepSkill(BaseSkill):
         if self._llm is None:
             self._llm = get_client()
         return self._llm
+
+    def contract(self) -> SkillContract:
+        """Reads `study` (what and how he wants to revise) and `notifications` (when to quiz).
+
+        `never_auto_activates_cards` is the rule the candidate/active split exists to enforce:
+        a card generated from a lecture or the vault waits for him to approve it, so a
+        mis-transcribed definition never becomes something he drills for weeks.
+        """
+        return SkillContract(reads_categories=["study", "notifications"],
+                             hard_invariants=["never_auto_activates_cards"])
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {
