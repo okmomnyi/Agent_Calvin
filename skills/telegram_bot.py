@@ -81,6 +81,10 @@ HELP = (
 _MOCK_KEY = "interview_prep.mock"
 _QUIZ_KEY = "spaced_rep.session"
 _TUTOR_KEY = "code_tutor.session"
+# A tutoring/quiz/mock exchange is a conversation, not a mode: 45 minutes of silence
+# means it is over. Long enough for a real drill, short enough that a forgotten
+# session cannot swallow tomorrow.
+_LIVE_SESSION_TTL = 45 * 60
 _TRASH_KEY = "email_agent.trash_session"
 _SEND_KEY = "email_agent.send_session"
 
@@ -258,11 +262,17 @@ class BotCore:
                 return self._dispatch("email_agent", "continue_send", {"text": text})
             if self._session_fresh(_TRASH_KEY):  # "confirm trash" / "cancel" / a follow-up filter
                 return self._dispatch("email_agent", "continue_trash", {"text": text})
-            if self.mem.kv_get(_MOCK_KEY):
+            # Every conversational session is now age-checked, not just trash/send. A
+            # `/tutor` session from two days ago had been intercepting EVERY free-text
+            # message since -- his "write and send an email" got an smtplib tutorial and
+            # "create a playlist" got C++ classes, because route_text consults these before
+            # the router and they had no expiry at all. A session that cannot age is a
+            # session that hijacks the assistant forever.
+            if self._session_fresh(_MOCK_KEY, ttl=_LIVE_SESSION_TTL):
                 return self._dispatch("interview_prep", "mock_answer", {"answer": text})
-            if self.mem.kv_get(_QUIZ_KEY):   # voice/typed quiz answer -> judged
+            if self._session_fresh(_QUIZ_KEY, ttl=_LIVE_SESSION_TTL):  # quiz answer -> judged
                 return self._dispatch("spaced_rep", "quiz_answer", {"answer": text})
-            if self.mem.kv_get(_TUTOR_KEY):  # drill solution / socratic answer / lab submit
+            if self._session_fresh(_TUTOR_KEY, ttl=_LIVE_SESSION_TTL):  # drill/socratic/lab reply
                 return self._dispatch("code_tutor", "continue", {"text": text})
         _intent, result = self.registry.handle_command(text)
         return result.text
