@@ -204,3 +204,41 @@ def test_every_intent_rule_maps_to_a_registered_intent():
 
     unknown = sorted({name for name, _, _ in _RULES} - set(INTENTS))
     assert not unknown, f"rules with no INTENTS entry (they route to chat): {unknown}"
+
+
+# ================================================ keyword re-entry (one-shot sessions)
+# Calvin named these keywords by hand: "if i say tutor the tutor session is started ...
+# when i say create a playlist or remove from playlist thats for music". With sessions now
+# one-shot, the keyword IS the way back in -- so it routes deterministically, not on a guess.
+KEYWORDS = [
+    ("tutor", "code_tutor", "start"),
+    ("tutor me on kubernetes", "code_tutor", "start"),
+    ("quiz me", "spaced_rep", "quiz"),
+    ("mock interview", "interview_prep", "mock"),
+    ("create a playlist for coding", "music", "playlist"),
+    ("make me a playlist called deep focus", "music", "playlist"),
+    ("remove from playlist", "music", "playlist_remove"),
+    ("remove Fireworks from my coding playlist", "music", "playlist_remove"),
+]
+
+
+@pytest.mark.parametrize("text,skill,action", KEYWORDS)
+def test_keyword_reentry(text, skill, action):
+    intent = IntentRouter(llm=None).route(text, use_llm=False)
+    assert (intent.skill, intent.action) == (skill, action), f"{text!r} misrouted"
+
+
+def test_playlist_removal_never_routes_to_email_trash():
+    """The trash rule is a catch-all on the verb "remove", so "remove X from my playlist" was
+    one confirmation away from binning email. This is a data-loss guard, not a nicety."""
+    for text in ["remove from playlist", "remove Fireworks from my playlist",
+                 "delete that track from my playlist", "clear the song from my playlist"]:
+        intent = IntentRouter(llm=None).route(text, use_llm=False)
+        assert intent.skill != "email_agent", f"{text!r} routed to EMAIL: {intent.action}"
+
+
+def test_email_deletion_still_works():
+    """...and the guard must not cost him the email clearing he uses daily."""
+    for text in ["clear my emails", "delete all linkedin emails", "get rid of the okx emails"]:
+        intent = IntentRouter(llm=None).route(text, use_llm=False)
+        assert (intent.skill, intent.action) == ("email_agent", "trash"), text

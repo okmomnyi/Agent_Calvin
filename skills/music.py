@@ -105,7 +105,7 @@ class MusicSkill(BaseSkill):
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {
             "connect": self.connect, "taste": self.taste, "queue": self.auto_queue,
-            "playlist": self.playlist, "discover": self.discover, "dj": self.dj,
+            "playlist": self.playlist, "playlist_remove": self.playlist_remove, "discover": self.discover, "dj": self.dj,
             "play": self.play, "pause": self.pause, "next": self.next_track,
             "previous": self.previous_track, "volume": self.volume, "devices": self.devices,
             "now_playing": self.now_playing,
@@ -519,6 +519,57 @@ class MusicSkill(BaseSkill):
         return CommandResult(text=f"🎵 Created “{theme}” with {len(tracks)} track(s) — "
                                   f"edit it like any playlist.",
                              data={"playlist_id": pl.get("id"), "tracks": len(tracks)})
+
+    def playlist_remove(self, track: str = "", playlist: str = "",
+                        **_: Any) -> CommandResult:
+        """Remove a track from one of Calvin's playlists.
+
+        Deleting is not symmetrical with adding: a wrong add is noise, a wrong delete is lost
+        work. So this never runs on a guess -- an ambiguous playlist name, or a track that
+        matches nothing, comes back as a question rather than a best effort.
+        """
+        if not track:
+            return CommandResult(text="Which track should I take out?", ok=False)
+        try:
+            mine = self.sp.my_playlists()
+        except SpotifyError as exc:
+            return CommandResult(text=f"Couldn't read your playlists: {exc}", ok=False)
+        if not mine:
+            return CommandResult(text="You don't have any playlists I can edit.", ok=False)
+
+        if playlist:
+            hits = [p for p in mine if playlist.lower() in (p.get("name") or "").lower()]
+            if not hits:
+                return CommandResult(
+                    text=f"No playlist named “{playlist}”. You have: "
+                         + ", ".join(p["name"] for p in mine[:8]), ok=False)
+            if len(hits) > 1:
+                return CommandResult(text="That matches more than one playlist: "
+                                          + ", ".join(p["name"] for p in hits[:6])
+                                          + ". Which one?", ok=False)
+            targets = hits
+        else:
+            targets = mine  # no playlist named -> search them all, but still confirm the hit
+
+        for pl in targets:
+            try:
+                tracks = self.sp.playlist_tracks(pl["id"])
+            except SpotifyError:
+                continue
+            found = [t for t in tracks if track.lower() in (t.get("name") or "").lower()]
+            if not found:
+                continue
+            try:
+                self.sp.remove_from_playlist(pl["id"], [t["uri"] for t in found])
+            except SpotifyError as exc:
+                return CommandResult(text=f"Couldn't remove it: {exc}", ok=False)
+            names = ", ".join(f"“{t['name']}”" for t in found[:3])
+            return CommandResult(
+                text=f"🎵 Removed {names} from “{pl['name']}”.",
+                data={"playlist": pl["name"], "removed": len(found)})
+
+        where = f"“{targets[0]['name']}”" if playlist else "any of your playlists"
+        return CommandResult(text=f"Couldn't find “{track}” in {where}.", ok=False)
 
     # ------------------------------------------------------------- discovery
     def discover(self, count: int = 5, **_: Any) -> CommandResult:

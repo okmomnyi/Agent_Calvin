@@ -218,3 +218,18 @@ class SpotifyClient:
 
     def add_to_playlist(self, playlist_id: str, uris: list[str]) -> None:
         self._call("POST", f"/playlists/{playlist_id}/tracks", json={"uris": uris[:100]})
+
+    def my_playlists(self, limit: int = 50) -> list[dict[str, Any]]:
+        return (self._call("GET", "/me/playlists", params={"limit": limit}) or {}).get(
+            "items", [])
+
+    def playlist_tracks(self, playlist_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        items = (self._call("GET", f"/playlists/{playlist_id}/tracks",
+                            params={"limit": limit}) or {}).get("items", [])
+        return [i["track"] for i in items if i.get("track")]
+
+    def remove_from_playlist(self, playlist_id: str, uris: list[str]) -> None:
+        """Removes every occurrence of these tracks. Scoped to playlists Calvin owns -- this
+        is the only destructive Spotify call in the system, so it never guesses a target."""
+        self._call("DELETE", f"/playlists/{playlist_id}/tracks",
+                   json={"tracks": [{"uri": u} for u in uris[:100]]})

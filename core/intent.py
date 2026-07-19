@@ -72,6 +72,8 @@ INTENTS: dict[str, tuple[str, str]] = {
     "music_stop":      ("music", "stop_session"),
     "music_status":    ("music", "session_status"),
     "music_budget":    ("music", "budget"),
+    "music_playlist":  ("music", "playlist"),
+    "music_pl_remove": ("music", "playlist_remove"),
     "chit_chat":       ("chat", "reply"),
 }
 
@@ -104,7 +106,9 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
         r"(?:my\s+)?(?:cv|resume|résumé)\b(?:\s+for\s+(?P<t>.+))?", re.I), "target"),
     ("ask_notes", re.compile(r"\bask (?:my )?notes\b[:,]?\s*(?P<t>.+)", re.I), "question"),
     ("quiz", re.compile(r"\bquiz me\b(?: on (?P<t>.+))?", re.I), "unit"),
-    ("tutor", re.compile(r"\btutor(?: mode)?\b[:,]?\s*(?P<t>.+)", re.I), "topic"),
+    ("tutor", re.compile(
+        r"\btutor(?:\s+me)?(?:\s+mode)?\b(?:\s+(?:on|about|me\s+on))?"
+        r"[:,]?\s*(?P<t>.*)", re.I), "topic"),
     ("cram", re.compile(r"\bcram\b\s*(?P<t>.+)?", re.I), "unit"),
     ("mock_interview", re.compile(r"\bmock (?:interview|me)\b(?: for)?\s*(?P<t>.+)?", re.I), "company"),
     ("prep_pack", re.compile(r"\b(?:prep|prepare)(?: me)?(?: for)?\s+(?P<t>.+)", re.I), "company"),
@@ -128,11 +132,24 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     # (clear wasn't even a verb) all missed and got guessed as 'tutor'. Now: any delete-ish
     # verb + the word email(s) anywhere -> capture the whole span as the query. email_agent
     # strips the filler and previews; nothing is deleted without a second confirmation.
+    # Playlists. Ahead of trash_email, whose catch-all verb list includes "remove" --
+    # "remove X from my playlist" routed to EMAIL TRASH before this existed.
+    ("music_pl_remove", re.compile(
+        r"\b(?:remove|delete|drop|take)\s+(?P<t>.+?)\s+"
+        r"(?:from|out\s+of|off)\s+(?:the\s+|my\s+|that\s+)?(?:\w+\s+)?playlist\b",
+        re.I), "track"),
+    ("music_pl_remove", re.compile(
+        r"\bremove\s+from\s+(?:the\s+|my\s+)?playlist\b[:,]?\s*(?P<t>.*)", re.I),
+        "track"),
+    ("music_playlist", re.compile(
+        r"\b(?:create|make|build|generate|put\s+together)\s+(?:me\s+)?(?:a|an|the)?\s*"
+        r"playlist\b(?:\s+(?:for|about|of|called|named)\s+)?(?P<t>.*)", re.I), "theme"),
     ("trash_email", re.compile(
         r"\b(?:delete|trash|remove|clear|clean\s+(?:up|out)|get\s+rid\s+of)\b"
         r"(?P<t>.*\bemails?\b.*)", re.I), "query"),
     ("trash_email", re.compile(
-        r"\b(?:delete|trash|remove|clear)\b(?P<t>.*)", re.I), "query"),
+        r"\b(?:delete|trash|remove|clear)\b(?!.*\b(?:playlist|track|song|music)\b)"
+        r"(?P<t>.*)", re.I), "query"),
     # Compose a NEW email (distinct from draft, which replies to an existing thread). The whole
     # "to X saying Y" span is captured and parsed inside compose(); it only ever previews, then
     # waits for 'confirm send'. Placed before check_email so "send an email to ..." doesn't read
@@ -190,6 +207,7 @@ _INTERNAL_ACTIONS = {
 # keyword rather than always as `text`. Anything absent falls back to `text`.
 _ARG_NAMES = {
     ("music", "playlist"): "theme",
+    ("music", "playlist_remove"): "track",
     ("music", "auto_queue"): "cue",
     ("music", "dj"): "cue",
     ("music", "start_session"): "cue",
