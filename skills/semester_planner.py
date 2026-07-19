@@ -23,6 +23,7 @@ from typing import Any, Callable
 from core.config import get_settings
 from core import timetable
 from core.llm import LLMClient, LLMError, get_client
+from core.expiry import JobExpiry
 from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
 from core.notify import send_telegram
@@ -214,6 +215,17 @@ class SemesterPlannerSkill(BaseSkill):
                     f"— {relative_due(d['due_at'], now)} · {format_local(d['due_at'])}"
                 )
         lines.append(f"\n🧠 Flashcards due: {cards_due}   ·   💼 Job approvals pending: {job_approvals}")
+
+        # Applications whose window is about to shut. Named individually, not counted: a
+        # number tells him something is urgent without telling him what to do about it.
+        closing = JobExpiry(self.mem).upcoming_deadlines(within_days=3, now=now)
+        if closing:
+            lines.append("\n⏳ Applications closing soon:")
+            for job in closing[:5]:
+                where = f" at {job['company']}" if job.get("company") else ""
+                lines.append(f"  • {job['title']}{where} — closes "
+                             f"{relative_due(job['deadline'], now)} · "
+                             f"{format_local(job['deadline'])}  (job #{job['id']})")
         if interviews:
             lines.append("🎯 Interviews: " + ", ".join(i["company"] for i in interviews))
         if events:

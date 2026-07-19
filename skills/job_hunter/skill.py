@@ -17,6 +17,7 @@ from typing import Any, Callable, Sequence
 
 from core.config import get_settings
 from core.llm import LLMClient, get_client
+from core.expiry import JobExpiry, parse_deadline
 from core.logging_setup import get_logger
 from core.mailer import ApplicationMailer
 from core.memory import Memory, get_memory
@@ -115,6 +116,7 @@ class JobHunterSkill(BaseSkill):
             "watch": self.watch,
             "interview_check": self.interview_check,
             "profile": self.profile,
+            "expire": self.expire,
         }
 
     def profile(self, tier: str = "", roles: str = "", **_: Any) -> CommandResult:
@@ -159,7 +161,24 @@ class JobHunterSkill(BaseSkill):
                          kwargs={"day_of_week": "sun", "hour": 18, "minute": 0}),
             ScheduledJob(id="job_hunter.interview_check", func=self.interview_check,
                          trigger="interval", kwargs={"minutes": 15}),
+            ScheduledJob(id="job_hunter.expire", func=self.expire, trigger="interval",
+                         kwargs={"hours": 1}),
         ]
+
+    def expire(self, notify: bool = True, **_: Any) -> CommandResult:
+        """Retire jobs Calvin can no longer act on (Phase 34).
+
+        Nothing is deleted -- §0 Principle 4. Expired jobs leave the queue and the briefing
+        but keep every scrape, score and draft, so a wrong heuristic stays falsifiable.
+        """
+        expiry = JobExpiry(self.mem)
+        expiry.backfill_deadlines()
+        result = expiry.run()
+        if result.total and notify:
+            self._notify(result.summary())
+        return CommandResult(
+            text=result.summary() or "Nothing to retire — the queue is current.",
+            data={"stale": len(result.stale), "expired": len(result.expired)})
 
     # ------------------------------------------------------------- config
     @property
@@ -232,6 +251,14 @@ class JobHunterSkill(BaseSkill):
                 if is_new:
                     row = self.mem.get_job_by_ref(raw.source, raw.external_id)
                     if row:
+                        # Parse the application window at scrape time -- the description is
+                        # the only place it appears, and it is not kept after this.
+                        stamp = parse_deadline(f"{raw.title} {raw.description}")
+                        if stamp:
+                            with self.mem.tx():
+                                self.mem.conn.execute(
+                                    "UPDATE jobs SET deadline=%s WHERE id=%s",
+                                    (stamp, row["id"]))
                         new.append((row["id"], raw))
         return new
 

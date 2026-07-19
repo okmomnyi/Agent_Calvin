@@ -557,6 +557,9 @@ class Memory:
             "jobs": {
                 "apply_kind": "TEXT", "apply_target": "TEXT",
                 "cover_text": "TEXT", "cv_variant": "TEXT",
+                # Phase 34: application window, parsed from the posting. NULL is normal --
+                # most postings never state one, and those fall back to the staleness rule.
+                "deadline": "DOUBLE PRECISION",
             },
             "cv_facts": {"active": "INTEGER NOT NULL DEFAULT 1"},
             "vault_chunks": {"active": "INTEGER NOT NULL DEFAULT 1"},
