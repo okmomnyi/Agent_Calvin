@@ -3,6 +3,8 @@ mock continuation, status snapshot, voice-note transcription. No network / no PT
 
 from __future__ import annotations
 
+import time
+
 import types
 
 from skills.telegram_bot import BotCore, job_buttons, parse_callback
@@ -177,3 +179,56 @@ def test_jobs_payload_empty(mem):
 def test_transcribe_injection(mem):
     core = BotCore(registry=_FakeRegistry(), memory=mem, transcribe=lambda p: "check my email")
     assert core.transcribe("/tmp/x.ogg") == "check my email"
+
+
+# ============================================================ progress feedback
+def test_slow_work_is_acknowledged_before_it_starts(mem):
+    """Calvin: "i need to see clearing emails in progress ... to know its already on it".
+
+    A long task with no acknowledgement is indistinguishable from a dead bot.
+    """
+    core = BotCore(memory=mem)
+    assert "email" in core.progress_line("delete all my LinkedIn emails").lower()
+    assert core.progress_line("create a playlist for late night coding")
+
+
+def test_instant_replies_are_not_acknowledged(mem):
+    """Acking something that answers immediately is just noise."""
+    core = BotCore(memory=mem)
+    assert core.progress_line("what time is it") == ""
+    assert core.progress_line("/status") == ""
+
+
+def test_a_broken_ack_never_blocks_the_message(mem, monkeypatch):
+    core = BotCore(memory=mem)
+
+    def boom(*a, **k):
+        raise RuntimeError("router down")
+
+    monkeypatch.setattr(core, "_PROGRESS_PATTERNS", boom)   # not iterable -> would raise
+    assert core.progress_line("anything") == ""      # reported as no-ack, not raised
+
+
+def test_a_forgotten_session_stops_hijacking_after_the_ttl(mem):
+    """The bug Calvin hit: a two-day-old /tutor session ate every message he sent."""
+    import json
+
+    from skills.telegram_bot import _LIVE_SESSION_TTL, _TUTOR_KEY
+
+    core = BotCore(memory=mem)
+    stale = time.time() - (_LIVE_SESSION_TTL + 60)
+    mem.kv_set(_TUTOR_KEY, json.dumps({"mode": "explain", "created_at": stale}))
+    assert core._session_fresh(_TUTOR_KEY, ttl=_LIVE_SESSION_TTL) is False
+    assert mem.kv_get(_TUTOR_KEY) == "", "the stale session was not cleared"
+
+
+def test_an_undated_session_is_aged_from_first_sight_not_killed(mem):
+    """Killing undated sessions on sight would break a live drill mid-answer."""
+    import json
+
+    from skills.telegram_bot import _LIVE_SESSION_TTL, _TUTOR_KEY
+
+    core = BotCore(memory=mem)
+    mem.kv_set(_TUTOR_KEY, json.dumps({"mode": "drill"}))     # no created_at
+    assert core._session_fresh(_TUTOR_KEY, ttl=_LIVE_SESSION_TTL) is True
+    assert json.loads(mem.kv_get(_TUTOR_KEY)).get("created_at"), "it was not stamped"

@@ -14,6 +14,7 @@ so importing this module never requires the library or starts polling.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Callable
 
@@ -202,10 +203,18 @@ class BotCore:
         if not raw:
             return False
         try:
-            created = float(json.loads(raw).get("created_at", 0))
+            state = json.loads(raw)
+            created = float(state.get("created_at", 0) or 0)
         except Exception:  # noqa: BLE001 - malformed session is stale by definition
             self.mem.kv_set(key, "")
             return False
+        if not created:
+            # Older sessions (quiz, mock, tutor) never recorded a start time. Killing them on
+            # sight would break a live drill mid-answer, so stamp them NOW and age from here:
+            # a genuine in-progress session survives, a forgotten one still expires.
+            state["created_at"] = time.time()
+            self.mem.kv_set(key, json.dumps(state))
+            return True
         if time.time() - created > ttl:
             self.mem.kv_set(key, "")     # expire it silently; do not intercept
             return False
@@ -251,6 +260,44 @@ class BotCore:
             else:
                 note = "\n(Remembered — I won't ask about this pattern again.)"
         return f"{verb}: {action.description}{note}"
+
+    # Phrase -> what to say while it runs. Matched on the RAW TEXT, not on a routed intent:
+    # routing with use_llm=False misses anything only the catalogue router resolves (playlist
+    # included), and routing WITH the LLM would spend a model call deciding what to say before
+    # the work even starts -- doubling the latency the ack exists to hide.
+    _PROGRESS_PATTERNS = [
+        (re.compile(r"\b(?:delete|trash|clear|clean)\b.*\bemail", re.I), "🧹 Finding those emails…"),
+        (re.compile(r"\b(?:summari[sz]e|digest|check)\b.*\b(?:inbox|email)", re.I), "📬 Reading your inbox…"),
+        (re.compile(r"\b(?:write|send|compose|draft)\b.*\bemail", re.I), "✍️ Drafting that email…"),
+        (re.compile(r"\bplaylist\b", re.I), "🎵 Building that playlist…"),
+        (re.compile(r"\b(?:dj|mix|set)\b.*\b(?:music|track|song)|\bdj\s+(?:set|mode)", re.I),
+         "🎧 Sequencing a set…"),
+        (re.compile(r"\b(?:queue|play)\b.*\b(?:music|song|track)|\bmusic\b.*\bqueue", re.I),
+         "🎵 Picking tracks…"),
+        (re.compile(r"\b(?:find|search|scan|any)\b.*\bjobs?\b|\bhunt\b", re.I), "💼 Scanning job sources…"),
+        (re.compile(r"\btailor|refine|polish\b.*\b(?:cv|resume)|\b(?:cv|resume)\b.*\btailor", re.I),
+         "📄 Tailoring your CV…"),
+        (re.compile(r"\bprep(?:are)?\b.*\binterview|\bprep pack\b", re.I), "🎯 Building a prep pack…"),
+        (re.compile(r"\b(?:research|look up|find out)\b", re.I), "🔎 Researching…"),
+        (re.compile(r"\bask (?:my )?notes\b|\bin my notes\b", re.I), "📚 Searching your notes…"),
+        (re.compile(r"\btriage\b|\bclean\b.*\binbox", re.I), "🧹 Triaging your inbox…"),
+        (re.compile(r"\bbriefing\b", re.I), "☀️ Assembling your briefing…"),
+        (re.compile(r"\bevents?\b.*\b(?:scan|find|any)|\bany (?:free )?events?\b", re.I),
+         "🌐 Scanning for events…"),
+    ]
+
+    def progress_line(self, text: str) -> str:
+        """A one-line 'on it' for slow work, or '' when the reply will be immediate."""
+        raw = (text or "").strip()
+        if not raw or raw.startswith("/"):
+            return ""
+        try:
+            for pattern, line in self._PROGRESS_PATTERNS:
+                if pattern.search(raw):
+                    return line
+        except Exception:  # noqa: BLE001 - a courtesy line must never block the real reply
+            return ""
+        return ""
 
     def route_text(self, text: str) -> str:
         """Free text: continue an active (FRESH) session if one is running, else route via intent."""
@@ -554,7 +601,15 @@ def build_application(core: BotCore | None = None):
     async def on_text(update: "Update", context) -> None:  # noqa: ANN001
         if not await _guard(update):
             return
-        await _reply(update, core.route_text(update.message.text))
+        text = update.message.text
+        # Say what is being started BEFORE doing it. Calvin: "when i tell the bot to clear
+        # emails i need to see clearing emails in progress ... when i say create a playlist i
+        # need to se a creating playlist feedback". A long task with no acknowledgement is
+        # indistinguishable from a dead bot, and he had no way to tell which he had.
+        ack = core.progress_line(text)
+        if ack:
+            await update.message.reply_text(ack)
+        await _reply(update, core.route_text(text))
 
     async def on_voice(update: "Update", context) -> None:  # noqa: ANN001
         if not await _guard(update):
