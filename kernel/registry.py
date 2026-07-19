@@ -173,3 +173,21 @@ class SkillRegistry:
         except Exception:  # noqa: BLE001 - routing still works if continuity storage is down
             log.debug("could not inspect active conversational sessions", exc_info=True)
         return None
+
+
+_default_registry: SkillRegistry | None = None
+
+
+def get_registry() -> SkillRegistry:
+    """Shared, discovered registry.
+
+    Added for the catalogue router (core.intent), which needs to know what the system can
+    actually DO in order to route to it. Discovery runs once and is cached; callers that need
+    a private instance still construct SkillRegistry() directly.
+    """
+    global _default_registry
+    if _default_registry is None:
+        reg = SkillRegistry()
+        reg.discover()
+        _default_registry = reg
+    return _default_registry

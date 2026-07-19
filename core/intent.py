@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.llm import LLMClient, get_client
+from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 
 log = get_logger("core.intent")
@@ -179,6 +179,44 @@ _LLM_LABELS = [
 ]
 
 
+# Actions that exist for the machinery, not for Calvin -- passive logging, mid-session
+# continuations, callbacks. Routing a sentence to one of these would be worse than missing.
+_INTERNAL_ACTIONS = {
+    "log_signal", "drill_check", "quiz_answer", "mock_answer", "session_tick",
+    "confirm_deadline", "reject_deadline", "score_one", "run", "tick",
+}
+
+# The single argument name each skill.action expects, so a routed value lands in the right
+# keyword rather than always as `text`. Anything absent falls back to `text`.
+_ARG_NAMES = {
+    ("music", "playlist"): "theme",
+    ("music", "auto_queue"): "cue",
+    ("music", "dj"): "cue",
+    ("music", "start_session"): "cue",
+    ("cv_tailor", "tailor"): "target",
+    ("cv_tailor", "refine"): "target",
+    ("research", "search"): "query",
+    ("vault", "ask"): "question",
+    ("interview_prep", "prep"): "company",
+    ("interview_prep", "mock"): "company",
+    ("code_tutor", "start"): "topic",
+    ("code_tutor", "explain"): "topic",
+    ("spaced_rep", "quiz"): "unit",
+    ("semester_planner", "cram"): "unit",
+    ("persona", "remember"): "instruction",
+    ("email_agent", "compose"): "instruction",
+    ("email_agent", "trash"): "query",
+    ("desktop", "open"): "app",
+    ("desktop", "close"): "app",
+    ("proactive", "forget"): "pattern",
+}
+
+
+def _args_for(skill: str, action: str, value: str) -> dict[str, Any]:
+    """Put a routed value under the keyword the target actually accepts."""
+    return {_ARG_NAMES.get((skill, action), "text"): value}
+
+
 _CURLY = {"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-"}
 
 
@@ -234,7 +272,23 @@ class IntentRouter:
         if not use_llm:
             return self._build("chit_chat", {"text": cleaned}, confidence=0.2, via="keyword")
 
-        # LLM fallback — strict single label
+        # LLM fallback over the LIVE command catalogue, not a hardcoded label list.
+        #
+        # This is the "interpret and instruct" layer. The old fallback offered 13 fixed
+        # labels, so 113 of the system's 151 skill commands were unreachable by talking to
+        # it: `music.playlist` exists and works, but "create a playlist for coding" matched no
+        # keyword rule, wasn't in the 13 labels, and fell through to chat -- which DESCRIBED
+        # how to make a playlist instead of making one. The capability was never the problem;
+        # nothing connected his words to it.
+        #
+        # Routing against what the system can actually do means a new skill becomes reachable
+        # the moment it is registered, with no new regex and no edit here.
+        catalogue = self._catalogue()
+        if catalogue:
+            picked = self._route_by_catalogue(cleaned, catalogue)
+            if picked is not None:
+                return picked
+
         label = self.llm.classify(
             cleaned,
             _LLM_LABELS,
@@ -243,6 +297,54 @@ class IntentRouter:
         args = {"query": cleaned} if label == "research" else {"text": cleaned}
         log.debug("intent llm-match: %s -> %s", cleaned, label)
         return self._build(label, args, confidence=0.6, via="llm")
+
+    def _catalogue(self) -> list[tuple[str, str, str]]:
+        """(skill, action, one-line description) for everything currently registered."""
+        try:
+            from kernel.registry import get_registry
+
+            registry = get_registry()
+            out: list[tuple[str, str, str]] = []
+            for name, skill in sorted(registry.skills.items()):
+                for action, fn in skill.commands().items():
+                    if action.startswith(("continue_", "_")) or action in _INTERNAL_ACTIONS:
+                        continue        # continuations belong to a live session, not routing
+                    doc = (getattr(fn, "__doc__", "") or "").strip().splitlines()
+                    out.append((name, action, doc[0][:90] if doc else ""))
+            return out
+        except Exception:  # noqa: BLE001 - routing must survive a registry problem
+            return []
+
+    def _route_by_catalogue(self, text: str, catalogue: list[tuple[str, str, str]]) -> Intent | None:
+        """Ask the model to pick a skill.action from what actually exists."""
+        listing = "\n".join(f"{s}.{a}" + (f" — {d}" if d else "") for s, a, d in catalogue)
+        try:
+            data = self.llm.chat_json(
+                "classify",
+                [{"role": "system", "content":
+                    "Route the user's message to ONE capability from the list, or to "
+                    "chat.reply if none genuinely fits. Return the exact 'skill.action' "
+                    "string. Prefer doing what was asked over talking about it: if the user "
+                    "says 'create a playlist', route to the command that creates one. "
+                    "`args` may carry a single obvious argument (a theme, a query, a name)."},
+                 {"role": "user", "content":
+                    f"Capabilities:\n{listing}\n\nMessage: {text}"}],
+                schema_hint='{"target": "skill.action", "args": {"value": string}}',
+                temperature=0.0, max_tokens=120)
+        except LLMError:
+            return None
+        target = str((data or {}).get("target") or "")
+        if "." not in target:
+            return None
+        skill, _, action = target.partition(".")
+        if (skill, action) not in {(s, a) for s, a, _ in catalogue}:
+            log.info("catalogue router picked an unknown target %r", target)
+            return None
+        value = str(((data or {}).get("args") or {}).get("value") or "").strip()
+        args = _args_for(skill, action, value or text)
+        log.info("intent catalogue-match: %s -> %s.%s", text, skill, action)
+        return Intent(name=f"{skill}.{action}", skill=skill, action=action, args=args,
+                      confidence=0.7, via="catalogue")
 
     @staticmethod
     def _build(name: str, args: dict[str, Any], *, confidence: float, via: str) -> Intent:
