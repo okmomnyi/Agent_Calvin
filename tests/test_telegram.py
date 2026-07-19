@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 import types
 
 from skills.telegram_bot import BotCore, job_buttons, parse_callback
@@ -232,3 +234,76 @@ def test_an_undated_session_is_aged_from_first_sight_not_killed(mem):
     mem.kv_set(_TUTOR_KEY, json.dumps({"mode": "drill"}))     # no created_at
     assert core._session_fresh(_TUTOR_KEY, ttl=_LIVE_SESSION_TTL) is True
     assert json.loads(mem.kv_get(_TUTOR_KEY)).get("created_at"), "it was not stamped"
+
+
+# ============================================================ one-shot sessions
+def test_a_session_ends_after_one_exchange(mem, monkeypatch):
+    """Calvin: "the session ends as soon as the response is sent".
+
+    A sticky session is a MODE, and a mode you forgot you were in rewrites the meaning of
+    everything you say next -- his /tutor ran two days and turned an email request into an
+    smtplib tutorial.
+    """
+    import json
+
+    from skills.telegram_bot import _TUTOR_KEY
+
+    core = BotCore(memory=mem)
+    monkeypatch.setattr(core, "_dispatch", lambda *a, **k: "tutor answered")
+    mem.kv_set(_TUTOR_KEY, json.dumps({"mode": "drill", "created_at": time.time()}))
+
+    out = core.route_text("my answer is a linked list")
+    assert "tutor answered" in out
+    assert "Session closed" in out
+    assert mem.kv_get(_TUTOR_KEY) == "", "the session stayed latched"
+
+
+def test_the_next_message_routes_fresh(mem, monkeypatch):
+    """The whole point: a finished drill must not reinterpret the next request."""
+    import json
+
+    from skills.telegram_bot import _TUTOR_KEY
+
+    core = BotCore(memory=mem)
+    monkeypatch.setattr(core, "_dispatch", lambda *a, **k: "tutor answered")
+    mem.kv_set(_TUTOR_KEY, json.dumps({"mode": "drill", "created_at": time.time()}))
+    core.route_text("my answer")                       # consumes the session
+
+    routed = {}
+    monkeypatch.setattr(core.registry, "handle_command",
+                        lambda t: (routed.setdefault("text", t),
+                                   type("I", (), {"skill": "music"})(),
+                                   type("R", (), {"text": "playlist built"})())[1:])
+    out = core.route_text("create a playlist for coding")
+    assert "playlist built" in out, "a closed session still hijacked the next message"
+
+
+def test_a_crashing_skill_still_ends_the_session(mem, monkeypatch):
+    """Cleared BEFORE dispatch: a crash that leaves the mode latched is how this started."""
+    import json
+
+    from skills.telegram_bot import _TUTOR_KEY
+
+    core = BotCore(memory=mem)
+
+    def boom(*a, **k):
+        raise RuntimeError("tutor exploded")
+
+    monkeypatch.setattr(core, "_dispatch", boom)
+    mem.kv_set(_TUTOR_KEY, json.dumps({"mode": "drill", "created_at": time.time()}))
+    with pytest.raises(RuntimeError):
+        core.route_text("my answer")
+    assert mem.kv_get(_TUTOR_KEY) == "", "a crash left the session latched"
+
+
+def test_email_confirmations_are_not_one_shot(mem, monkeypatch):
+    """send/trash previews are a two-step CONFIRMATION -- forgetting mid-flow would be worse."""
+    import json
+
+    from skills.telegram_bot import _SEND_KEY
+
+    core = BotCore(memory=mem)
+    monkeypatch.setattr(core, "_dispatch", lambda *a, **k: "sent")
+    mem.kv_set(_SEND_KEY, json.dumps({"to": "x@y.com", "created_at": time.time()}))
+    out = core.route_text("confirm send")
+    assert "Session closed" not in out

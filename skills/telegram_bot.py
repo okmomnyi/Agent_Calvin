@@ -299,6 +299,17 @@ class BotCore:
             return ""
         return ""
 
+    def _consume(self, key: str, skill: str, action: str, payload: dict) -> str:
+        """Run one continuation, then end that session.
+
+        Cleared BEFORE dispatching, not after: if the skill raises, the session must still be
+        gone. A crash that leaves the mode latched is exactly how a two-day tutor session
+        happened in the first place.
+        """
+        self.mem.kv_set(key, "")
+        out = self._dispatch(skill, action, payload)
+        return out + "\n\n(Session closed — say it again any time to pick it back up.)"
+
     def route_text(self, text: str) -> str:
         """Free text: continue an active (FRESH) session if one is running, else route via intent."""
         if not text.startswith("/"):
@@ -315,12 +326,15 @@ class BotCore:
             # "create a playlist" got C++ classes, because route_text consults these before
             # the router and they had no expiry at all. A session that cannot age is a
             # session that hijacks the assistant forever.
+            # ONE-SHOT: consume the continuation, then end the session. The next message
+            # routes fresh, so a forgotten drill can never reinterpret tomorrow's request.
             if self._session_fresh(_MOCK_KEY, ttl=_LIVE_SESSION_TTL):
-                return self._dispatch("interview_prep", "mock_answer", {"answer": text})
+                return self._consume(_MOCK_KEY, "interview_prep", "mock_answer",
+                                     {"answer": text})
             if self._session_fresh(_QUIZ_KEY, ttl=_LIVE_SESSION_TTL):  # quiz answer -> judged
-                return self._dispatch("spaced_rep", "quiz_answer", {"answer": text})
-            if self._session_fresh(_TUTOR_KEY, ttl=_LIVE_SESSION_TTL):  # drill/socratic/lab reply
-                return self._dispatch("code_tutor", "continue", {"text": text})
+                return self._consume(_QUIZ_KEY, "spaced_rep", "quiz_answer", {"answer": text})
+            if self._session_fresh(_TUTOR_KEY, ttl=_LIVE_SESSION_TTL):  # drill/socratic/lab
+                return self._consume(_TUTOR_KEY, "code_tutor", "continue", {"text": text})
         _intent, result = self.registry.handle_command(text)
         return result.text
 
