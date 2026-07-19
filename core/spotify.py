@@ -50,6 +50,9 @@ SCOPES = [
     "user-read-playback-state", "user-modify-playback-state", "user-read-currently-playing",
     "user-read-recently-played", "user-top-read", "user-library-read",
     "playlist-modify-private", "playlist-modify-public",
+    # Reading them back is a separate grant, and every playlist we create is private --
+    # without these, playlist_remove cannot even see the playlist it is meant to edit.
+    "playlist-read-private", "playlist-read-collaborative",
 ]
 
 # Endpoints Spotify removed for new apps — named here so nobody re-adds them by accident.
@@ -74,6 +77,9 @@ class SpotifyClient:
         self.session = session or requests.Session()
         self._access_token: str | None = None
         self._expires_at: float = 0.0
+        # Scopes the CURRENT token actually carries. Differs from SCOPES precisely when the
+        # saved grant predates a capability we since added -- the failure being diagnosed.
+        self._last_scope: str = ""
 
     # ------------------------------------------------------------- auth
     @staticmethod
@@ -120,6 +126,9 @@ class SpotifyClient:
         data = self._token_request({"grant_type": "refresh_token", "refresh_token": refresh})
         self._access_token = data["access_token"]
         self._expires_at = time.time() + int(data.get("expires_in", 3600))
+        # Spotify echoes the granted scope on refresh. It is the only way to know what the
+        # stored token can actually do, as opposed to what we asked for.
+        self._last_scope = data.get("scope", "")
         return self._access_token
 
     # ------------------------------------------------------------- transport
@@ -130,8 +139,7 @@ class SpotifyClient:
                                     headers={"Authorization": f"Bearer {self._token()}"},
                                     timeout=20, **kw)
         if resp.status_code == 403:
-            raise SpotifyError("Spotify returned 403 — the account likely isn't Premium, or the "
-                               "app lacks that scope.")
+            raise SpotifyError(self._explain_403(resp, path))
         if resp.status_code == 404:
             raise SpotifyError("No active Spotify device — open Spotify somewhere first.")
         if resp.status_code >= 400:
@@ -141,6 +149,54 @@ class SpotifyClient:
         return resp.json()
 
     # ------------------------------------------------------------- taste inputs (still available)
+    def _explain_403(self, resp: Any, path: str) -> str:
+        """Say what Spotify actually said, and name the fix when it is knowable.
+
+        Spotify distinguishes two 403s and they need opposite responses, so the message must
+        not blur them (the old text guessed "not Premium, or missing scope" for an account
+        that is demonstrably Premium):
+
+        * "Insufficient client scope" -- the saved grant predates a capability we added.
+          Re-authorising fixes it.
+        * bare "Forbidden" -- the APP is not allowed to call that endpoint at all. Measured
+          against Calvin's account: reads return 200, Premium is active, every scope is
+          granted, and playlist creation still returns this. No re-auth will move it; it is
+          a Spotify developer-dashboard restriction.
+        """
+        detail = ""
+        try:
+            body = resp.json() or {}
+            detail = (body.get("error") or {}).get("message") or ""
+        except Exception:  # noqa: BLE001 - 403 bodies are not always JSON
+            detail = (getattr(resp, "text", "") or "")[:160]
+
+        if "scope" in detail.lower():
+            return (f"Spotify denied that — the saved authorisation is missing a permission "
+                    f"this needs. Re-run the Spotify auth to grant it. ({detail})")
+        if "/playlists" in path:
+            return ("Spotify refused to create/modify the playlist (plain 'Forbidden', not a "
+                    "scope error). Your account is Premium and every scope is granted, so "
+                    "this is an app-level restriction on the Spotify developer app itself — "
+                    "check its quota mode in the Spotify Developer Dashboard. Re-authorising "
+                    "will not change it.")
+        if detail:
+            return f"Spotify denied that: {detail}"
+        return "Spotify returned 403 with no reason given."
+
+    @staticmethod
+    def _missing_scope_for(path: str) -> str:
+        if "/playlists" in path or "/tracks" in path:
+            return "playlist-modify-private"
+        return ""
+
+    def _granted_scopes(self) -> set[str]:
+        """Scopes the CURRENT token actually carries — not the ones we asked for.
+
+        These differ precisely when SCOPES has grown since Calvin last authorised, which is
+        the failure being diagnosed.
+        """
+        return set((self._last_scope or "").split())
+
     def me(self) -> dict[str, Any]:
         return self._call("GET", "/me")
 

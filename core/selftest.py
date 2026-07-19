@@ -39,7 +39,7 @@ _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|errors?|xfailed|skipped)\b")
 # Calvin depends on the capability, so the important results land first.
 SERVICES: dict[str, list[str]] = {
     "job hunter": ["test_job_hunter.py", "test_job_scoring.py", "test_job_sources.py",
-                   "test_expiry.py"],
+                   "test_expiry.py", "test_enrich.py"],
     "CV tailor": ["test_cv_tailor.py", "test_cv_pdf.py"],
     "email agent": ["test_email_agent.py"],
     "persona": ["test_persona.py", "test_github_import.py"],

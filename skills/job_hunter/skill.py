@@ -18,6 +18,7 @@ from typing import Any, Callable, Sequence
 from core.config import get_settings
 from core.llm import LLMClient, get_client
 from core.expiry import JobExpiry, parse_deadline
+from skills.job_hunter.enrich import enrich_job
 from core.logging_setup import get_logger
 from core.mailer import ApplicationMailer
 from core.memory import Memory, get_memory
@@ -275,6 +276,11 @@ class JobHunterSkill(BaseSkill):
                 log.info("skip '%s' (score %d < %d)", raw.title, score, self.threshold)
                 return None
 
+        # Fetch the real posting now that we know it is worth the request. This must happen
+        # BEFORE the cover is drafted and before the CV is tailored -- both were matching
+        # against a 162-character stub, which is most of why tailored CVs read thin.
+        self._enrich(job_id, raw)
+
         apply_kind, apply_target = self._apply_route(raw)
         cover = self._draft_cover(raw, category)
         self.mem.save_cover(job_id, apply_kind=apply_kind, apply_target=apply_target, cover_text=cover)
@@ -283,6 +289,25 @@ class JobHunterSkill(BaseSkill):
             "category": category, "summary": reason, "url": raw.url,
             "apply_kind": apply_kind, "apply_target": apply_target, "cover": cover,
         }
+
+    def _enrich(self, job_id: int, raw: RawJob) -> None:
+        """Replace the stub description with the full posting, in place.
+
+        Best-effort by design: a dead link, a JS-only page or a robots block leaves the stub
+        standing. Enrichment makes a good job better; it must never cost Calvin the posting.
+        """
+        fetcher = getattr(self, "_fetcher", None) or next(
+            (getattr(src, "fetcher", None) for src in self.sources
+             if getattr(src, "fetcher", None)), None)
+        if fetcher is None:
+            return
+        try:
+            text = enrich_job(job_id, raw.url, memory=self.mem, fetcher=fetcher)
+        except Exception:  # noqa: BLE001 - never let enrichment abort a hunt
+            log.exception("enrich failed for job %s", job_id)
+            return
+        if text:
+            raw.description = text
 
     @staticmethod
     def _apply_route(raw: RawJob) -> tuple[str, str | None]:
