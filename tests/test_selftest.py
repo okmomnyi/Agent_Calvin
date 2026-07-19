@@ -185,3 +185,45 @@ def test_a_run_that_cannot_find_its_tests_is_reported_not_crashed(tmp_path):
     (tmp_path / "tests" / "test_gone.py").unlink()
     res = run_service("demo", ["test_x.py"], root=tmp_path, timeout=120)
     assert res.ok  # the surviving module still runs cleanly
+
+
+# ============================================================ trustworthy numbers
+def test_counts_come_only_from_the_summary_line():
+    """Calvin's phone reported "5433 of 5448" per service and 103,445 tests in one run.
+
+    The parser was scanning every line containing "passed"/"failed", so when the database was
+    unreachable it read numbers straight out of assertion text. A self-test whose numbers
+    cannot be trusted is worse than no self-test, because it gets believed.
+    """
+    from core.selftest import _parse
+
+    noisy = ("E       assert 5433 == 5448\n"
+             "FAILED tests/test_x.py::test_thing - assert 5433 == 5448\n"
+             "=========== 2 passed, 1 failed in 3.42s ===========")
+    passed, failed, names = _parse(noisy)
+    assert (passed, failed) == (2, 1), "traceback numbers were read as test counts"
+    assert names and "test_thing" in names[0]
+
+
+def test_a_clean_run_parses():
+    from core.selftest import _parse
+
+    assert _parse("23 passed in 84.11s")[:2] == (23, 0)
+
+
+def test_a_collection_error_is_not_reported_as_a_pass():
+    from core.selftest import _parse
+
+    assert _parse("ERROR tests/test_x.py - psycopg.OperationalError\n1 error in 0.50s")[:2] == (0, 1)
+
+
+def test_no_selftest_regex_contains_a_control_character():
+    """`\b` written through a shell heredoc becomes a literal backspace (0x08).
+
+    It compiles, matches nothing, and the failure is silent -- it has now happened twice in
+    this repo (the music_budget intent rule, and this parser).
+    """
+    from core.selftest import _COUNT_RE, _SUMMARY_RE
+
+    for rx in (_SUMMARY_RE, _COUNT_RE):
+        assert not any(ord(c) < 32 for c in rx.pattern), f"dead regex: {rx.pattern!r}"

@@ -18,6 +18,7 @@ Two design choices worth stating:
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import time
@@ -28,6 +29,11 @@ from typing import Callable
 from core.logging_setup import get_logger
 
 log = get_logger("core.selftest")
+
+# pytest's final summary always ends with a duration: "5 passed, 1 failed in 3.42s".
+# Anchoring on that is what stops tracebacks and assertion text being read as counts.
+_SUMMARY_RE = re.compile(r"\bin\s+[\d.]+\s*s(?:econds)?\b[\s=]*$")
+_COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|errors?|xfailed|skipped)\b")
 
 # Human-facing service name -> the test modules that cover it. Ordered roughly by how much
 # Calvin depends on the capability, so the important results land first.
@@ -93,15 +99,18 @@ def _parse(output: str) -> tuple[int, int, list[str]]:
         # word. `last` starts as None because pytest also prints bare prose containing these
         # words ("ERROR: file or directory not found: tests/x.py"), and reading a number that
         # was never there crashed the whole run with UnboundLocalError.
-        if " passed" in line or " failed" in line or " error" in line:
-            last: str | None = None
-            for chunk in line.replace(",", " ").split():
-                if chunk.isdigit():
-                    last = chunk
-                elif last is not None and chunk.startswith("passed"):
-                    passed = max(passed, int(last))
-                elif last is not None and chunk.startswith(("failed", "error")):
-                    failed = max(failed, int(last))
+        # ONLY pytest's final summary line, which always ends in a duration ("... in 3.42s").
+        # Scanning every line containing "passed"/"failed" read numbers out of tracebacks and
+        # assertion text: when the database was unreachable, every service reported nonsense
+        # like "5433 of 5448" and the run totalled 103,445 tests. A self-test whose numbers
+        # cannot be trusted is worse than none, because it is believed.
+        if not _SUMMARY_RE.search(line):
+            continue
+        for count, word in _COUNT_RE.findall(line):
+            if word.startswith("passed"):
+                passed = max(passed, int(count))
+            elif word.startswith(("failed", "error")):
+                failed = max(failed, int(count))
     return passed, failed, names
 
 

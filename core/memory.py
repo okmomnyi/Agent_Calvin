@@ -642,6 +642,16 @@ class Memory:
             (status, limit),
         ).fetchall()
 
+    def count_jobs_by_status(self, status: str) -> int:
+        """How many jobs are in a status, ignoring any display limit.
+
+        The listing is capped for readability; the COUNT is what tells Calvin whether the
+        capped list is the whole story. Without it, 83 drafted jobs appeared as "5 awaiting".
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM jobs WHERE status=%s", (status,)).fetchone()
+        return int(row["c"]) if row else 0
+
     def save_cover(
         self, job_id: int, *, apply_kind: str, apply_target: str | None, cover_text: str,
         cv_variant: str | None = None,

@@ -302,7 +302,19 @@ class BotCore:
                  "apply_kind": r["apply_kind"], "apply_target": r["apply_target"]} for r in rows]
         if not jobs:
             return "No job matches awaiting approval. Run a hunt or check back after the next scan.", []
-        return f"💼 {len(jobs)} job(s) awaiting your call:", jobs
+        # Say how many are actually waiting. The list is capped at 20 for a readable message,
+        # but reporting only the capped number reads as "that's all there is" -- Calvin had 83
+        # drafted jobs and was shown 5, with nothing to suggest the other 78 existed. A silent
+        # truncation on the approval path is how work quietly never gets done.
+        try:
+            total = sum(self.mem.count_jobs_by_status(s) for s in ("notified", "drafted"))
+        except Exception:  # noqa: BLE001 - a count must never break the listing
+            total = len(jobs)
+        header = f"💼 {len(jobs)} of {total} job(s) awaiting your call:" if total > len(jobs) \
+            else f"💼 {len(jobs)} job(s) awaiting your call:"
+        if total > len(jobs):
+            header += f"\n(showing the {len(jobs)} highest — {total - len(jobs)} more queued)"
+        return header, jobs
 
     def handle_callback(self, data: str) -> str:
         """Handle an inline-button press. Returns reply text."""
