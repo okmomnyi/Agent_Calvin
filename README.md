@@ -7,9 +7,15 @@ prepares him for interviews, runs a side-hustle deal pipeline, audits his own
 infrastructure, and doubles as a full study companion — reachable by **voice** (laptop),
 **Telegram** (phone), **dashboard** (browser), and **CLI**.
 
-> **Status: all 27 phases complete.** 21 skills · 24 scheduled jobs · **540 tests passing**
-> (all offline, network mocked). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
-> full explanation of every capability and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) to run it.
+> **Status: phases 1–34 complete.** 22 skills · 26 scheduled jobs · 153 commands ·
+> **687 tests passing** (all offline, network mocked). See
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full explanation of every capability
+> and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) to run it.
+>
+> **One known external blocker, stated rather than buried.** Spotify **playlist creation is
+> blocked by Spotify**, not by this code: the account is Premium and every scope is granted,
+> but the app gets a bare `403 Forbidden` — an app-level restriction to lift in the Spotify
+> Developer Dashboard. Re-authorising does not fix it.
 
 ---
 
@@ -17,7 +23,7 @@ infrastructure, and doubles as a full study companion — reachable by **voice**
 
 | Area | Capability |
 |------|------------|
-| **Job hunting** | Scrapes 9+ sources → category-scores → drafts a cover email from your verified facts → digest with Apply/Skip/Tailor buttons → sends on approval with a tailored CV → tracks applications → watches for interview invites |
+| **Job hunting** | Scrapes 9+ sources → category-scores → **fetches the full posting** for keepers → drafts a cover email from your verified facts → digest with Apply/Skip/Tailor buttons → sends on approval with a tailored CV → tracks applications → watches for interview invites · **auto-retires** jobs unreviewed >2 days or past their deadline (retired, never deleted) |
 | **Email** | Hourly inbox cleanup (classify + archive/label) · explicit recoverable Trash with preview, confirmation, and undo · reply drafting (never sends) |
 | **Persona** | Answers *as you* from verified facts only (never invents) · standing instructions · learns your style from your edits |
 | **Forms & interviews** | Fills application forms / screeners from your KB (flags unknowns) · interview prep packs (PDF) · `/mock` rehearsals |
@@ -32,6 +38,10 @@ infrastructure, and doubles as a full study companion — reachable by **voice**
 | **Continuity** | One session across phone/laptop/browser/CLI — hand off mid-task, see every pending approval in one place |
 | **Self-audit** | Weekly report-only scan of infrastructure *you enrol*: open ports, TLS expiry, exposed config, CVEs via OSV, container health. **Never acts** |
 | **Music** | Spotify taste model, playlists, transport control, narrated DJ mode (stock voice only) · **continuous session** driven from the server, so it keeps playing while your laptop sleeps |
+| **Memory** | pgvector semantic recall over your facts, notes and CV — retrieves what's relevant instead of stuffing the context window (**~71% context reduction** measured on CV tailoring) |
+| **Approvals** | Actions carry a tier (`trivial`/`low`/`medium`/`high`) and remember your answers per action. **`high` can never be learned into auto-approval** — anything sent in your name asks every time |
+| **Proactive** | Triages the inbox at 05:30, before your briefing, so the briefing reports an inbox already cleaned. Confined to archive/trash/label, and an action it doesn't recognise is dropped rather than escalated |
+| **Self-test** | `pytest` per *service*, reported to Telegram as each group finishes (✅/❌ with the reason), so a deploy is verifiable from your phone. Never fabricates a pass |
 | **Desktop** | "open Spotify", "close VS Code" on your laptop by voice. **Allowlisted apps only** (your laptop decides, not the server) and **graceful close only** — no force-kill, so unsaved work is never lost |
 
 ## Non-negotiable principles ([§0](docs/ARCHITECTURE.md#0-non-negotiable-principles))
@@ -113,7 +123,7 @@ pip install -r requirements.txt
 createdb agentos && createdb agentos_test
 
 cp .env.example .env          # set DATABASE_URL + NVIDIA_API_KEY (+ optional per-task keys)
-pytest                        # 540 tests (external services mocked; needs the test DB)
+pytest                        # 687 tests (external services mocked; needs the test DB)
 
 python manage.py health                    # subsystem snapshot
 python manage.py serve                     # start the kernel on :8000
@@ -163,7 +173,7 @@ routes:
   digest, draft, hunt, approve, summary, watch, persona-init, form, research, prep, mock,
   voice, telegram, ingest, ask, vault, lecture, quiz, cards, review-report, tutor, review,
   briefing, plan, cram, deadline, events, cv-update, cv, **flip**, **infra**, **music**,
-  **adaptive**, backup.
+  **adaptive**, **selftest**, backup.
 - **Telegram** — `/status /jobs /approve /ask /find /form /prep /mock /draft /facts /quiz
   /cards /tutor /briefing /plan /cram /deadline /events /tags /cv /rules /retro /contracts …`,
   inline buttons, and voice notes. Free text → the same intent router as voice.
@@ -183,7 +193,7 @@ routes:
 
 Python 3.11+ · FastAPI + APScheduler · **PostgreSQL** (raw SQL via psycopg 3 — no ORM) · WebSocket ·
 python-telegram-bot · google-api-python-client (Gmail) · feedparser + BeautifulSoup
-(scraping) · ReportLab (PDFs) · sentence-transformers *(optional)* / hashing embedder
-(vault) · faster-whisper + edge-tts *(voice, laptop-side)* · Africa's Talking (SMS/WhatsApp) ·
+(scraping) · ReportLab (PDFs) · **pgvector** (HNSW cosine) + NIM-hosted
+`baai/bge-m3` embeddings, hashing embedder as fallback · faster-whisper + edge-tts *(voice, laptop-side)* · Africa's Talking (SMS/WhatsApp) ·
 Spotify Web API *(optional, Premium)* · OSV.dev (CVE lookups, keyless) · NVIDIA NIM (all LLMs) ·
 PM2 + Caddy (deploy).

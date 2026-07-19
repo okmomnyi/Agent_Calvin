@@ -29,6 +29,7 @@ handled for you — skip to §0.
 - [9. Laptop voice client](#9-laptop-voice-client)
 - [10. Phone access](#10-phone-access)
 - [11. Seeding Calvin's data](#11-seeding-calvins-data)
+- [11a. Verifying a deploy](#11a-verifying-a-deploy-phase-28)
 - [11b. Optional subsystems (Phases 16–22)](#11b-optional-subsystems-phases-1622)
 - [12. Backups](#12-backups)
 - [13. The deploy loop (laptop → droplet)](#13-the-deploy-loop)
@@ -131,9 +132,13 @@ read-write (the Gmail client rewrites the token on every hourly refresh).
 
 ### Optional ML extras
 
-`sentence-transformers` (semantic vault embeddings) and `faster-whisper` (droplet-side
-transcription for Telegram voice notes and lecture capture) are **excluded by default** — they
-pull ~2GB of torch. Without them the vault falls back to the hashing embedder and voice notes
+`sentence-transformers` and `faster-whisper` (droplet-side transcription for Telegram voice
+notes and lecture capture) are **excluded by default** — they pull ~2GB of torch.
+
+⚠️ **Do not install `sentence-transformers` on a small droplet.** Semantic recall no longer
+needs it: since Phase 33 embeddings come from NIM-hosted `baai/bge-m3` over the network, which
+is why a 961 MB / 1 CPU droplet can do semantic search at all. A local torch model there is not
+merely slow, it does not fit. Without these extras the vault still embeds via NIM and voice notes
 aren't transcribed. To include them:
 
 ```bash
@@ -182,7 +187,13 @@ WITH_ML=1 docker compose build && docker compose up -d
 - **DigitalOcean droplet** — Ubuntu 22.04+, 2 GB RAM minimum (4 GB if you run
   sentence-transformers or droplet-side faster-whisper). Python 3.11+.
 - **PostgreSQL 14+** — all durable state lives here (raw SQL via psycopg 3, no ORM). Can run
-  on the droplet itself or as a managed DigitalOcean database.
+  on the droplet itself or as a managed DigitalOcean database. **The `pgvector` extension is
+  needed** for semantic recall (Phase 33) — the Docker path uses `pgvector/pgvector:pg17`, which
+  is stock Postgres 17 with the extension already present, so there is nothing to install. On a
+  managed or hand-rolled database, install `pgvector` and the schema enables it on first boot.
+  It degrades safely: without the extension, recall falls back to keyword search rather than
+  failing, and the vector table is created outside the main schema transaction precisely so a
+  missing extension cannot roll back every other table.
 - **NVIDIA NIM key(s)** — free at <https://build.nvidia.com> → *Get API Key*. One is enough to
   start; see [§3](#3-model-keys--routing) for per-task keys.
 - **Google Cloud project** — an OAuth **Desktop app** client for Gmail (§5).
@@ -194,6 +205,13 @@ WITH_ML=1 docker compose build && docker compose up -d
 - *(optional)* **Spotify** — a **Premium** account plus an app at
   <https://developer.spotify.com/dashboard> for the music companion (Phase 22). Without it,
   `manage.py music <action>` fails with a clear message and nothing else is affected.
+  ⚠️ **Premium and correct scopes are not sufficient for playlist creation.** A Spotify app in
+  the dashboard's default quota mode gets a bare `403 Forbidden` on
+  `POST /users/{id}/playlists` even with `playlist-modify-private` granted and `product=premium`
+  — verified against a live account. That is an **app-level** restriction: raise the app's quota
+  mode in the Developer Dashboard. Re-authorising will not fix it. (A *scope* problem reports
+  itself differently — `"Insufficient client scope"` — and that one **is** fixed by re-running
+  the auth. `core/spotify.py` distinguishes the two and tells you which you have.)
 - *(nothing needed)* CVE lookups use **OSV.dev**, which is free and keyless.
 
 ---
@@ -227,6 +245,8 @@ AT_WHATSAPP_ENDPOINT=             # account-specific, hence configurable
 SPOTIFY_CLIENT_ID=
 SPOTIFY_CLIENT_SECRET=
 SPOTIFY_REFRESH_TOKEN=            # from `manage.py music connect` — env only, never the DB
+# optional — SerpAPI (Google Jobs source). Blank = that source is simply skipped.
+SERPAPI_KEY=
 # server
 AGENTOS_HOST=0.0.0.0
 AGENTOS_PORT=8000
@@ -336,7 +356,8 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # optional, higher-quality / extra capabilities (heavier):
-pip install sentence-transformers      # semantic vault embeddings (else dependency-free hashing)
+# NOT needed for semantic search — that runs on NIM (Phase 33) and does not fit a small droplet:
+# pip install sentence-transformers
 pip install faster-whisper             # droplet-side lecture + Telegram voice-note transcription
 
 cp .env.example .env && nano .env       # fill in §2
@@ -462,6 +483,22 @@ cp config/timetable.example.yaml config/timetable.yaml   # then fill in your rea
 ```
 
 Job hunting, briefings, quizzes, tutoring, events, and CV tailoring all work off this data.
+
+---
+
+## 11a. Verifying a deploy (Phase 28)
+
+`pytest` tells you a number; this tells you **which capability** broke, on your phone, as each
+group finishes:
+
+```bash
+docker compose exec api python manage.py selftest        # all services, ✅/❌ to Telegram
+docker compose exec api python manage.py selftest "job hunter"   # substring match
+docker compose exec api python manage.py selftest --no-send        # print instead of Telegram
+```
+
+It never fabricates a pass: a group that errors, times out, or whose runner falls over reports
+❌ with the reason rather than a hollow green.
 
 ---
 
@@ -600,8 +637,10 @@ curl -s localhost:8000/api/health | python -m json.tool
   them in `config.yaml`).
 - **`Missing token.json`** — run the Gmail flow (§5) on the laptop and copy the token over.
 - **Telegram silent** — check `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`; only the one chat id works.
-- **Vault answers weak / lexical** — install `sentence-transformers` on the droplet for semantic
-  embeddings (`config.yaml → vault.embedder: auto` picks it up automatically).
+- **Vault answers weak / lexical** — recall has silently fallen back to keyword search. Check
+  that the `pgvector` extension exists on the database and that `NVIDIA_API_KEY` is set, since
+  `config.yaml → vault.embedder: auto` resolves to the NIM embedder first (Phase 33). Do **not**
+  install `sentence-transformers` to fix this on a small droplet — it will not fit.
 - **Voice notes not transcribed** — install `faster-whisper` on the droplet.
 - **A scraper source errors** — logged and skipped; the hunt continues (one bad source never
   aborts a run).

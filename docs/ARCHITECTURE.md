@@ -91,7 +91,7 @@ The addendum phases (16–22) added three more, enforced the same way:
 │    skill.py          Skill interface + SkillContract + UNIVERSAL_INVARIANTS                   │
 │    session.py        one cross-device session, turn history, cross-skill approvals            │
 │    persona_store.py  PersonaEngine (answer-as-Calvin, facts, instructions, learning loop)     │
-│    embeddings.py     pluggable embedder (sentence-transformers | hashing)                     │
+│    embeddings.py     pluggable embedder (NIM bge-m3 | hashing)                                │
 │    doc_extract.py    pdf/pptx/docx/txt/md/image → text + chunking                             │
 │    transcribe.py     faster-whisper wrapper (audio → text)                                    │
 │    ats.py            CV keyword scoring + anti-fabrication check                              │
@@ -185,11 +185,32 @@ keyword matches. Intents map to `(skill, action, args)`.
   returns `NEEDS_INPUT` on gaps), standing instructions, STAR story bank, weekly style profile,
   and the nightly `distill_edits()` learning loop that turns Calvin's edits into unverified
   candidate facts for confirmation.
-- **`embeddings.py`** — a pluggable `Embedder`: `SentenceTransformerEmbedder` (best quality,
-  droplet) or a dependency-free `HashingEmbedder` (fallback + tests). `get_embedder("auto")`
-  tries sentence-transformers, falls back to hashing. Vectors are packed float32 BLOBs; cosine
-  runs in Python. The hashing embedder uses a **stable** hash (`hashlib`), not Python's
-  per-process-salted `hash()`, so persisted vectors survive restarts.
+- **`embeddings.py`** — a pluggable `Embedder`. `get_embedder("auto")` now tries
+  **`NimEmbedder`** first (NIM-hosted `baai/bge-m3`, 1024-dim), falling back to the
+  dependency-free `HashingEmbedder`. The NIM route exists because the droplet has 961 MB of RAM
+  and one CPU, which makes a local `sentence-transformers` model impossible rather than merely
+  slow — the embedding runs where the compute is. The hashing embedder uses a **stable** hash
+  (`hashlib`), not Python's per-process-salted `hash()`, so persisted vectors survive restarts.
+  ⚠️ The test suite pins the hashing embedder via an autouse fixture: with `auto` resolving to
+  NIM, any test touching recall would otherwise make a real network call and break the
+  guarantee that `pytest` needs no API keys.
+- **`semantic.py`** — `SemanticMemory` over pgvector (Phase 33): `index()`, `search()`,
+  `recall_text()`, with keyword fallback when the extension is absent. `MIN_RELEVANCE` is the
+  load-bearing detail — **nearest-neighbour search always returns something**, so without a
+  floor an unrelated fact comes back with total confidence for being least-unrelated.
+- **`approvals.py`** — `ApprovalStore` and the tier model (Phase 30). `LEARNABLE_TIERS` covers
+  `low` and `medium` only; `high` is **deliberately absent**, so anything sent in Calvin's name
+  asks every time regardless of how often he has approved it.
+- **`queue.py`** — the Postgres-backed job queue (Phase 26): `enqueue`/`claim`/`complete`/`fail`,
+  a `@handler` registry, and `run_skill` dispatch. Claims use `FOR UPDATE SKIP LOCKED`, so
+  scaling workers needs no extra infrastructure.
+- **`expiry.py`** — `JobExpiry` plus `parse_deadline` (Phase 34). The parser anchors on a cue
+  ("deadline", "apply by", "closes on"), never on a bare date, and resolves every ambiguity to
+  `None`; expiry sets `status='expired'` and never deletes.
+- **`selftest.py`** — service-by-service pytest runs reported to Telegram as each group finishes
+  (Phase 28). Never fabricates a pass.
+- **`time_context.py`** — timezone-aware "now", relative due dates, and **`VOICE`**: one tone
+  appended to `runtime_truth()` so every generative call speaks the same way (Phase 31).
 - **`doc_extract.py` / `transcribe.py`** — text extraction (with OCR) and audio transcription;
   both inject cleanly for offline tests, with the heavy libs imported lazily.
 - **`ats.py`** — pure ATS keyword scoring and the anti-fabrication check.
@@ -206,6 +227,13 @@ keyword matches. Intents map to `(skill, action, args)`.
 - **`spotify.py`** — the Spotify Web API client (Phase 22). Read its module docstring before
   adding an endpoint: it deliberately doesn't define the calls Spotify killed for new apps, and
   refuses them at the transport as a second line of defence.
+  A 403 is **diagnosed, not guessed at**. Spotify distinguishes `"Insufficient client scope"`
+  (the saved grant predates a capability we added — re-authorising fixes it) from a bare
+  `"Forbidden"` (the *app* may not call that endpoint at all — no re-auth will move it), and
+  these need opposite responses. Measured against Calvin's live account: all scopes granted,
+  `product=premium`, reads 200, and **playlist creation still returns bare "Forbidden"** — an
+  app-level restriction to resolve in the Spotify Developer Dashboard, not a code or
+  permissions problem. The old message offered "not Premium, or missing scope", both wrong.
 
 ---
 
@@ -277,7 +305,7 @@ single-writer contention a file DB hits. Key tables:
 
 | Table | Purpose |
 |-------|---------|
-| `jobs` | scraped jobs: score, category, cover, apply route, cv_variant, status (`new→scored→drafted→notified→approved→applied`/`skipped`) |
+| `jobs` | scraped jobs: score, category, cover, apply route, cv_variant, `deadline`, status (`new→scored→drafted→notified→approved→applied`/`skipped`/`expired`). `deadline` is parsed from the posting and is normally NULL — most postings never state one, and those fall back to the staleness rule (Phase 34) |
 | `applications` | applied jobs: status (`applied→replied→interview→offer/rejected`), cv_variant_used |
 | `emails` | processed emails: category, action (archived/labelled/drafted/trashed/restored) — idempotent by `gmail_id` |
 | `persona_facts` | verified facts about Calvin by category; `stories` category = STAR anecdotes |
@@ -301,11 +329,18 @@ single-writer contention a file DB hits. Key tables:
 | `signal_log` | observed patterns: running_count, contradicted, status (`watching→proposed→confirmed/declined`) (Phase 20) |
 | `skill_contracts` | each skill's declared `reads_categories` + `hard_invariants`, written at discovery (Phase 20) |
 | `infra_scan_results` | findings: severity, occurrences, status (`open→resolved`) (Phase 21) |
+| `semantic_index` | pgvector embeddings (`vector(1024)`, HNSW cosine) over facts, notes and CV material — retrieval instead of context-stuffing (Phase 33). Created **outside** the main schema transaction, so a missing `pgvector` extension degrades to keyword fallback rather than rolling back every table |
+| `action_permissions` | learned answers per (skill, action, tier): `always_approve` / `always_deny` / `ask`. `high` tier is **never** learnable (Phase 30) |
+| `pending_actions` | proposed actions awaiting Calvin's reply, with their tier and expiry; stale proposals expire rather than surfacing days later as a surprise (Phase 30) |
 
 Conversational session state (mock interview, quiz, tutor) lives in `kv` as JSON, so it
 survives restarts and is shared across voice/Telegram/dashboard/CLI. Phase 19's `sessions`
 table sits above that: it holds the turn history and last-used channel for **one** session
 keyed to Calvin — never to a device — which is what makes hand-off work.
+
+Job rows are **retired, never deleted** — `status='expired'` drops a job from the queue and the
+briefing while keeping the scrape, score and draft, so a wrong expiry heuristic stays
+falsifiable (§0 Principle 4).
 
 Note `standing_instructions` gained a **category** (Phase 20). A rule is only visible to a
 skill whose contract declares it reads that category — a tone rule can never reach into the
@@ -601,6 +636,92 @@ no-ops unless a session is active (a timer that acts unasked is how music starts
 3am), and a device disappearing mid-session does *not* kill the session — he'll reopen Spotify
 and expect it to resume.
 
+
+### Phase 28 — Service-by-service self-test (`core/selftest.py`)
+`pytest` already existed; the value here is that results arrive **on his phone, grouped by
+service, as each group finishes** — a deploy can be verified from anywhere without reading a
+wall of dots. "540 passed" tells you nothing about *which capability* broke.
+**Never fabricates a pass.** A group that errors, times out, or whose runner falls over reports
+❌ with the reason. Two bugs found the hard way are pinned by tests: passing `-q` when
+`pytest.ini` already sets it makes `-qq`, which suppresses the very summary line the counts are
+parsed from (every service reported a confident "✅ passed (0 tests)"); and scanning every line
+containing "passed"/"failed" read numbers out of tracebacks — with the database unreachable one
+run totalled *103,445 tests*. Parsing is now anchored on pytest's final summary line, which
+always ends in a duration. A self-test whose numbers can't be trusted is worse than none,
+because it is believed.
+
+### Phase 29 — Listening budget (`music.budget`)
+A monthly minutes cap (default 10k) for the continuous session, so "play music until I say
+stop" can't quietly run all month. Spent minutes accrue on each `session_tick`; the session
+stops itself at the cap rather than being silently throttled.
+
+### Phase 30 — Tiered actions & learned permissions (`core/approvals.py`)
+The approval gate used to be all-or-nothing, which trains you to rubber-stamp. Actions now
+carry a **tier** — `trivial` (just do it) · `low` · `medium` · `high` — and Calvin's answers are
+remembered per (skill, action, tier) as `always_approve` / `always_deny` / `ask`.
+**`high` is deliberately absent from `LEARNABLE_TIERS`.** Sending something in his name, or
+anything irreversible, asks *every time* no matter how often he has said yes. A permission
+model that can learn its way to "never ask before sending" defeats the point of having one.
+Replies parse naturally ("3 yes", "always no 3", "yes all") against the pending set, and stale
+proposals expire rather than lingering as a surprise action days later.
+
+### Phase 31 — One voice, and progress that shows (`core/time_context.py`, `telegram_bot.py`)
+Adopted from the reference assistants Calvin pointed at. `VOICE` is appended to `runtime_truth()`
+so **every** generative call carries the same tone — lead with the answer, plain English, say
+plainly when something failed — rather than each skill inventing its own register.
+Calvin: *"when i tell the bot to clear emails i need to see clearing emails in progress"*. Long
+actions now acknowledge before they start (`🧹 Finding those emails…`, `🎵 Building that
+playlist…`). Deliberately **text-pattern matched, not router-based**: an acknowledgement that
+needs an LLM round-trip to decide what to say is not an acknowledgement. It is wrapped so a
+courtesy line can never block or break the real reply.
+
+### Phase 32 — Proactive triage (`skills/proactive.py`)
+The loop that acts without being asked, on top of Phase 30's tiers. Scoped hard: `ACTION_KINDS`
+is limited to `email_archive` / `email_trash` / `email_label`, and **the tier is read from our
+own table, never from the proposed payload** — otherwise anything that can write a proposal can
+mark itself trivial and bypass the gate.
+Runs as a cron job at **05:30**, deliberately ahead of the 07:00 briefing, so the briefing
+reports an inbox that has already been triaged rather than one still full of noise.
+An out-of-vocabulary proposal is **dropped, not escalated** — that is the point of the fixed
+vocabulary, since the model must not be able to widen its own remit by naming a new action.
+
+### Phase 33 — Semantic memory (`core/semantic.py`, `core/embeddings.py`)
+Calvin: *"set up vector databases instead of stuffing it with too much in context"*. pgvector
+with an HNSW cosine index, embeddings from NIM-hosted **`baai/bge-m3`** (1024-dim) — no local
+model, because the droplet has 961 MB of RAM and one CPU, which makes `sentence-transformers`
+impossible rather than merely slow. Measured **~71% context reduction** on CV tailoring.
+Two deliberate choices: `MIN_RELEVANCE` exists because **nearest-neighbour search always
+returns something** — without a floor, an unrelated fact is retrieved with total confidence
+simply for being least-unrelated. And the vector table is created **outside** the main schema
+transaction, so a missing `pgvector` extension degrades to keyword fallback instead of rolling
+back every table in the system.
+
+### Phase 34 — Expiry, deadlines, and the real posting (`core/expiry.py`, `job_hunter/enrich.py`)
+Calvin asked twice; the queue had reached **83 drafted jobs** awaiting him. That is an attention
+problem, not a storage one — a list nobody can read is a list nobody reviews.
+Two rules: **stale** (pending >2 days without a decision) and **past deadline**. A job that is
+both is reported as closed, since that is the reason that actually tells him something. The
+first live sweep retired 49 of 91 pending jobs.
+**Nothing is deleted** (§0 Principle 4): expiry sets `status='expired'`, which drops the job
+from the queue and the briefing while keeping every scrape, score and draft, so a wrong
+heuristic stays falsifiable. It never touches `approved`/`applied`/`skipped` — age is
+meaningless once he has acted, and those represent a tailored CV or a sent application.
+Deadlines needed building too (`jobs.deadline`, parsed at scrape time, with a backfill). The
+parser anchors on a **cue** — "deadline", "apply by", "closes on" — never on any date in the
+text, because postings are full of dates that aren't deadlines (start dates, founding years,
+"since 2019"). Expiring a live role because it mentioned 2019 is far worse than missing a
+deadline, so every ambiguity resolves to *no deadline* and falls back to staleness.
+The briefing carries the other half: applications **closing within three days**, named
+individually and soonest first. Expiry alone only ever delivers bad news.
+**34b — enrichment.** The measurement that prompted it: across 42 pending jobs the median
+description was **162 characters** and not one mentioned a deadline. The sources hand back
+stubs; the real text is on the posting's own page, which we stored a link to and never opened.
+Keepers now get one GET — *after* scoring, *before* the cover is drafted or the CV tailored —
+through the shared `Fetcher`, so robots.txt, the 2s-per-host floor and the User-Agent are
+inherited rather than reimplemented. Best-effort by design: a dead link or JS-only page leaves
+the stub standing, and it only ever *upgrades* (some pages extract to less than the source
+gave us, and trading a clean summary for a login wall is a silent downgrade).
+
 ---
 
 ## 9. Conversational state machines
@@ -615,6 +736,18 @@ voice notes, the dashboard, and CLI, and survive restarts:
 In the Telegram bot, `route_text()` checks for an active session and routes free text to the
 right continuation before falling back to the general intent router.
 
+**Sessions are one-shot (Phase 34).** A continuation is consumed once and the session ends
+immediately; the next message routes fresh. A sticky session is a *mode*, and a mode you forgot
+you were in silently rewrites the meaning of everything you say next — a `/tutor` session ran
+for two days and turned an email request into an `smtplib` tutorial and a playlist request into
+C++ classes. A TTL shortened that window without changing the shape of the failure. The session
+is cleared **before** dispatch, not after, so a skill that raises still leaves the mode gone.
+Re-entry is by keyword (`tutor`, `quiz me`, `mock interview`, `create a playlist`), which is why
+those route deterministically in `core/intent.py` rather than via the LLM.
+
+`email_agent`'s send/trash previews are the deliberate exception: those are a two-step
+**confirmation**, and one that forgets what it is confirming would be worse than useless.
+
 Because all of this is **server-side and keyed to Calvin rather than a device**, these flows
 are what Phase 19's hand-off resumes: `live_skill_session()` reads those same `kv` keys, so
 "where were we?" from the phone finds the mock interview started by voice. The flip pipeline
@@ -625,7 +758,7 @@ immutable transition log, not a conversation.
 
 ## 10. Testing philosophy
 
-- **471 tests.** Every external service (NIM, Gmail, HTTP scrapers, Telegram, Spotify, sockets,
+- **687 tests.** Every external service (NIM, Gmail, HTTP scrapers, Telegram, Spotify, sockets,
   TLS, OSV) and the clock are injected or mocked — `pytest` needs no API keys and hits no
   network. The one real dependency is **PostgreSQL**: `TEST_DATABASE_URL` points at a test
   database, and each test runs in its own schema (created once per session, truncated between
@@ -648,7 +781,17 @@ immutable transition log, not a conversation.
 - **Guardrail tests** assert the §0 rules hold: nothing sends pre-approval, the persona never
   fabricates, assessments aren't auto-solved, no voice/face-cloning code path exists anywhere,
   the deal broker exposes no way to spend money or message a stranger, and the recon skill
-  exposes no mutating verb.
+  exposes no mutating verb. Later additions: expiry **never deletes a row** and never touches
+  work Calvin has acted on; `high`-tier actions can never be learned into auto-approval; job
+  expiry's deadline parser refuses to invent a deadline it cannot cue on; and playlist removal
+  can never be reached by an email-deletion phrase (that misroute was real — the catch-all
+  trash rule matches the verb "remove", so "remove X from my playlist" reached `email_agent`).
+- **Nothing in the suite may push to real Telegram.** An autouse fixture severs the transport
+  for the whole session. This is not hypothetical: three skills whose `notify` defaults to
+  `True` fired live messages at Calvin's phone on every full-suite run — an interview invite, a
+  lecture he never recorded, a deadline that did not exist — for a whole night before he showed
+  us the chat log. Patching the call sites would have fixed that day and rotted the next, so the
+  sender itself is blocked and a test that forgets now fails loudly instead of texting a human.
 
 Run: `pytest` (or `pytest tests/test_<area>.py`).
 
