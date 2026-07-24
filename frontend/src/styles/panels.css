@@ -1,0 +1,195 @@
+/* Cards, lists, forms, transcript. Shared by every panel (approvals/plans/jobs/briefing/
+   music/study) so a new panel gets a consistent look for free. */
+
+.card {
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+}
+
+.card h2 {
+  margin: 0 0 var(--space-2);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  font-weight: 600;
+}
+
+.panels-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow-y: auto;
+}
+
+.transcript-column {
+  display: flex;
+  min-width: 0;
+}
+
+.transcript-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.transcript-list {
+  flex: 1;
+  min-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+
+.turn {
+  border-left: 2px solid var(--line);
+  padding-left: var(--space-2);
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.turn-you {
+  border-left-color: var(--accent-amber);
+}
+
+.turn-you .turn-role {
+  color: var(--accent-amber);
+}
+
+.turn-them .turn-role {
+  color: var(--accent-cyan);
+}
+
+.turn-text {
+  white-space: pre-wrap;
+  flex: 1;
+}
+
+.turn-skill {
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+input,
+button,
+textarea {
+  font: inherit;
+}
+
+input,
+textarea {
+  background: var(--bg-void);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  width: 100%;
+}
+
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent-cyan-dim);
+}
+
+.btn {
+  background: var(--accent-amber);
+  border: 0;
+  color: #1a1408;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn.ghost {
+  background: transparent;
+  color: var(--ink-dim);
+  border: 1px solid var(--line);
+}
+
+.btn.ghost:hover {
+  border-color: var(--accent-cyan-dim);
+  color: var(--ink);
+}
+
+.btn.small {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.approval-row,
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.approval-row:last-child,
+.list-row:last-child {
+  border-bottom: 0;
+}
+
+.tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent-amber);
+  min-width: 64px;
+}
+
+.what {
+  flex: 1;
+}
+
+.row-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.panel-output {
+  margin-top: var(--space-2);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.plan-goal {
+  font-size: 13px;
+  margin-bottom: var(--space-2);
+}
+
+.status-awaiting_approval {
+  color: var(--accent-amber);
+}
+
+.status-paused {
+  color: var(--accent-amber);
+}
+
+.status-failed {
+  color: var(--accent-red);
+}
+
+.status-done {
+  color: var(--accent-green);
+}

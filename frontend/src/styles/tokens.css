@@ -1,0 +1,95 @@
+/* Design tokens — the ONE place colors, spacing and motion are defined (A0). Everything
+   else in styles/ reads these custom properties rather than hardcoding a value.
+
+   Original HUD palette in a cyan/amber-on-near-black idiom (A1). Deliberately not the
+   Marvel/Stark reactor colors or trade dress — this is a from-scratch scheme, not a skin. */
+:root {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bg-void: #05070a;
+  --bg-panel: #0c1116;
+  --bg-panel-raised: #121924;
+  --line: #1c2833;
+  --line-bright: #2a3b47;
+
+  /* ink */
+  --ink: #d9e6ea;
+  --ink-dim: #6f838d;
+  --ink-faint: #3f4d56;
+
+  /* accents */
+  --accent-cyan: #4fd8e8;
+  --accent-cyan-dim: #2a6a72;
+  --accent-amber: #e8a23f;
+  --accent-amber-dim: #7a5822;
+  --accent-red: #e5484d;
+  --accent-red-dim: #7a2528;
+  --accent-green: #4fd88a;
+
+  /* semantic */
+  --wave-active: var(--accent-cyan);
+  --wave-idle: var(--line-bright);
+
+  /* type */
+  --font-mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* motion — slow and continuous at rest, sharpens on activity (A1/A3) */
+  --motion-idle: 40s;
+  --motion-active: 1.4s;
+  --motion-flash: 200ms;
+  --motion-scale: 1;
+  --radius: 8px;
+  --radius-sm: 5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-scale: 0;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* The browser's own `[hidden] { display: none }` rule loses to any author rule of equal
+   specificity that sets `display` on the same element (e.g. `.boot-screen { display: flex }`,
+   `.app { display: flex }`) — origin/importance is compared before specificity, and a normal
+   author rule beats a normal UA rule. Without this, toggling `.hidden` in JS is a no-op: the
+   element stays visually displayed regardless of the attribute. `!important` is the standard
+   fix (Bootstrap's reset does the same) rather than trying to out-specify every current and
+   future `display` rule in this stylesheet. */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg-void);
+  color: var(--ink);
+  font: 14px/1.5 var(--font-sans);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.dim {
+  color: var(--ink-dim);
+}
+
+.empty {
+  padding: var(--space-2) 0;
+}

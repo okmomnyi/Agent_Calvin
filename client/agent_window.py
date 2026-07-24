@@ -25,7 +25,6 @@ window and not a browser page (the Web Speech API would ship your voice to a clo
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 import os
 import queue
 import sys
@@ -269,64 +268,18 @@ class AgentWindow:
 
         During playback, a short adaptive echo baseline prevents the assistant's own speaker
         from immediately triggering itself. A materially louder overlapping voice interrupts
-        playback; headphones remain the most reliable full-duplex setup.
+        playback; headphones remain the most reliable full-duplex setup. The algorithm itself
+        lives in audio_io.py, shared with the Phase 36 HUD window.
         """
+        from audio_io import record_utterance_with_barge_in
         from voice_client import END_SILENCE_MS, FRAME_MS, MAX_UTTERANCE_SECONDS
-        from voice_utils import is_silent, pcm_rms, silence_elapsed
 
-        frames: list[bytes] = []
-        pre_roll = deque(maxlen=max(1, int(300 / FRAME_MS)))
-        silent = 0
-        spoke = False
-        echo_level = 0.0
-        echo_frames = 0
-        louder_frames = 0
-        barge_floor = float(os.getenv("AGENT_BARGE_MIN_RMS", "700"))
-        barge_ratio = float(os.getenv("AGENT_BARGE_ECHO_RATIO", "1.5"))
-        for _ in range(int(MAX_UTTERANCE_SECONDS * 1000 / FRAME_MS)):
-            if self._mic_stream is None:
-                return None
-            try:
-                f = self._frames.get(timeout=0.5)
-            except queue.Empty:
-                if not spoke:
-                    return b""                          # nothing said; loop round again
-                continue
-            level = pcm_rms(f)
-
-            # While TTS is audible, learn its mic echo and require a sustained, significantly
-            # louder signal before treating it as the user talking over the assistant.
-            if self.core.state is MicState.SPEAKING and not spoke:
-                pre_roll.append(f)
-                echo_frames += 1
-                if echo_frames <= max(1, int(300 / FRAME_MS)):
-                    echo_level = max(echo_level, level)
-                    continue
-                trigger = max(barge_floor, echo_level * barge_ratio)
-                if level >= trigger:
-                    louder_frames += 1
-                    if louder_frames < max(2, int(120 / FRAME_MS)):
-                        continue
-                    self.core.barge_in()
-                    frames.extend(pre_roll)
-                    spoke = True
-                    silent = 0
-                else:
-                    louder_frames = 0
-                    echo_level = max(level, echo_level * 0.97)
-                    continue
-
-            frames.append(f)
-            if is_silent(f):
-                silent += 1
-                if spoke and silence_elapsed(silent, stop_after_ms=END_SILENCE_MS):
-                    break
-            else:
-                if not spoke and self.core.state is MicState.THINKING:
-                    self.core.barge_in()
-                spoke = True
-                silent = 0
-        return b"".join(frames) if spoke else b""
+        return record_utterance_with_barge_in(
+            self.core, self._frames, lambda: self._mic_stream is not None,
+            frame_ms=FRAME_MS, end_silence_ms=END_SILENCE_MS,
+            max_utterance_seconds=MAX_UTTERANCE_SECONDS,
+            barge_min_rms=float(os.getenv("AGENT_BARGE_MIN_RMS", "700")),
+            barge_echo_ratio=float(os.getenv("AGENT_BARGE_ECHO_RATIO", "1.5")))
 
     def _transcribe(self, pcm: bytes) -> str:
         from voice_client import Transcriber

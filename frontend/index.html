@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentOS</title>
+<!-- Relative paths throughout this file and every JS module (A0): the web shell gets this
+     tree via FastAPI's StaticFiles mount at /dashboard, the desktop shell loads index.html
+     straight off disk into pywebview. Same files, same behaviour, either way. -->
+<link rel="stylesheet" href="src/styles/tokens.css">
+<link rel="stylesheet" href="src/styles/hud.css">
+<link rel="stylesheet" href="src/styles/panels.css">
+</head>
+<body>
+
+<div id="boot" class="boot-screen">
+  <div class="boot-rings" aria-hidden="true"></div>
+  <div id="boot-lines" class="boot-lines mono"></div>
+  <div class="boot-hint dim">press any key to skip</div>
+</div>
+
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot" id="conn-led"></span>
+      <span class="brand-name">AGENTOS</span>
+    </div>
+    <div class="topbar-meta mono dim" id="shell-meta">—</div>
+    <div class="topbar-auth">
+      <input id="token-input" type="password" placeholder="access token" autocomplete="off">
+      <button id="token-save" class="btn">Connect</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="hud-column">
+      <div class="hud" id="hud" data-state="idle">
+        <svg viewBox="0 0 300 300" class="hud-rings" aria-hidden="true">
+          <circle class="ring ring-outer" cx="150" cy="150" r="130"></circle>
+          <circle class="ring ring-mid" cx="150" cy="150" r="104"></circle>
+          <circle class="ring ring-inner" cx="150" cy="150" r="78"></circle>
+          <circle class="ring ring-core" cx="150" cy="150" r="46"></circle>
+        </svg>
+        <canvas id="wave" class="hud-wave"></canvas>
+        <div class="hud-caption mono">Standing by</div>
+      </div>
+      <div class="hud-skill dim mono" id="hud-skill"></div>
+    </section>
+
+    <section class="transcript-column">
+      <div class="card transcript-card">
+        <h2>Conversation</h2>
+        <div id="transcript-list" class="transcript-list"></div>
+        <div class="row">
+          <input id="transcript-input" placeholder="Type a command…" autocomplete="off">
+          <button id="transcript-send" class="btn">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panels-column">
+      <div class="card"><h2>Waiting on you</h2><div id="panel-approvals"></div></div>
+      <div class="card"><h2>Active plan</h2><div id="panel-plans"></div></div>
+      <div class="card"><h2>Jobs</h2><div id="panel-jobs"></div></div>
+      <div class="card"><h2>Briefing</h2><div id="panel-briefing"></div></div>
+      <div class="card"><h2>Music</h2><div id="panel-music"></div></div>
+      <div class="card"><h2>Study</h2><div id="panel-study"></div></div>
+      <div class="card"><h2>Weather</h2><div id="panel-weather"></div></div>
+      <!-- Local-shell only (A0): capabilities.local gates this — the web shell never
+           renders it, rather than rendering it and having it fail. -->
+      <div class="card" data-requires="local"><h2>Phone</h2><div id="panel-phone"></div></div>
+    </section>
+  </main>
+</div>
+
+<script type="module" src="src/ui/boot.js"></script>
+</body>
+</html>

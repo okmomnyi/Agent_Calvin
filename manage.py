@@ -321,6 +321,48 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0 if r.ok else 1
 
 
+def cmd_contacts(args: argparse.Namespace) -> int:
+    """Phone book: add/list/find/import/retire. Numbers normalize to E.164; retire never
+    deletes a row (§0 P4)."""
+    from skills.contacts import SKILL
+
+    if args.action == "add":
+        r = SKILL.add(name=args.value or "", phone=args.phone or "", email=args.email or "",
+                      notes=args.notes or "")
+    elif args.action == "list":
+        r = SKILL.list_contacts(include_retired=args.include_retired)
+    elif args.action == "find":
+        r = SKILL.find(name=args.value or "", include_retired=args.include_retired)
+    elif args.action == "import":
+        r = SKILL.import_file(path=args.value or "")
+    else:  # retire
+        r = SKILL.retire(name=args.value or "")
+    print(r.text)
+    return 0 if r.ok else 1
+
+
+def cmd_url(args: argparse.Namespace) -> int:
+    """Named URL favourites: add/list/open/retire. http/https only — see skills/web_open.py."""
+    from skills.web_open import SKILL
+
+    if args.action == "add":
+        r = SKILL.add(name=args.name or "", url=args.value or "")
+    elif args.action == "list":
+        r = SKILL.list_favourites()
+    elif args.action == "open":
+        r = SKILL.open(name=args.name or "")
+        if r.ok:
+            import webbrowser
+
+            for action in r.data.get("client_actions", []):
+                if action.get("op") == "open_url":
+                    webbrowser.open(action["url"])
+    else:  # retire
+        r = SKILL.retire(name=args.name or "")
+    print(r.text)
+    return 0 if r.ok else 1
+
+
 def cmd_briefing(args: argparse.Namespace) -> int:
     """Print (or send) the unified morning briefing."""
     from skills.semester_planner import SKILL
@@ -982,6 +1024,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_lec.add_argument("--unit", default=None)
     p_lec.add_argument("--no-send", action="store_true")
     p_lec.set_defaults(func=cmd_lecture)
+
+    # --- Phase 36: contacts, URLs ---
+    p_contacts = sub.add_parser("contacts", help="phone book: add/list/find/import/retire")
+    p_contacts.add_argument("action", choices=["add", "list", "find", "import", "retire"])
+    p_contacts.add_argument("value", nargs="?", default=None,
+                            help="name (add/find/retire) or file path (import)")
+    p_contacts.add_argument("--phone", default=None)
+    p_contacts.add_argument("--email", default=None)
+    p_contacts.add_argument("--notes", default=None)
+    p_contacts.add_argument("--include-retired", action="store_true")
+    p_contacts.set_defaults(func=cmd_contacts)
+
+    p_url = sub.add_parser("url", help="named URL favourites: add/list/open/retire")
+    p_url.add_argument("action", choices=["add", "list", "open", "retire"])
+    p_url.add_argument("name", nargs="?", default=None)
+    p_url.add_argument("value", nargs="?", default=None, help="the URL (add)")
+    p_url.set_defaults(func=cmd_url)
 
     for name, desc in _FUTURE.items():
         sub.add_parser(name, help=f"[stub] {desc}").set_defaults(func=_make_future(name, desc))

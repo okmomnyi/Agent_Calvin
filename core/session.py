@@ -32,6 +32,7 @@ _SKILL_SESSIONS = {
     "interview_prep.mock": "mock interview",
     "spaced_rep.session": "flashcard quiz",
     "code_tutor.session": "tutor session",
+    "phone.call_session": "call confirmation pending",
 }
 
 

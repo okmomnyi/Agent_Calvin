@@ -468,6 +468,38 @@ no voice-cloning path.**
 
 ---
 
+## 9a. Desktop HUD (Phase 36)
+
+The JARVIS-style HUD — same backend, a frameless always-on-top window instead of the
+tkinter tray window above. They're independent entry points; run whichever one you want
+(or neither — the web dashboard at `/dashboard` needs no laptop client at all).
+
+```bash
+pip install -r client/requirements.txt   # adds pywebview, pynput, screeninfo to the Phase 7 set
+export AGENT_WS_URL="wss://agent.example.com/ws/voice"
+export AGENT_WS_TOKEN="<same AGENT_WS_TOKEN as the droplet>"
+python client/hud_window.py --tray                # start hidden, tray icon is the way in
+python client/hud_window.py --compact             # start as the small corner ring
+```
+
+Optional environment variables (see `.env.example`):
+
+- `AGENT_HUD_HOTKEY` — global summon/dismiss hotkey, default `<ctrl>+<alt>+j`. Works root-free
+  on Windows, macOS, and X11; **Wayland has no portable global-hotkey API**, and
+  `client/hud_window.py` reports the hotkey as unavailable rather than silently doing nothing.
+- `AGENT_CLIENT_MODE=voice` — folds the wake word into the HUD (opt-in, same gate Phase 24
+  established: nobody opts *out* of a hot microphone, so nobody is opted in by default).
+  Saying the wake word shows the window and opens a listening session; it does not record
+  anything before that.
+
+The HUD serves `frontend/` over a loopback-only HTTP server on an ephemeral port (not
+`file://` — Chromium's WebView2 backend blocks relative ES module imports under that scheme)
+and points its own API/WebSocket calls at `AGENT_WS_URL` via a `?server=` query parameter on
+that local URL. Nothing about this reaches the internet to serve the page; only the actual
+API/voice traffic goes to the droplet, exactly as it already did for `voice_client.py`.
+
+---
+
 ## 10. Phone access
 
 No app to install — two paths reuse the same backend:
@@ -478,6 +510,41 @@ No app to install — two paths reuse the same backend:
    `https://agent.example.com/api/command` with `{"text": "<words>"}` and the HTTP
    header `Authorization: Bearer <AGENT_WS_TOKEN>`. Requests without the shared token fail
    closed; never put the token in the URL.
+
+---
+
+## 10a. Android phone control — ADB (Phase 36)
+
+**This is Calvin's own Android device, and requires his explicit authorization on that
+device** — the trust prompt below is not a formality, it's the actual consent gate. Nothing
+here works without it, by design.
+
+1. **Enable Developer Options and USB debugging** on the phone: Settings → About phone → tap
+   "Build number" 7 times → Developer options → enable "USB debugging".
+2. **Connect it to the laptop that runs `client/hud_window.py`** — over USB, or wirelessly:
+   ```bash
+   adb pair <phone-ip>:<pairing-port>          # code shown on the phone's
+                                                # Developer options → Wireless debugging screen
+   adb connect <phone-ip>:<port>
+   ```
+3. **Accept the trust prompt on the phone itself** the first time — "Allow USB debugging?
+   ... Always allow from this computer". Nothing works before this is accepted; there is no
+   way around it, and there shouldn't be.
+4. Verify: `adb devices` should list the phone as `device` (not `unauthorized` — go back and
+   accept the prompt if it says that, or `offline` — unplug/replug or re-pair).
+
+What this does and does not enable:
+
+- **Calls are placed via Android intents and keyevents only** (`am start -a
+  android.intent.action.CALL`, `input keyevent`) — never pixel-coordinate taps, so it
+  survives a phone screen resolution or launcher change untouched.
+- **Placing a call is `high` tier and asks every time** — see §2 of `ARCHITECTURE.md`'s
+  Phase 36 section. There is no setting that makes it stop asking.
+- **Answering/ending an already-ringing call is `low` tier** and learnable — it acts on
+  something already happening, not something initiated in Calvin's name.
+- The laptop (`client/adb_bridge.py`) re-validates every request against strict E.164 and its
+  own device list independently of whatever the droplet asked for — the same "the laptop has
+  the final say" boundary Phase 23 established for desktop app control.
 
 ---
 

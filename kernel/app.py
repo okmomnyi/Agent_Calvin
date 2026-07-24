@@ -18,7 +18,7 @@ from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from core.config import get_settings
@@ -30,6 +30,11 @@ log = get_logger("kernel.app")
 
 registry = SkillRegistry()
 scheduler = AsyncIOScheduler(timezone=get_settings().tz)
+
+# Phase 36: the JARVIS-style HUD. One source tree (frontend/) renders both the web shell
+# (served here) and the desktop shell (pywebview loads the same index.html off disk) — see
+# frontend/index.html's header comment for why every asset path in it is relative.
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 
 def _enqueue_scheduled(job_id: str, skill: str, action: str):
@@ -202,15 +207,6 @@ async def api_session(
     return s
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard() -> str:
-    """The 4th channel: a browser UI on the same kernel API — no client install anywhere.
-
-    The page is static; every action it takes is token-authed against /api/* like any client.
-    """
-    return (Path(__file__).parent / "static" / "dashboard.html").read_text(encoding="utf-8")
-
-
 def _current_voice() -> dict[str, Any]:
     """Look up the active pre-built voice/rate from the voice skill (safe default if absent)."""
     skill = registry.get("voice")
@@ -232,23 +228,46 @@ def _queue_stats() -> dict[str, int]:
         return {}
 
 
-def _client_actions(result: Any) -> list[dict[str, str]]:
-    """App ops a skill wants the laptop to run (Phase 23).
+# Format-only sanity check for the narrow waist below — deliberately NOT skills/contacts.py's
+# full phonenumbers-backed `normalize_phone` (which needs a region and does a heavier check).
+# This mirrors client/adb_bridge.py's own independent copy of the same pattern: each side of
+# the trust boundary re-validates on its own terms rather than sharing one implementation
+# across server and laptop, which stay independently deployable on purpose (Phase 26).
+_E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 
-    Re-validated here rather than trusted: a skill returns plain dicts, and only `op`/`app`
-    ever reach the wire — so a stray key (a path, an argv) can't be smuggled through to the
-    laptop even by a buggy skill. The laptop checks the app against its own allowlist again
-    regardless; this is just the narrow waist.
+
+def _client_actions(result: Any) -> list[dict[str, str]]:
+    """Client-bound ops a skill wants the laptop to run (Phase 23, extended Phase 36).
+
+    Re-validated here rather than trusted: a skill returns plain dicts, and only the fields
+    each recognized op actually needs ever reach the wire — so a stray key (a path, an argv)
+    can't be smuggled through to the laptop even by a buggy skill. Every op is ALSO
+    re-checked against its own allowlist/validation on the laptop side regardless; this is
+    just the narrow waist. Unrecognized ops are dropped silently rather than passed through,
+    so a new op only ever reaches the wire once it has a case here.
     """
-    from skills.desktop import OPS
+    from skills.desktop import OPS as APP_OPS
+    from skills.web_open import validate_url
 
     out: list[dict[str, str]] = []
     for action in (getattr(result, "data", {}) or {}).get("client_actions") or []:
         if not isinstance(action, dict):
             continue
-        op, app = str(action.get("op", "")), str(action.get("app", ""))
-        if op in OPS and app:
-            out.append({"op": op, "app": app})
+        op = str(action.get("op", ""))
+        if op in APP_OPS:
+            app = str(action.get("app", ""))
+            if app:
+                out.append({"op": op, "app": app})
+        elif op == "open_url":
+            url = str(action.get("url", ""))
+            if url and validate_url(url) is None:
+                out.append({"op": op, "url": url})
+        elif op == "call":
+            number = str(action.get("number", ""))
+            if number and _E164_RE.match(number):
+                out.append({"op": op, "number": number})
+        elif op in ("answer", "hangup"):
+            out.append({"op": op})
     return out
 
 
@@ -367,3 +386,12 @@ async def ws_voice(websocket: WebSocket) -> None:
             )
     except WebSocketDisconnect:
         log.debug("Voice websocket disconnected.")
+
+
+# ------------------------------------------------------------------ dashboard (Phase 36)
+# The 4th channel: a browser UI on the same kernel API — no client install anywhere.
+# `html=True` serves frontend/index.html at /dashboard/ and every module/stylesheet under
+# it at its own relative path (e.g. /dashboard/src/ui/boot.js). The page itself is static;
+# every action it takes is token-authed against /api/* exactly like any other client.
+# Mounted last so it never shadows an /api/* or /ws/voice route defined above.
+app.mount("/dashboard", StaticFiles(directory=FRONTEND_DIR, html=True), name="dashboard")

@@ -37,6 +37,11 @@ pillow>=10.0
 #   pip install sentence-transformers      # (config vault.embedder=auto uses it if present,
 #                                             else falls back to the dependency-free hashing embedder)
 
+# --- Phase 36: contacts, URLs, weather, YouTube ---
+phonenumbers>=8.13   # E.164 normalization/validation (skills/contacts.py) — offline metadata,
+                     # no network call, no key; the standard library for getting this right
+                     # rather than hand-rolling per-region dialing-format regexes
+
 # --- Test tooling ---
 pytest>=8.0
 httpx>=0.27            # python-telegram-bot transport

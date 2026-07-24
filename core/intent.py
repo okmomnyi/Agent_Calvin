@@ -78,6 +78,12 @@ INTENTS: dict[str, tuple[str, str]] = {
     "music_budget":    ("music", "budget"),
     "music_playlist":  ("music", "playlist"),
     "music_pl_remove": ("music", "playlist_remove"),
+    "weather":         ("weather", "current"),
+    "youtube_play":    ("youtube", "play"),
+    "contacts_find":   ("contacts", "find"),
+    "phone_call":      ("phone", "call"),
+    "phone_answer":    ("phone", "answer"),
+    "phone_hangup":    ("phone", "hangup"),
     "chit_chat":       ("chat", "reply"),
 }
 
@@ -98,6 +104,24 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
         r"\b(?:session status|what(?:'?s| is) my session|where was i)\b", re.I), None),
     ("approvals_list", re.compile(
         r"\b(?:approvals|what(?:'?s| is) waiting(?: on me)?|what needs my approval)\b", re.I), None),
+    # Phase 36. Both trigger words are unclaimed elsewhere in this table, so these are safe
+    # ahead of the generic desktop open_app/close_app rules and don't need the "most specific
+    # wins" care those need. The full utterance is captured (not just a sub-phrase) because
+    # weather.py's extract_override() and youtube.py's clean_query() each do their own
+    # parsing/filter-stripping on the whole text — duplicating that here would be a second
+    # normalizer, which is exactly what this router's docstring warns against.
+    ("weather", re.compile(r"(?P<t>.*\bweather\b.*)", re.I), "text"),
+    ("youtube_play", re.compile(r"(?P<t>.*\byou\s*tube\b.*)", re.I), "query"),
+    ("contacts_find", re.compile(r"\bfind contact\s+(?P<t>.+)", re.I), "name"),
+    # Answer/hangup checked BEFORE the broad "call X" rule below — "answer the call" ends in
+    # the bare word "call" with nothing after it to capture as a name, so it wouldn't collide
+    # in practice, but "answer the call now" would (the trailing word becomes a bogus name).
+    # Ordering makes that impossible rather than relying on phrasing luck.
+    ("phone_answer", re.compile(
+        r"\b(?:answer|pick up)\s+(?:the\s+)?(?:phone|call)\b|\banswer\s+it\b", re.I), None),
+    ("phone_hangup", re.compile(
+        r"\bhang\s?up\b|\bend\s+(?:the\s+)?call\b", re.I), None),
+    ("phone_call", re.compile(r"\bcall\s+(?P<t>.+)", re.I), "name"),
     ("change_voice", re.compile(r"\bchange voice to (?P<v>[\w-]+)", re.I), "voice"),
     ("change_voice", re.compile(r"\b(?:switch|set) (?:the )?voice (?:to )?(?P<v>[\w-]+)", re.I), "voice"),
     ("speak_rate", re.compile(r"\bspeak (?P<t>slower|faster|quicker)\b", re.I), "direction"),
@@ -236,6 +260,8 @@ _ARG_NAMES = {
     ("desktop", "open"): "app",
     ("desktop", "close"): "app",
     ("proactive", "forget"): "pattern",
+    ("youtube", "play"): "query",
+    ("contacts", "find"): "name",
 }
 
 

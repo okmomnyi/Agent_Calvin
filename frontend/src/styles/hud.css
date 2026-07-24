@@ -1,0 +1,363 @@
+/* Boot sequence, HUD rings, app shell layout. States (A3): idle / listening / thinking /
+   speaking / awaiting_approval / error — expressed entirely through [data-state] on #hud. */
+
+/* ---------------------------------------------------------------- boot sequence (A2) */
+.boot-screen {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+}
+
+.boot-rings {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-cyan-dim);
+  border-top-color: var(--accent-cyan);
+  animation: spin calc(1.1s / max(var(--motion-scale), 0.001)) linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-rings {
+    animation: none;
+    border-top-color: var(--accent-cyan-dim);
+  }
+}
+
+.boot-lines {
+  min-height: 140px;
+  width: min(420px, 88vw);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.boot-line {
+  color: var(--ink-dim);
+}
+
+.boot-line.ok {
+  color: var(--accent-green);
+}
+
+.boot-line.fail {
+  color: var(--accent-red);
+}
+
+.boot-hint {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------------------------------------------------------------- app shell */
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.brand-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  font-weight: 600;
+}
+
+.brand-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--ink-faint);
+  box-shadow: inset 0 0 0 1px #0008;
+}
+
+.brand-dot.on {
+  background: var(--accent-green);
+}
+
+.brand-dot.off {
+  background: var(--accent-red);
+}
+
+.topbar-meta {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.topbar-auth {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-2);
+}
+
+.topbar-auth input {
+  width: 220px;
+}
+
+.layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr) 300px;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  overflow: auto;
+}
+
+.hud-column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* ---------------------------------------------------------------- the HUD ring itself */
+.hud {
+  position: relative;
+  width: 100%;
+  max-width: 300px;
+  aspect-ratio: 1;
+}
+
+.hud-rings {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.hud-rings .ring {
+  fill: none;
+  stroke-width: 1.5;
+  transform-origin: 150px 150px;
+}
+
+.ring-outer {
+  stroke: var(--accent-cyan-dim);
+  stroke-dasharray: 4 10;
+  animation: rotate var(--motion-idle) linear infinite;
+}
+
+.ring-mid {
+  stroke: var(--line-bright);
+  stroke-dasharray: 2 6;
+  animation: rotate var(--motion-idle) linear infinite reverse;
+}
+
+.ring-inner {
+  stroke: var(--accent-cyan-dim);
+  stroke-dasharray: 1 4;
+  animation: rotate calc(var(--motion-idle) * 0.6) linear infinite;
+}
+
+.ring-core {
+  stroke: var(--accent-cyan);
+  opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-rings .ring {
+    animation: none;
+  }
+}
+
+@keyframes rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.hud-wave {
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  top: 44%;
+  height: 12%;
+  width: 60%;
+}
+
+.hud-caption {
+  position: absolute;
+  bottom: 6%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.hud-skill {
+  font-size: 11px;
+  min-height: 1em;
+}
+
+/* state coloring */
+.hud[data-state="idle"] .ring-core {
+  stroke: var(--accent-cyan);
+}
+
+.hud[data-state="listening"] .ring-core,
+.hud[data-state="listening"] .ring-outer {
+  stroke: var(--accent-cyan);
+  opacity: 1;
+}
+
+.hud[data-state="thinking"] .ring-inner {
+  animation-duration: calc(var(--motion-idle) * 0.15);
+}
+
+.hud[data-state="speaking"] .ring-core {
+  stroke: var(--accent-cyan);
+}
+
+.hud[data-state="awaiting_approval"] .ring-outer,
+.hud[data-state="awaiting_approval"] .ring-core {
+  stroke: var(--accent-amber);
+}
+
+.hud[data-state="awaiting_approval"] .hud-caption {
+  color: var(--accent-amber);
+}
+
+.hud[data-state="error"] .ring-outer,
+.hud[data-state="error"] .ring-core {
+  stroke: var(--accent-red);
+}
+
+.hud[data-state="error"] .hud-caption {
+  color: var(--accent-red);
+}
+
+/* the ~200ms flash on an actual state change (A1) — never an ambient pulse at rest */
+.hud.flash .ring-core {
+  animation: flash var(--motion-flash) ease-out;
+}
+
+@keyframes flash {
+  0% {
+    opacity: 1;
+    filter: brightness(2);
+  }
+  100% {
+    opacity: 0.6;
+    filter: brightness(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud.flash .ring-core {
+    animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------- compact mode (A4)
+   client/hud_window.py resizes the actual OS window AND sets this attribute in the same
+   call (HudWindow.set_compact) — the CSS collapse and the window shrink happen together,
+   never one without the other. Only reachable in the desktop shell (bridge.setCompact is a
+   no-op without a bridge), so this rule is dead weight, not a failure mode, in a browser. */
+:root[data-compact] .topbar,
+:root[data-compact] .transcript-column,
+:root[data-compact] .panels-column,
+:root[data-compact] .hud-skill {
+  display: none;
+}
+
+:root[data-compact] .layout {
+  grid-template-columns: 1fr;
+  padding: 0;
+  place-items: center;
+}
+
+:root[data-compact] .hud {
+  max-width: 100px;
+}
+
+:root[data-compact] .hud-caption {
+  display: none;
+}
+
+/* ---------------------------------------------------------------- responsive (A5)
+   Below 860px the three-column grid stacks; below 640px (phone width) the ring stops being
+   a large centered block and becomes a compact header — small, inline with its caption, so
+   the conversation and panels start near the top of the viewport instead of below a
+   full-width ring. */
+@media (max-width: 860px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  .hud {
+    max-width: 160px;
+  }
+  .topbar-auth input {
+    width: 140px;
+  }
+}
+
+@media (max-width: 640px) {
+  .layout {
+    padding: var(--space-2);
+    gap: var(--space-2);
+  }
+  .hud-column {
+    flex-direction: row;
+    justify-content: center;
+    gap: var(--space-2);
+  }
+  .hud {
+    max-width: 64px;
+    flex-shrink: 0;
+  }
+  /* The caption is centered text positioned over the ring at full size (A3); a 64px ring
+     has no room for that, so it moves beside the ring instead of overlapping it. */
+  .hud-caption {
+    position: static;
+    text-align: left;
+    font-size: 10px;
+  }
+  .hud-skill {
+    display: none; /* redundant with the caption at this size */
+  }
+  .transcript-list {
+    min-height: 140px;
+  }
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+  }
+  .topbar-auth {
+    margin-left: 0;
+    width: 100%;
+  }
+  .topbar-auth input {
+    flex: 1;
+    width: auto;
+  }
+}

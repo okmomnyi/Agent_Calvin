@@ -9,8 +9,17 @@ edge-tts>=6.1            # pre-built neural voices ONLY (§0 Principle 9 — no 
 numpy>=1.24
 websockets>=12.0         # authed link to the droplet /ws/voice
 python-dotenv>=1.0        # load the project .env for local/window launches
-pystray>=0.19            # tray icon for the desktop window (Phase 24)
-# tkinter is stdlib -- no entry needed. The window is deliberately native, not a
+pystray>=0.19            # tray icon for the desktop window (Phase 24) and HUD (Phase 36)
+# tkinter is stdlib -- no entry needed. agent_window.py is deliberately native, not a
 # browser page: whisper stays on the laptop, so your audio never leaves it.
-# NOTE: no hotkey library — push-to-talk uses stdin so the client installs
-# identically on Ubuntu / other Linux / macOS with no root (Phase 19).
+# NOTE: no hotkey library on THIS list — push-to-talk uses stdin so voice_client.py
+# installs identically on Ubuntu / other Linux / macOS with no root (Phase 19).
+
+# --- Phase 36: hud_window.py (the JARVIS-style HUD; agent_window.py still works standalone)
+pywebview>=5.0           # renders frontend/ in a native window; WebView2 on Windows,
+                         # WebKit on macOS/Linux — no Chromium/Electron bundled
+pynput>=1.7              # global hotkey (Ctrl+Alt+J default). Works root-free under
+                         # Windows/macOS/X11; Wayland has no portable global-hotkey API and
+                         # hud_window.py reports that rather than silently doing nothing
+screeninfo>=0.8          # multi-monitor geometry for compact-mode corner placement
+                         # (optional: hud_window.py falls back to a 1920x1080 guess without it)

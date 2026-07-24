@@ -5,11 +5,12 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from core.intent import Intent, IntentRouter
 from core.skill import CommandResult
-from kernel.app import to_spoken
+from kernel.app import _client_actions, to_spoken
 from kernel.registry import SkillRegistry
 from manage import _mask_dsn
 
@@ -116,21 +117,21 @@ def test_health_dsn_masker_hides_keyword_passwords():
     assert "super secret" not in masked
 
 
-def test_dashboard_escapes_every_server_derived_html_field():
-    html = (Path(__file__).parents[1] / "kernel" / "static" / "dashboard.html").read_text(
-        encoding="utf-8"
-    )
-    for expression in (
-        "esc(s.last_channel || \"—\")",
-        "esc(live)",
-        "esc(i.kind)",
-        "esc(i.what)",
-        "esc(i.action)",
-        "esc(t.channel)",
-        "esc(t.text)",
-        "esc(t.reply)",
-    ):
-        assert expression in html
+def test_dashboard_never_assigns_innerhtml_from_server_derived_data():
+    """Phase 36's HUD (frontend/, served at /dashboard) renders session/turn/approval text via
+    `textContent`, never `innerHTML` string interpolation — so there is no escaping discipline
+    to maintain (and none to forget) for fields like session.last_channel, a turn's text/reply,
+    or an approval's kind/what/action, all of which round-trip through Calvin's own input.
+    `.innerHTML =` never appearing under frontend/src is the structural guarantee; the old
+    dashboard's per-field `esc(...)` wrapping is superseded, not replicated.
+    """
+    frontend_src = Path(__file__).parents[1] / "frontend" / "src"
+    offenders = [
+        str(path.relative_to(frontend_src))
+        for path in frontend_src.rglob("*.js")
+        if "innerHTML" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"innerHTML assignment found in: {offenders}"
 
 
 def test_health_gives_liveness_publicly_but_detail_only_to_the_token(monkeypatch):
@@ -210,3 +211,71 @@ def test_config_has_no_key_that_nothing_reads():
     dead = [".".join(path) for path, _ in walk(config)
             if f'"{path[-1]}"' not in blob and f"'{path[-1]}'" not in blob]
     assert not dead, f"config keys nothing reads (they imply a switch that isn't wired): {dead}"
+
+
+# ==================================================== _client_actions narrow waist (Phase 36)
+def _result(data: dict) -> CommandResult:
+    return CommandResult(text="ok", data=data)
+
+
+def test_client_actions_passes_through_a_valid_open_url():
+    out = _client_actions(_result({"client_actions": [
+        {"op": "open_url", "url": "https://example.com"}]}))
+    assert out == [{"op": "open_url", "url": "https://example.com"}]
+
+
+def test_client_actions_drops_a_file_url_even_if_a_buggy_skill_emits_one():
+    """The skill layer already rejects this (skills/web_open.py); this asserts the SERVER
+    still refuses it even if that first line of defence is ever bypassed by a bug."""
+    out = _client_actions(_result({"client_actions": [
+        {"op": "open_url", "url": "file:///etc/passwd"}]}))
+    assert out == []
+
+
+def test_client_actions_drops_a_javascript_url():
+    out = _client_actions(_result({"client_actions": [
+        {"op": "open_url", "url": "javascript:alert(1)"}]}))
+    assert out == []
+
+
+def test_client_actions_still_passes_through_a_valid_app_op():
+    out = _client_actions(_result({"client_actions": [{"op": "open", "app": "spotify"}]}))
+    assert out == [{"op": "open", "app": "spotify"}]
+
+
+def test_client_actions_drops_an_unrecognized_op():
+    out = _client_actions(_result({"client_actions": [{"op": "delete_everything", "app": "x"}]}))
+    assert out == []
+
+
+def test_client_actions_ignores_extra_keys_on_a_valid_action():
+    """Only the fields each op actually needs reach the wire — a stray key (a path, an
+    argv) can't be smuggled through even by a buggy skill."""
+    out = _client_actions(_result({"client_actions": [
+        {"op": "open_url", "url": "https://example.com", "argv": ["rm", "-rf", "/"]}]}))
+    assert out == [{"op": "open_url", "url": "https://example.com"}]
+
+
+# ------------------------------------------------------------------- phone ops (Phase 36)
+def test_client_actions_passes_through_a_valid_e164_call():
+    out = _client_actions(_result({"client_actions": [
+        {"op": "call", "number": "+254712345678"}]}))
+    assert out == [{"op": "call", "number": "+254712345678"}]
+
+
+@pytest.mark.parametrize("number", [
+    "0712345678",           # not E.164
+    "+254712345678; ls",    # injection attempt
+    "'; rm -rf /",
+    "",
+])
+def test_client_actions_drops_a_malformed_or_non_e164_number(number):
+    """A malformed or non-E.164 number must never reach a client action — this is the
+    server-side half of the same guarantee client/adb_bridge.py enforces laptop-side."""
+    out = _client_actions(_result({"client_actions": [{"op": "call", "number": number}]}))
+    assert out == []
+
+
+def test_client_actions_passes_through_answer_and_hangup():
+    out = _client_actions(_result({"client_actions": [{"op": "answer"}, {"op": "hangup"}]}))
+    assert out == [{"op": "answer"}, {"op": "hangup"}]

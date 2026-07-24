@@ -248,6 +248,18 @@ KEYWORDS = [
     ("make me a playlist called deep focus", "music", "playlist"),
     ("remove from playlist", "music", "playlist_remove"),
     ("remove Fireworks from my coding playlist", "music", "playlist_remove"),
+    # Phase 36
+    ("what's the weather", "weather", "current"),
+    ("weather in Mombasa", "weather", "current"),
+    ("play some jazz on youtube", "youtube", "play"),
+    ("search youtube for lofi hip hop", "youtube", "play"),
+    ("find contact mum", "contacts", "find"),
+    ("call mum", "phone", "call"),
+    ("call the pizza place", "phone", "call"),
+    ("answer the call", "phone", "answer"),
+    ("pick up the phone", "phone", "answer"),
+    ("hang up", "phone", "hangup"),
+    ("end the call", "phone", "hangup"),
 ]
 
 

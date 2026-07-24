@@ -42,7 +42,8 @@ class SemesterPlannerSkill(BaseSkill):
 
     def __init__(self, memory: Memory | None = None, llm: LLMClient | None = None,
                  clock: Callable[[], float] = time.time,
-                 notify: Callable[[str], bool] | None = None) -> None:
+                 notify: Callable[[str], bool] | None = None,
+                 weather: Any | None = None) -> None:
         self._mem = memory
         self._llm = llm
         self._now = clock
@@ -50,12 +51,21 @@ class SemesterPlannerSkill(BaseSkill):
         # extract_deadlines() notifies unconditionally, so every suite run texted him
         # "I found 1 possible deadline(s) in your email" about a fixture.
         self._notify = notify or send_telegram
+        self._weather = weather
 
     @property
     def mem(self) -> Memory:
         if self._mem is None:
             self._mem = get_memory()
         return self._mem
+
+    @property
+    def weather(self) -> Any:
+        if self._weather is None:
+            from skills.weather import SKILL as WEATHER_SKILL
+
+            self._weather = WEATHER_SKILL
+        return self._weather
 
     @property
     def llm(self) -> LLMClient:
@@ -214,6 +224,10 @@ class SemesterPlannerSkill(BaseSkill):
             f"{greeting(now)}, {name}. Local time is {local.strftime('%H:%M %Z')}.",
         ]
 
+        weather_line = self._weather_line()
+        if weather_line:
+            lines.append(weather_line)
+
         lines.append("\n📚 Classes today: " + (
             ", ".join(f"{c.get('start','')} {c.get('title', c.get('unit',''))}" for c in classes)
             if classes else "none"))
@@ -254,6 +268,16 @@ class SemesterPlannerSkill(BaseSkill):
             "classes": len(classes), "deadlines": len(ranked), "cards_due": cards_due,
             "job_approvals": job_approvals, "local_time": local.isoformat(),
             "timezone": get_settings().tz})
+
+    def _weather_line(self) -> str:
+        """Weather (Phase 36) belongs IN the briefing, not as a standalone thing nobody
+        checks. Never lets a weather-service hiccup take the whole briefing down with it —
+        WeatherSkill.current() already degrades to an honest message rather than raising,
+        but a network stack can still surprise you, so this is a second line of defence."""
+        try:
+            return f"\n🌦 {self.weather.current().text}"
+        except Exception:  # noqa: BLE001 - weather must never break the briefing
+            return ""
 
     def _top3(self, ranked, cards_due: int, job_approvals: int, classes, commitments) -> str:
         summary = {

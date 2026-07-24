@@ -224,3 +224,10 @@ voice:
     ryan:   "en-GB-RyanNeural"
     rafiki: "sw-KE-RafikiNeural"
     zuri:   "sw-KE-ZuriNeural"
+
+# --- Phone book / calling (Phase 36) ---
+# No hardcoded country code (build-prompt constraint): every bare/national-format number
+# skills/contacts.py normalizes is resolved against THIS region. Contacts are stored E.164
+# regardless, so changing this later only affects how a NEW ambiguous number is interpreted.
+phone:
+  default_region: KE   # ISO 3166-1 alpha-2 — KE = +254

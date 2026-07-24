@@ -41,10 +41,23 @@ _ACTION_TIERS: dict[tuple[str, str], str] = {
     ("music", "next"): "low",
     ("music", "previous"): "low",
     ("music", "volume"): "low",
+    # Phase 36: explicitly declared even though "trivial" is already the default, so a
+    # reader of this table sees it was a deliberate choice for each — B4/B5/B6's own tier.
+    ("web_open", "open"): "trivial",
+    ("youtube", "play"): "trivial",
+    ("weather", "current"): "trivial",
+    # Placing a call speaks in Calvin's voice toward a real person — `high`, never learnable
+    # (LEARNABLE_TIERS excludes it structurally; see core/approvals.py). Answering/ending an
+    # already-ringing call acts on something already happening, not something initiated in
+    # his name, so it's `low` — reversible, and fine to learn.
+    ("phone", "call"): "high",
+    ("phone", "continue_call"): "high",
+    ("phone", "answer"): "low",
+    ("phone", "hangup"): "low",
 }
 
 _PLAN_INTERNAL_ACTIONS = {
-    "continue", "continue_refinement", "continue_send", "continue_trash",
+    "continue", "continue_refinement", "continue_send", "continue_trash", "continue_call",
     "drill_check", "mock_answer", "mocklab_submit", "quiz_answer", "session_tick",
 }
 
@@ -282,6 +295,7 @@ class SkillRegistry:
                 ("interview_prep.mock", "mock_answer", "interview_prep", "mock_answer", "answer"),
                 ("spaced_rep.session", "quiz_answer", "spaced_rep", "quiz_answer", "answer"),
                 ("code_tutor.session", "tutor_continue", "code_tutor", "continue", "text"),
+                ("phone.call_session", "phone_confirm", "phone", "continue_call", "text"),
             )
             for key, name, skill, action, arg_name in flows:
                 if mem.kv_get(key):

@@ -103,7 +103,7 @@ The addendum phases (16–22) added three more, enforced the same way:
 │    notify.py         Telegram push (dependency-light)                                          │
 │    gmail_client.py   Gmail API wrapper (labels/archive/recoverable trash/drafts; no send)     │
 │                                                                                               │
-│  skills/  (20, auto-discovered — see §8)                                                       │
+│  skills/  (27, auto-discovered — see §8)                                                       │
 └───────────────────────────────────────────────────────────────────────────────────────────────┘
 
   Four independently-restartable services (Phase 26):
@@ -332,6 +332,8 @@ single-writer contention a file DB hits. Key tables:
 | `semantic_index` | pgvector embeddings (`vector(1024)`, HNSW cosine) over facts, notes and CV material — retrieval instead of context-stuffing (Phase 33). Created **outside** the main schema transaction, so a missing `pgvector` extension degrades to keyword fallback rather than rolling back every table |
 | `action_permissions` | learned answers per (skill, action, tier): `always_approve` / `always_deny` / `ask`. `high` tier is **never** learnable (Phase 30) |
 | `pending_actions` | proposed actions awaiting Calvin's reply, with their tier and expiry; stale proposals expire rather than surfacing days later as a surprise (Phase 30) |
+| `contacts` | phone book: `phone_e164` (normalized on write), retired not deleted (Phase 36) |
+| `url_favourites` | named URL shortcuts opened laptop-side; http/https only (Phase 36) |
 
 Conversational session state (mock interview, quiz, tutor) lives in `kv` as JSON, so it
 survives restarts and is shared across voice/Telegram/dashboard/CLI. Phase 19's `sessions`
@@ -722,6 +724,145 @@ inherited rather than reimplemented. Best-effort by design: a dead link or JS-on
 the stub standing, and it only ever *upgrades* (some pages extract to less than the source
 gave us, and trading a clean summary for a login wall is a silent downgrade).
 
+### Phase 36 — JARVIS shell + device control (`frontend/`, `client/hud_window.py`,
+`client/adb_bridge.py`, `skills/{contacts,web_open,youtube,weather,phone}.py`)
+Two things bundled as one phase: a real HUD (one frontend, two shells) over the existing
+kernel, and five capabilities that were genuinely missing — a phone book, outbound calls,
+call pickup/hangup, URL opening, YouTube playback, and weather. Everything else the phase's
+own build prompt asked for (voice, app launch, Spotify, chat, persona) already existed and
+was wired to, not rebuilt.
+
+**A — the frontend.** `frontend/` is the one source tree for both the browser dashboard
+(`/dashboard`, mounted via `StaticFiles(html=True)` — no more single-file
+`kernel/static/dashboard.html`) and the desktop HUD. Panels render conditionally on a
+negotiated `capabilities` object (`{shell, local, adb, apps, mic}`); the desktop shell
+detects itself via `?shell=desktop` on its own URL (see below) and awaits pywebview's
+`pywebviewready` event before asking its bridge what it can actually do — a capability this
+build hasn't wired up yet reports `false` rather than appearing and then failing (§0: never
+fabricate a check that passed). No framework, no bundler: vanilla ES modules, one relative
+import graph that works identically whether served over HTTP or loaded off a local disk.
+**Achieved:** boot sequence streams real `/api/health` subsystem checks (a failed one stays
+red, never silently passes); HUD states (idle/listening/thinking/speaking/
+awaiting_approval/error) are driven by one `hud.js` state machine, with a ~200ms flash on an
+actual *change* and never an ambient pulse at rest; `[hidden] { display: none !important }`
+exists because a same-specificity author rule (`.boot-screen { display: flex }`) otherwise
+silently beats the browser's own `[hidden]` rule — found by actually loading the page in a
+browser, not by reading the CSS.
+
+**Desktop shell (`client/hud_window.py`).** Extends `client/`, doesn't replace it —
+`agent_window.py`'s tkinter window still works standalone. Same `AssistantCore` (Phase 24),
+same `Microphone`/`Transcriber`/`Speaker`/`send_to_agent`/`run_actions` helpers from
+`voice_client.py`. Two things worth knowing:
+- **The HUD's HTML is served over a loopback HTTP server on an ephemeral port, never
+  `file://`.** Chromium's WebView2 (pywebview's Windows backend) blocks relative
+  `<script type="module">` imports and same-origin `fetch()` assumptions under `file://`;
+  a loopback server keeps everything genuinely local (nothing leaves the laptop to fetch
+  these files) while giving the page the real `http://` origin ES modules need. The window
+  URL carries `?shell=desktop&server=<droplet-url>` so `transport.js` knows to point its
+  actual API/WS traffic at the droplet instead of the static-file server that merely served
+  the HTML.
+- **The barge-in recorder used to be duplicated.** `agent_window.py`'s `_record` had a
+  subtle adaptive-echo-baseline algorithm inline; rather than hand-copy it into the new
+  window and risk the two drifting apart, it's now `client/audio_io.py`, taking the
+  `AssistantCore`, frame queue, and timing constants as arguments. Both windows call it with
+  the exact same `voice_client.py` constants; a test (`test_audio_io.py`) exercises it with
+  a fake queue and a fake core, no audio hardware required.
+
+**Global hotkey / tray / compact mode.** `pynput.keyboard.GlobalHotKeys` (default
+`<ctrl>+<alt>+j`) summons/dismisses the window without root on Windows/macOS/X11 — Wayland
+has no portable global-hotkey API, and this is *reported*, not silently swallowed. The tray
+icon mirrors `agent_window.py`'s (`pystray`, "Show"/"Hide"/"Quit"). Compact mode resizes and
+repositions the actual OS window (`screeninfo` for multi-monitor placement, falling back to
+a 1920×1080 guess rather than crashing) **and** toggles `[data-compact]` in the same call —
+the CSS collapse and the window shrink can never happen one without the other. The frontend
+expands out of compact automatically on any HUD activity (a `bridge:core` push with a
+non-`off` state); collapsing back is left to the hotkey, not an idle timer, so a quiet HUD
+never surprises anyone by shrinking mid-read.
+
+**Wake word, opt-in only.** Behind `AGENT_CLIENT_MODE=voice` (same gate Phase 24 already
+uses — "nobody opts *out* of a hot microphone"). The detector runs its own mic stream only
+while `AssistantCore.mic_on` is false, closing it the instant a real session starts so it
+never contends with `AssistantCore`'s own stream for the device; detection shows the window,
+expands it, and calls `core.mic_on_()` — the *same* always-listening-once-activated session
+Phase 24 already has, not a second recording pipeline.
+
+**B1 — Phone book (`skills/contacts.py`, `contacts` table).** Numbers normalize to E.164 via
+`phonenumbers` (offline metadata, no network call) against `phone.default_region`
+(`config.yaml`, default `KE`) — there is no hardcoded country code anywhere in this phase.
+Un-normalizable input is rejected before it reaches the table. Lookup is fuzzy on name but
+**returns every match**; one match proceeds, zero says so, more than one asks which — this
+module never indexes `[0]`. Retire, never delete (§0 P4): `retired_at NULL` means active.
+CSV and vCard import are both idempotent (same name + same, possibly absent, number = the
+same contact already on file) and a minimal vCard reader (`FN`/`TEL`/`EMAIL`/`NOTE` only —
+not a full RFC 6350 parser; a contact it can't read is skipped, not guessed at). Contacts
+are PII: lookups log a contact **id**, never a name or number.
+
+**B2/B3 — Calls, pickup, hangup (`skills/phone.py` + `client/adb_bridge.py`).** Placing a
+call previews the resolved name and full E.164 number and is `high` tier — the same
+draft-then-confirm shape `email_agent.py`'s `compose`/`continue_send` already uses (a kv
+session, re-entered one-shot via `kernel/registry.py`'s `_active_continuation`), not the
+`ApprovalStore` proposal queue (that's for the proactive/background-triage case). `high`
+sits outside `LEARNABLE_TIERS` structurally (Phase 30) — there is no code path, correct or
+buggy, that can teach it "always yes"; `continue_call` is excluded from the planner's
+manifest (`_PLAN_INTERNAL_ACTIONS`) so it can never be picked as a freestanding step. The
+server only ever emits an app-key-shaped action — `{"op": "call", "number": "+254..."}` /
+`{"op": "answer"}` / `{"op": "hangup"}` — re-validated against strict E.164 a second time at
+`kernel/app.py`'s `_client_actions` narrow waist before it reaches the wire, mirroring
+Phase 23's "the server never gets to override the laptop's allowlist" rule exactly.
+`client/adb_bridge.py` re-validates a third time independently (its own `E164_RE`, deliberately
+not imported from the server side — server and laptop stay independently deployable, Phase
+26) and only then builds an **argv list**, `shell=False` always, nothing built by string
+interpolation even after validation. Device selection is explicit: no device, an
+unauthorized device, and more than one connected device are each a clean `Outcome`, never a
+traceback and never a guess at which phone to dial from. Answering (`KEYCODE_HEADSETHOOK`
+79, falling back to `KEYCODE_CALL` 5) and hanging up (`KEYCODE_ENDCALL` 6) are `low` tier and
+learnable — they act on a call that already exists, not one initiated in Calvin's name.
+**There is no force-terminate op anywhere in this module** (`test_no_force_kill_path_exists`
+asserts the class's entire public surface). Call-state polling (`dumpsys
+telephony.registry`) is one-shot and caller-driven — nothing here starts its own background
+poll loop.
+
+**B4 — Open URLs (`skills/web_open.py`, `url_favourites` table).** Scheme allowlist is
+`http`/`https` only, checked in the skill **and again** at the same `_client_actions` narrow
+waist that re-checks calls — belt and braces, the pattern `core/spotify.py`'s dead-endpoint
+guard already established. `file:`, `javascript:`, and anything else are refused outright,
+with no per-instruction override. Execution is laptop-side via Python's `webbrowser` module
+(cross-platform — not `os.system('start ...')`).
+
+**B5 — YouTube (`skills/youtube.py`).** No key needed by default: the query resolves to a
+YouTube *search* URL (opened via B4), and YouTube itself picks the result — nothing here
+scrapes a page or guesses a video id. `YOUTUBE_API_KEY` (optional) resolves the top hit via
+the Data API and opens the video directly; absent the key, or on any API failure, this falls
+back to search silently rather than guessing (§0 P5). Filler-stripping layers on top of
+`core/intent.py`'s existing punctuation normalization rather than a second one, mirroring
+`skills/desktop.py`'s established filler-word pattern for the verbs/words `core/intent.py`
+itself doesn't touch.
+
+**B6 — Weather (`skills/weather.py`).** Open-Meteo, keyless and free (§0 P1), for both
+geocoding and forecast — no paid provider considered. Default location comes from a
+verified `city`/`location` persona fact; "weather in Mombasa" overrides it for one call.
+Cached 30 minutes per location in the existing `kv` store. A network failure degrades to
+"I couldn't reach the weather service" — never an invented forecast; verified live against
+the real API during this build (`weather in Nairobi` → a genuine Open-Meteo fetch, not a
+mock). The voice sentence and the HUD panel are built from the **same** fetched dict, so
+they can't disagree about what was actually retrieved. Folded into the 07:00 briefing
+(`semester_planner.py`) rather than left standalone — a second try/except there means a
+weather-service hiccup can never take the whole briefing down with it.
+
+**Intent routing.** Six new keyword rules (`weather`, `youtube_play`, `contacts_find`,
+`phone_call`, `phone_answer`, `phone_hangup`) — each anchored on a trigger word unclaimed
+elsewhere in the table (`weather`, `youtube`, `call`, `hang up`), so they're safe ahead of
+the generic desktop open/close rules without needing that pair's "most specific wins" care.
+`weather`/`youtube_play` capture the **whole** utterance rather than a sub-phrase, because
+`weather.py`'s override parsing and `youtube.py`'s filler-stripping already parse the full
+text themselves — capturing less here would just be a second, redundant normalizer.
+
+**What's still missing.** `docs/ARCHITECTURE.md` had no Phase 35 section for the goal
+orchestrator (`core/orchestrator.py`, added in the commit immediately before this phase
+began) when this was written — that gap predates Phase 36 and wasn't backfilled here, since
+documenting another author's design decisions secondhand risks getting the "why" wrong in a
+way that's worse than leaving it openly missing.
+
 ---
 
 ## 9. Conversational state machines
@@ -758,7 +899,8 @@ immutable transition log, not a conversation.
 
 ## 10. Testing philosophy
 
-- **687 tests.** Every external service (NIM, Gmail, HTTP scrapers, Telegram, Spotify, sockets,
+- **859 tests** (5 fail only in a local Postgres cluster missing the `pgvector` extension —
+  environmental, not a code failure; see `test_semantic.py`). Every external service (NIM, Gmail, HTTP scrapers, Telegram, Spotify, sockets,
   TLS, OSV) and the clock are injected or mocked — `pytest` needs no API keys and hits no
   network. The one real dependency is **PostgreSQL**: `TEST_DATABASE_URL` points at a test
   database, and each test runs in its own schema (created once per session, truncated between

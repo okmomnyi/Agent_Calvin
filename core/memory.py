@@ -515,6 +515,31 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     UNIQUE(plan_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id, id);
+
+-- Phone book (Phase 36). Numbers are normalized to E.164 at write time in
+-- skills/contacts.py, never stored raw. Retired, never deleted (§0 P4) — retired_at NULL
+-- means active; a retired contact stays queryable with include_retired=True.
+CREATE TABLE IF NOT EXISTS contacts (
+    id          SERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    phone_e164  TEXT,
+    email       TEXT,
+    notes       TEXT,
+    source      TEXT NOT NULL DEFAULT 'manual',   -- manual | import
+    created_at  DOUBLE PRECISION NOT NULL,
+    retired_at  DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name) WHERE retired_at IS NULL;
+
+-- Named URL favourites (Phase 36) — opened laptop-side via the desktop bridge's
+-- webbrowser-based opener (skills/web_open.py), never server-side.
+CREATE TABLE IF NOT EXISTS url_favourites (
+    id          SERIAL PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    url         TEXT NOT NULL,
+    created_at  DOUBLE PRECISION NOT NULL,
+    retired_at  DOUBLE PRECISION
+);
 """
 
 
