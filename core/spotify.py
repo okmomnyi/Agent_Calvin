@@ -9,8 +9,20 @@ Feb 2026). For an app created now:
     Playlists are GONE** for new apps — so there is no official BPM/key/energy data and no
     official "recommend me tracks" call to build on. This client therefore does not define
     those methods at all: reaching for them would just 403;
-  * playlist creation is scoped to Calvin's own account (`POST /users/{his_id}/playlists`,
-    with the id read back from `/me`) — fine here;
+   * **playlist create/add/remove moved endpoints in the Feb 2026 migration.** Creation is now
+     `POST /me/playlists` (the old `POST /users/{id}/playlists` returns 403 after Spotify's
+     9 Mar 2026 cutoff), and items go through `/playlists/{id}/items` (`POST` to add with
+     `{"uris": [...]}`, `DELETE` to remove with `{"items": [{"uri": ...}]}`); the `/tracks`
+     family is deprecated. This client calls the current paths — verified against the live
+     reference, not memory. A 403 on a playlist write is now almost always a **stored token
+     that predates these paths/scopes**: re-run `manage.py music connect` to mint a fresh one.
+     A defeatist note used to live here claiming Development Mode blocks writes outright and
+     "no code change lifts that" — that was concluded from a 403 measured against the *retired*
+     `/users/{id}/playlists` endpoint, so it never actually tested `/me/playlists`.
+     **Measured 2026-07-20 and settled: it is wrong.** On a Development-Mode personal app with
+     a freshly-authorised Premium account, create + add + remove + read-back all return 200.
+     Development Mode does NOT block playlist writes. Do not reintroduce that claim — it cost a
+     debugging session by making a fixable auth problem look like an unfixable platform limit;
   * the Web API **cannot mix audio** at any tier. It issues playback commands. Real
     crossfading/beatmatching is not available to any third-party app.
 
@@ -56,8 +68,17 @@ SCOPES = [
 ]
 
 # Endpoints Spotify removed for new apps — named here so nobody re-adds them by accident.
-DEPRECATED_FOR_NEW_APPS = ("/recommendations", "/audio-features", "/audio-analysis",
-                           "/artists/{id}/related-artists", "/browse/featured-playlists")
+# `/users/{id}/playlists` and `/playlists/{id}/tracks` are the playlist paths retired in the
+# Feb 2026 migration (superseded by `/me/playlists` and `/playlists/{id}/items`); listing
+# them here stops anyone reintroducing the paths that were returning the 403.
+# NOTE: `/artists/{id}/top-tracks` is deliberately NOT here — it is alive and we may call it.
+# It was briefly added while diagnosing the playlist 403 and wrongly caught a live endpoint;
+# test_deprecation_guard_does_not_overmatch exists precisely to keep it out.
+DEPRECATED_FOR_NEW_APPS = (
+    "/recommendations", "/audio-features", "/audio-analysis",
+    "/artists/{id}/related-artists", "/browse/featured-playlists",
+    "/users/{id}/playlists", "/playlists/{id}/tracks",
+)
 
 # `{id}` is a placeholder for a real id, so these can only be matched as patterns — compared
 # literally, `/artists/{id}/related-artists` never matches the `/artists/4Yj.../...` we'd send.
@@ -158,10 +179,13 @@ class SpotifyClient:
 
         * "Insufficient client scope" -- the saved grant predates a capability we added.
           Re-authorising fixes it.
-        * bare "Forbidden" -- the APP is not allowed to call that endpoint at all. Measured
-          against Calvin's account: reads return 200, Premium is active, every scope is
-          granted, and playlist creation still returns this. No re-auth will move it; it is
-          a Spotify developer-dashboard restriction.
+        * a playlist write forbidden -- after the Feb 2026 endpoint move, the overwhelmingly
+          likely cause is a token minted before those scopes/paths, so re-auth is the FIRST
+          thing to try. An earlier version of this message asserted the opposite ("re-auth
+          will not change it") on the strength of a 403 measured against the now-retired
+          /users/{id}/playlists endpoint -- which never tested /me/playlists at all. Only a
+          fresh, fully-scoped, Premium token still failing points at the app's Development
+          Mode quota in the developer dashboard, which is the one thing no code can fix.
         """
         detail = ""
         try:
@@ -172,13 +196,22 @@ class SpotifyClient:
 
         if "scope" in detail.lower():
             return (f"Spotify denied that — the saved authorisation is missing a permission "
-                    f"this needs. Re-run the Spotify auth to grant it. ({detail})")
+                    f"this needs. Re-run `manage.py music connect` to grant it. ({detail})")
         if "/playlists" in path:
-            return ("Spotify refused to create/modify the playlist (plain 'Forbidden', not a "
-                    "scope error). Your account is Premium and every scope is granted, so "
-                    "this is an app-level restriction on the Spotify developer app itself — "
-                    "check its quota mode in the Spotify Developer Dashboard. Re-authorising "
-                    "will not change it.")
+            # If we can see the token's granted scopes and the write scopes are absent, that
+            # is the definite cause -- say so without hedging.
+            granted = self._granted_scopes()
+            needed = {"playlist-modify-private", "playlist-modify-public"}
+            if granted and not (granted & needed):
+                return ("Spotify refused the playlist write: the saved authorisation predates "
+                        "the playlist-modify scopes, so the token cannot write playlists. "
+                        "Re-run `manage.py music connect` to mint one that carries them.")
+            return ("Spotify refused the playlist write ('Forbidden'). First re-run "
+                    "`manage.py music connect` — a token saved before the Feb 2026 migration "
+                    "targeted the retired /users/{id}/playlists path and its grant can lack "
+                    "the current scopes. If a fresh authorisation on a Premium account still "
+                    "403s, the app is in Development Mode quota in the Spotify Developer "
+                    "Dashboard, which caps playlist writes regardless of scope.")
         if detail:
             return f"Spotify denied that: {detail}"
         return "Spotify returned 403 with no reason given."
@@ -268,24 +301,24 @@ class SpotifyClient:
 
     # ------------------------------------------------------------- playlists (own account only)
     def create_playlist(self, name: str, description: str = "", public: bool = False) -> dict[str, Any]:
-        user_id = self.me()["id"]
-        return self._call("POST", f"/users/{user_id}/playlists",
+        return self._call("POST", "/me/playlists",
                           json={"name": name, "description": description[:300], "public": public})
 
     def add_to_playlist(self, playlist_id: str, uris: list[str]) -> None:
-        self._call("POST", f"/playlists/{playlist_id}/tracks", json={"uris": uris[:100]})
+        self._call("POST", f"/playlists/{playlist_id}/items", json={"uris": uris[:100]})
 
     def my_playlists(self, limit: int = 50) -> list[dict[str, Any]]:
         return (self._call("GET", "/me/playlists", params={"limit": limit}) or {}).get(
             "items", [])
 
     def playlist_tracks(self, playlist_id: str, limit: int = 100) -> list[dict[str, Any]]:
-        items = (self._call("GET", f"/playlists/{playlist_id}/tracks",
+        items = (self._call("GET", f"/playlists/{playlist_id}/items",
                             params={"limit": limit}) or {}).get("items", [])
-        return [i["track"] for i in items if i.get("track")]
+        return [i.get("item") or i.get("track") for i in items
+                if i.get("item") or i.get("track")]
 
     def remove_from_playlist(self, playlist_id: str, uris: list[str]) -> None:
         """Removes every occurrence of these tracks. Scoped to playlists Calvin owns -- this
         is the only destructive Spotify call in the system, so it never guesses a target."""
-        self._call("DELETE", f"/playlists/{playlist_id}/tracks",
-                   json={"tracks": [{"uri": u} for u in uris[:100]]})
+        self._call("DELETE", f"/playlists/{playlist_id}/items",
+                   json={"items": [{"uri": u} for u in uris[:100]]})

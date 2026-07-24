@@ -177,6 +177,84 @@ def test_deprecated_list_is_documented():
     assert "/audio-features" in DEPRECATED_FOR_NEW_APPS
 
 
+def test_retired_playlist_paths_are_named_but_top_tracks_is_not():
+    """The Feb 2026 migration retired the /users/{id}/playlists + /playlists/{id}/tracks
+    paths (that was the real source of the 403); artist top-tracks is alive and must not be
+    swept up with them."""
+    assert "/users/{id}/playlists" in DEPRECATED_FOR_NEW_APPS
+    assert "/playlists/{id}/tracks" in DEPRECATED_FOR_NEW_APPS
+    assert "/artists/{id}/top-tracks" not in DEPRECATED_FOR_NEW_APPS
+
+
+class _FakeResp:
+    def __init__(self, status: int, payload: dict):
+        self.status_code = status
+        self._payload = payload
+        self.content = b"{}"
+        self.text = ""
+
+    def json(self):
+        return self._payload
+
+
+class _RecordingSession:
+    """Captures the method/url/body actually sent, so a revert to a retired path fails here."""
+
+    def __init__(self, status: int = 200, payload: dict | None = None):
+        self.calls: list[tuple[str, str, dict]] = []
+        self._status = status
+        self._payload = payload if payload is not None else {"id": "pl123", "name": "x"}
+
+    def request(self, method, url, **kw):
+        self.calls.append((method, url, kw))
+        return _FakeResp(self._status, self._payload)
+
+
+def _client_with(session):
+    c = SpotifyClient(session=session)
+    c._token = lambda: "tok"                     # type: ignore[method-assign]
+    return c
+
+
+def test_create_playlist_posts_to_the_current_me_endpoint():
+    """POST /me/playlists — NOT the /users/{id}/playlists path Spotify retired (→ 403)."""
+    sess = _RecordingSession(payload={"id": "pl123", "name": "coding"})
+    _client_with(sess).create_playlist("coding", "late-night", public=False)
+    method, url, kw = sess.calls[-1]
+    assert method == "POST"
+    assert url.endswith("/me/playlists")
+    assert "/users/" not in url
+    assert kw["json"]["name"] == "coding"
+
+
+def test_add_to_playlist_posts_items_with_a_uris_body():
+    sess = _RecordingSession(payload={})
+    _client_with(sess).add_to_playlist("pl123", ["spotify:track:abc"])
+    method, url, kw = sess.calls[-1]
+    assert method == "POST"
+    assert url.endswith("/playlists/pl123/items")   # not the deprecated /tracks
+    assert kw["json"]["uris"] == ["spotify:track:abc"]
+
+
+def test_remove_from_playlist_deletes_items_with_uri_objects():
+    sess = _RecordingSession(payload={})
+    _client_with(sess).remove_from_playlist("pl123", ["spotify:track:abc"])
+    method, url, kw = sess.calls[-1]
+    assert method == "DELETE"
+    assert url.endswith("/playlists/pl123/items")
+    assert kw["json"]["items"] == [{"uri": "spotify:track:abc"}]
+
+
+def test_playlist_403_with_missing_scopes_points_at_reauth_not_the_dashboard():
+    """After the endpoint move a playlist 403 is a stale-scope token first, dashboard quota
+    last — the reverse of what the old message claimed."""
+    sess = _RecordingSession(status=403, payload={"error": {"message": "Forbidden"}})
+    c = _client_with(sess)
+    c._last_scope = "user-read-private user-read-playback-state"   # no playlist-modify-*
+    with pytest.raises(SpotifyError, match="music connect"):
+        c.create_playlist("x")
+
+
 # ================================================================= no active device (Phase 23)
 def test_play_without_a_device_asks_the_laptop_to_open_spotify(music):
     """The Web API can't start the app, so 'open Spotify first' was a dead end by voice."""
