@@ -1,29 +1,31 @@
-// Shared client-side state: the bearer token, connection status, the last /api/session
-// payload, and negotiated capabilities. One place so panels don't each own a copy.
+// Shared client-side state: connection status, the last /api/session payload, and
+// negotiated capabilities. One place so panels don't each own a copy.
+//
+// Slice 0a/0b: there is no token here anymore, and never was a raw one after 0b — auth is
+// an httpOnly Secure SameSite=Strict cookie the server sets, which JS cannot read and does
+// not need to: the browser attaches it automatically on same-origin requests. What used to
+// live here as `getToken()`/`setToken()` (a JS-readable secret in localStorage) is gone.
 import { bus } from "./bus.js";
 
-const TOKEN_KEY = "agentos_token";
-
 const state = {
-  token: (typeof localStorage !== "undefined" && localStorage.getItem(TOKEN_KEY)) || "",
+  loggedIn: false,
   connected: false,
   session: null,
   capabilities: null,
 };
 
-export function getToken() {
-  return state.token;
-}
-
-export function setToken(token) {
-  state.token = token || "";
-  if (state.token) localStorage.setItem(TOKEN_KEY, state.token);
-  else localStorage.removeItem(TOKEN_KEY);
-  bus.emit("session:token", state.token);
-}
-
 export function getState() {
   return state;
+}
+
+export function setLoggedIn(ok) {
+  if (state.loggedIn === ok) return;
+  state.loggedIn = ok;
+  bus.emit("session:loggedIn", ok);
+}
+
+export function isLoggedIn() {
+  return state.loggedIn;
 }
 
 export function setConnected(ok) {

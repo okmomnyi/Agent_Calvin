@@ -10,6 +10,7 @@ announce which phase will fill them in, so the CLI surface is stable from day on
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 import tarfile
@@ -627,6 +628,100 @@ def cmd_auth(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_login(args: argparse.Namespace) -> int:
+    """Real login setup: break-glass password (0a), passkey registration guidance (0c), and
+    recovery codes (0d).
+
+    Named `login`, not `auth` — `manage.py auth` already means the Gmail OAuth flow (Phase
+    2) and changing that would break every existing doc/muscle-memory reference to it.
+
+    `register-passkey` is deliberately NOT a terminal-driven ceremony: WebAuthn talks to the
+    platform authenticator (Face ID, Windows Hello, a security key) through the BROWSER's
+    `navigator.credentials.create()` — there is no cross-platform way for a Python process
+    with no browser and no authenticator access to drive that. This prints where to go
+    instead of faking something a terminal fundamentally cannot do.
+    """
+    from core.auth import get_store
+
+    if args.action == "set-password":
+        pw1 = getpass.getpass("New break-glass password (min 12 chars): ")
+        pw2 = getpass.getpass("Confirm: ")
+        if pw1 != pw2:
+            print("Passwords did not match — nothing changed.")
+            return 1
+        try:
+            get_store().set_password(pw1)
+        except ValueError as exc:
+            print(f"Rejected: {exc}")
+            return 1
+        print("Break-glass password set. It is the fallback, not the primary factor — "
+              "register a passkey too (see `login register-passkey`).")
+        return 0
+
+    if args.action == "register-passkey":
+        store = get_store()
+        domain = get_settings().agentos_domain
+        if not store.has_credential() and not store.has_password():
+            print("Nothing is set up yet. Registering the FIRST credential must happen from "
+                  "the droplet console or localhost (§0: so a public attacker can't register "
+                  "their own passkey before you do).")
+            if domain:
+                print(f"From the droplet itself: open https://localhost/dashboard (or "
+                      f"http://127.0.0.1:{get_settings().port}/dashboard if Caddy isn't up "
+                      f"yet) and click \"Passkey\" → \"+ Register this device\".")
+            else:
+                print(f"AGENTOS_DOMAIN is not set — open http://127.0.0.1:{get_settings().port}"
+                      f"/dashboard on the droplet itself and click \"+ Register this device\".")
+        elif not domain:
+            print("A password or passkey already exists, but AGENTOS_DOMAIN is not set — "
+                  "WebAuthn needs a real secure-context origin. Set it, put Caddy in front "
+                  "(docs/DEPLOYMENT.md §8), then log in at https://<your-domain>/dashboard "
+                  "and click \"+ Register this device\".")
+        else:
+            print(f"Log in at https://{domain}/dashboard (password or an existing passkey) "
+                  f"and click \"+ Register this device\" — this has to happen in a browser, "
+                  f"there's no terminal-driven path.")
+        return 0
+
+    if args.action == "recovery-codes":
+        store = get_store()
+        remaining = store.unused_recovery_code_count()
+        if remaining:
+            confirm = input(
+                f"{remaining} unused recovery code(s) already exist and will still work "
+                f"alongside a new set (old ones are never revoked by generating more) — "
+                f"generate 10 more anyway? [y/N] ")
+            if confirm.strip().lower() not in ("y", "yes"):
+                print("Nothing generated.")
+                return 0
+        codes = store.generate_recovery_codes(10)
+        print("\n== RECOVERY CODES — shown exactly once, write these down now ==")
+        for code in codes:
+            print(f"  {code}")
+        print("Each code logs in ONCE, as a last resort if you lose your passkey device "
+              "AND forget the password. Store them somewhere offline (not this terminal's "
+              "scrollback, not a screenshot that syncs to the cloud).")
+        return 0
+
+    if args.action == "issue-device-token":
+        label = args.label or input("Label this device (e.g. \"Laptop\"): ").strip()
+        if not label:
+            print("A label is required — nothing issued.")
+            return 1
+        token = get_store().issue_device_credential(label)
+        print(f"\n== DEVICE TOKEN for \"{label}\" — shown exactly once ==")
+        print(f"  {token}")
+        print(f"Paste this into the LAPTOP's .env (not the droplet's) as:\n"
+              f"  AGENT_DEVICE_TOKEN={token}\n"
+              f"Valid for 1 year, no idle timeout — it's for a background client, not a "
+              f"browser. There's no `login revoke-device` command yet; if a laptop is lost "
+              f"or compromised, revoke its credential directly via AuthStore.revoke_session "
+              f"(the row's user_agent is \"device:<label>\") until that lands.")
+        return 0
+
+    return 1  # unreachable: argparse's choices= already rejects anything else
+
+
 def cmd_cleanup(args: argparse.Namespace) -> int:
     """Run one inbox cleanup pass."""
     from skills.email_agent import SKILL
@@ -795,6 +890,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- Phase 2: email agent ---
     sub.add_parser("auth", help="Gmail OAuth desktop flow (laptop)").set_defaults(func=cmd_auth)
+
+    # --- Real login (replaces AGENT_WS_TOKEN) ---
+    p_login = sub.add_parser("login", help="real login: set-password, register-passkey, "
+                                            "recovery-codes, issue-device-token")
+    p_login.add_argument("action", choices=["set-password", "register-passkey",
+                                            "recovery-codes", "issue-device-token"])
+    p_login.add_argument("--label", default=None,
+                         help="device label for issue-device-token (e.g. \"Laptop\")")
+    p_login.set_defaults(func=cmd_login)
 
     p_clean = sub.add_parser("cleanup", help="run one inbox cleanup pass")
     p_clean.add_argument("--max", type=int, default=50, help="max messages to scan")

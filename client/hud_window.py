@@ -438,8 +438,9 @@ def _build_tray(hud: HudWindow):
 
 
 def main() -> int:
-    if not os.getenv("AGENT_WS_TOKEN"):
-        print("Set AGENT_WS_TOKEN first -- see client/README.md.")
+    if not os.getenv("AGENT_DEVICE_TOKEN"):
+        print("Set AGENT_DEVICE_TOKEN first -- run `manage.py login issue-device-token` on "
+              "the droplet. See client/README.md.")
         return 1
     hud = HudWindow(start_compact="--compact" in sys.argv, tray="--tray" in sys.argv)
     try:

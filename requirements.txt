@@ -42,6 +42,10 @@ phonenumbers>=8.13   # E.164 normalization/validation (skills/contacts.py) — o
                      # no network call, no key; the standard library for getting this right
                      # rather than hand-rolling per-region dialing-format regexes
 
+# --- Real login (replaces AGENT_WS_TOKEN) ---
+argon2-cffi>=23.1    # break-glass password + recovery codes (core/auth.py)
+webauthn>=2.0         # Duo's py_webauthn — passkey registration/assertion (Slice 0c)
+
 # --- Test tooling ---
 pytest>=8.0
 httpx>=0.27            # python-telegram-bot transport

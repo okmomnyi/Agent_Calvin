@@ -73,10 +73,12 @@ $LocalPort = if ($env:AGENT_LOCAL_PORT) { $env:AGENT_LOCAL_PORT } else { "8000" 
 # CLOSED and opens it only when Calvin clicks. The wake word is still there behind
 # AGENT_CLIENT_MODE=voice for anyone who wants hands-free, but it is no longer the default:
 # an always-on microphone is not something to opt out of, it is something to opt in to.
-$Mode      = if ($env:AGENT_CLIENT_MODE){ $env:AGENT_CLIENT_MODE }else { "window" }
-$WsToken   = Get-EnvValue "AGENT_WS_TOKEN"
+$Mode        = if ($env:AGENT_CLIENT_MODE){ $env:AGENT_CLIENT_MODE }else { "window" }
+# Slice 0e: `manage.py login issue-device-token` on the droplet, pasted into .env as
+# AGENT_DEVICE_TOKEN — replaces the old shared AGENT_WS_TOKEN, which no code path reads.
+$DeviceToken = Get-EnvValue "AGENT_DEVICE_TOKEN"
 
-if (-not $WsToken) { Log "FATAL: AGENT_WS_TOKEN not found in $EnvFile"; exit 1 }
+if (-not $DeviceToken) { Log "FATAL: AGENT_DEVICE_TOKEN not found in $EnvFile"; exit 1 }
 if (-not (Test-Path $SshKey)) { Log "FATAL: ssh key not found: $SshKey"; exit 1 }
 
 # Pick an interpreter that can actually import tkinter. The window (Phase 24) needs it, and the
@@ -107,8 +109,8 @@ if (-not $Python) {
     Log "python: $Python (tkinter OK)"
 }
 
-$env:AGENT_WS_URL   = "ws://localhost:$LocalPort/ws/voice"
-$env:AGENT_WS_TOKEN = $WsToken
+$env:AGENT_WS_URL = "ws://localhost:$LocalPort/ws/voice"
+$env:AGENT_DEVICE_TOKEN = $DeviceToken
 
 $modeName = if ($Mode) { $Mode } else { "wake-word" }
 Log "starting - droplet $DropletIp, mode '$modeName'"

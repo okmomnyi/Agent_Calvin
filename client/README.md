@@ -16,11 +16,18 @@ python -m venv .venv
 pip install -r client/requirements.txt
 ```
 
-Set the connection env vars (a shell profile, or the autostart file):
+Get a device credential (on the droplet, not the laptop) and set the connection env vars
+(a shell profile, or the autostart file):
+
+```bash
+# on the droplet:
+python manage.py login issue-device-token --label "Laptop"
+# prints a raw token exactly once -- paste it into the LAPTOP's env, not the droplet's
+```
 
 ```bash
 export AGENT_WS_URL="wss://agent.example.com/ws/voice"   # your droplet
-export AGENT_WS_TOKEN="<same AGENT_WS_TOKEN as the droplet .env>"
+export AGENT_DEVICE_TOKEN="<the token issue-device-token printed>"
 # optional:
 export AGENT_WAKE_WORD="hey_jarvis"     # an openwakeword built-in model name
 export AGENT_WHISPER_MODEL="base"       # tiny|base|small (base recommended for low latency)
@@ -60,7 +67,7 @@ dashboard and REST until it succeeds or you say "cancel".
 
 ## Autostart on boot/login
 
-Files in `client/autostart/` — edit the paths + `AGENT_WS_TOKEN` in each first:
+Files in `client/autostart/` — edit the paths + `AGENT_DEVICE_TOKEN` in each first:
 
 - **Linux:** `agentos-voice.service` → `~/.config/systemd/user/`, then
   `systemctl --user enable --now agentos-voice`
@@ -75,13 +82,16 @@ Two paths reuse this exact backend — nothing behaves differently on the phone:
 1. **Telegram voice notes** (Phase 8) — send a voice note to the bot; it's transcribed on
    the droplet and routed through the same intent engine, replying as text (+ optional audio).
 2. **Push-to-talk shortcut** — an iOS Shortcut / Android tap that records and POSTs to
-   `POST https://<droplet>/api/command` with `{"text": "<your words>"}` and the header
-   `Authorization: Bearer <AGENT_WS_TOKEN>`. Same brain, just explicitly triggered instead
-   of wake-word triggered.
+   `POST https://<droplet>/api/command` with `{"text": "<your words>"}` and a
+   `Cookie: agentos_session=<device token>` header, using its own device credential
+   (`manage.py login issue-device-token --label "iPhone Shortcut"` — a Shortcut can set a
+   plain HTTP header same as any client; nothing here is browser-specific). Same brain, just
+   explicitly triggered instead of wake-word triggered.
 
 ## Troubleshooting
 
 - **No audio device / `PortAudioError`:** check the OS default input/output; on Linux install `libportaudio2`.
 - **Wake word never fires:** try `--ptt`, or set a different `AGENT_WAKE_WORD` built-in model.
-- **`Unauthorized` from the server:** `AGENT_WS_TOKEN` must match the droplet's `.env`.
+- **`Unauthorized` from the server:** `AGENT_DEVICE_TOKEN` is missing, wrong, or was revoked —
+  mint a fresh one with `manage.py login issue-device-token` on the droplet.
 - **Slow transcription:** use `AGENT_WHISPER_MODEL=base` or `tiny`.

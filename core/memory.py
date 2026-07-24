@@ -544,6 +544,75 @@ CREATE TABLE IF NOT EXISTS url_favourites (
     created_at  DOUBLE PRECISION NOT NULL,
     retired_at  DOUBLE PRECISION
 );
+
+-- Real login (replaces the static AGENT_WS_TOKEN). Single user (Calvin) -- no user_id
+-- columns; a passkey/password/session simply belongs to the one account. Every secret here
+-- is stored HASHED; the raw value exists exactly once, in the response that issues it, and
+-- never again (§0 P4 in spirit: revoke/expire, never delete, so a compromised value's
+-- history stays inspectable even after it stops working).
+CREATE TABLE IF NOT EXISTS credentials (
+    id            SERIAL PRIMARY KEY,
+    credential_id BYTEA UNIQUE NOT NULL,     -- WebAuthn credential id
+    public_key    BYTEA NOT NULL,
+    sign_count    BIGINT NOT NULL DEFAULT 0, -- a same-or-lower count on the next assertion
+                                              -- means a cloned authenticator -- reject it
+    transports    TEXT,
+    label         TEXT NOT NULL,             -- "MacBook", "Pixel" -- which device this is
+    created_at    DOUBLE PRECISION NOT NULL,
+    last_used_at  DOUBLE PRECISION,
+    revoked_at    DOUBLE PRECISION
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id                 SERIAL PRIMARY KEY,
+    session_token_hash TEXT UNIQUE NOT NULL,  -- sha256 of the raw cookie value; never the raw
+    created_at         DOUBLE PRECISION NOT NULL,
+    last_seen_at       DOUBLE PRECISION NOT NULL,
+    expires_at         DOUBLE PRECISION NOT NULL,   -- absolute max lifetime
+    revoked_at         DOUBLE PRECISION,
+    user_agent         TEXT,
+    ip_hash            TEXT,                        -- hashed, never the raw IP (§ privacy)
+    -- Slice 0e: the laptop voice client authenticates with a long-lived, explicitly-issued,
+    -- revocable device credential (no browser -> no WebAuthn ceremony there) instead of a
+    -- browser session. A device row skips the idle timeout entirely (an always-on
+    -- background client legitimately goes quiet for days) and gets a year-long absolute
+    -- lifetime instead of 30 days -- see AuthStore.issue_device_credential.
+    is_device          INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_hash ON auth_sessions(session_token_hash);
+
+CREATE TABLE IF NOT EXISTS ws_tickets (
+    id          SERIAL PRIMARY KEY,
+    ticket_hash TEXT UNIQUE NOT NULL,
+    session_id  INTEGER NOT NULL REFERENCES auth_sessions(id),
+    created_at  DOUBLE PRECISION NOT NULL,
+    expires_at  DOUBLE PRECISION NOT NULL,   -- ~15s: minted, handed to the socket, burned
+    used_at     DOUBLE PRECISION             -- set on first use; a second use is rejected
+);
+
+CREATE TABLE IF NOT EXISTS recovery_codes (
+    id         SERIAL PRIMARY KEY,
+    code_hash  TEXT NOT NULL,                -- argon2, same as the break-glass password
+    created_at DOUBLE PRECISION NOT NULL,
+    used_at    DOUBLE PRECISION
+);
+
+-- The single break-glass password. One row, ever -- set_password() replaces it in place
+-- rather than accumulating history, since there is exactly one account to authenticate.
+CREATE TABLE IF NOT EXISTS credential_password (
+    id          SERIAL PRIMARY KEY,
+    argon2_hash TEXT NOT NULL,
+    updated_at  DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_attempts (
+    id      SERIAL PRIMARY KEY,
+    kind    TEXT NOT NULL,                   -- passkey | password | recovery
+    ok      BOOLEAN NOT NULL,
+    ip_hash TEXT,
+    at      DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_attempts_kind_at ON auth_attempts(kind, ip_hash, at);
 """
 
 

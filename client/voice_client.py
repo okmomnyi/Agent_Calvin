@@ -42,7 +42,13 @@ WS_URL = os.getenv(
     "AGENT_WS_URL",
     f"ws://127.0.0.1:{os.getenv('AGENTOS_PORT', '8000')}/ws/voice",
 )
-WS_TOKEN = os.getenv("AGENT_WS_TOKEN", "")
+# Slice 0e: AGENT_WS_TOKEN is gone. This laptop is a headless Python process with no
+# browser, so it can't do a WebAuthn ceremony the way the dashboard does -- it authenticates
+# once with a long-lived, revocable device credential instead (`manage.py login
+# issue-device-token`, run on the droplet, pasted here), then mints a single-use ~15s WS
+# ticket over REST for every connect, exactly like the dashboard does. See core/auth.py's
+# AuthStore.issue_device_credential / mint_ws_ticket.
+DEVICE_TOKEN = os.getenv("AGENT_DEVICE_TOKEN", "")
 WAKE_WORD = os.getenv("AGENT_WAKE_WORD", "hey_jarvis")  # openwakeword built-in model name
 WHISPER_MODEL = os.getenv("AGENT_WHISPER_MODEL", "base")
 SAMPLE_RATE = 16000
@@ -184,12 +190,45 @@ class Speaker:
 
 
 # ------------------------------------------------------------------ server link
+def _http_base_from_ws_url(ws_url: str) -> str:
+    """wss://host/ws/voice -> https://host ; ws://host/ws/voice -> http://host."""
+    if ws_url.startswith("wss://"):
+        base = "https://" + ws_url[len("wss://"):]
+    elif ws_url.startswith("ws://"):
+        base = "http://" + ws_url[len("ws://"):]
+    else:
+        base = ws_url
+    return base.rsplit("/ws/voice", 1)[0]
+
+
+def _mint_ws_ticket() -> str:
+    """REST half of the ticket flow: the device credential rides as the session cookie
+    (a raw HTTP client can set a Cookie header same as a browser can), and gets back a
+    single-use ~15s ticket for the handshake -- never anything long-lived on the wire."""
+    import requests
+
+    if not DEVICE_TOKEN:
+        raise RuntimeError(
+            "AGENT_DEVICE_TOKEN is not set -- run `manage.py login issue-device-token` on "
+            "the droplet and paste the result into this laptop's .env.")
+    resp = requests.post(
+        f"{_http_base_from_ws_url(WS_URL)}/api/auth/ws-ticket",
+        cookies={"agentos_session": DEVICE_TOKEN}, timeout=10)
+    if resp.status_code == 401:
+        raise RuntimeError(
+            "The device credential was rejected (revoked or expired) -- issue a new one "
+            "with `manage.py login issue-device-token`.")
+    resp.raise_for_status()
+    return resp.json()["ticket"]
+
+
 async def send_to_agent(transcript: str) -> dict:
-    """Send a transcript over the authed WebSocket and return the JSON reply."""
+    """Send a transcript over the ticket-authed WebSocket and return the JSON reply."""
     import websockets
 
-    async with websockets.connect(WS_URL) as ws:
-        await ws.send(json.dumps({"token": WS_TOKEN, "text": transcript, "channel": "voice"}))
+    ticket = await asyncio.to_thread(_mint_ws_ticket)
+    async with websockets.connect(f"{WS_URL}?ticket={ticket}") as ws:
+        await ws.send(json.dumps({"text": transcript, "channel": "voice"}))
         return json.loads(await ws.recv())
 
 
@@ -325,8 +364,9 @@ def main() -> int:
     parser.add_argument("--text", action="store_true",
                         help="no microphone — plain text against the same session")
     args = parser.parse_args()
-    if not WS_TOKEN:
-        print("Set AGENT_WS_TOKEN (and optionally AGENT_WS_URL) first — see client/README.md.")
+    if not DEVICE_TOKEN:
+        print("Set AGENT_DEVICE_TOKEN (and optionally AGENT_WS_URL) first — run "
+              "`manage.py login issue-device-token` on the droplet. See client/README.md.")
         return 1
     try:
         if args.text:

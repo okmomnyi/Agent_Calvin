@@ -3,8 +3,9 @@
 // Total boot budget is 2.5s and any keypress skips straight to idle.
 import { bus } from "../core/bus.js";
 import * as capabilities from "../core/capabilities.js";
-import { getToken, setToken, setSession, setCapabilities } from "../core/session.js";
-import { health, fetchSession, voiceSocket, setServerBase } from "../core/transport.js";
+import { isLoggedIn, setSession, setCapabilities } from "../core/session.js";
+import { health, fetchSession, login, logout, voiceSocket, setServerBase } from "../core/transport.js";
+import { loginWithPasskey, registerPasskey, supported as passkeysSupported } from "../core/webauthn.js";
 import * as hud from "./hud.js";
 import * as wave from "./wave.js";
 import * as transcript from "./transcript.js";
@@ -125,27 +126,75 @@ function applyCapabilities(caps) {
   });
 }
 
-function wireToken(onChange) {
-  const input = document.getElementById("token-input");
-  const btn = document.getElementById("token-save");
-  input.value = getToken();
-  btn.addEventListener("click", () => {
-    setToken(input.value.trim());
+function _setLoggedInUI(loggedIn) {
+  document.getElementById("login-passkey").hidden = loggedIn;
+  document.getElementById("login-password").hidden = loggedIn;
+  document.getElementById("login-submit").hidden = loggedIn;
+  document.getElementById("login-logout").hidden = !loggedIn;
+  // Registering an ADDITIONAL passkey is a logged-in action (see kernel/app.py's
+  // _require_first_run_or_session) -- only offered once you're already in, whether that
+  // first session came from a passkey or the break-glass password.
+  document.getElementById("login-register-passkey").hidden = !loggedIn || !passkeysSupported();
+}
+
+function wireLogin(onChange) {
+  const input = document.getElementById("login-password");
+  const loginBtn = document.getElementById("login-submit");
+  const logoutBtn = document.getElementById("login-logout");
+  const passkeyBtn = document.getElementById("login-passkey");
+  const registerBtn = document.getElementById("login-register-passkey");
+
+  if (!passkeysSupported()) passkeyBtn.hidden = true;
+
+  loginBtn.addEventListener("click", async () => {
+    const password = input.value;
+    input.value = "";
+    if (!password) return;
+    try {
+      await login(password);
+      _setLoggedInUI(true);
+      onChange();
+    } catch {
+      /* refreshSession's next poll shows the failed (logged-out) state */
+    }
+  });
+
+  passkeyBtn.addEventListener("click", async () => {
+    try {
+      await loginWithPasskey();
+      _setLoggedInUI(true);
+      onChange();
+    } catch (err) {
+      alert(err.message || "Passkey login failed.");
+    }
+  });
+
+  registerBtn.addEventListener("click", async () => {
+    const label = prompt("Name this device (e.g. \"MacBook\", \"Pixel\"):");
+    if (!label) return;
+    try {
+      await registerPasskey(label);
+      alert(`Passkey registered for "${label}".`);
+    } catch (err) {
+      alert(err.message || "Passkey registration failed.");
+    }
+  });
+
+  logoutBtn.addEventListener("click", async () => {
+    await logout();
+    _setLoggedInUI(false);
     onChange();
   });
 }
 
 async function refreshSession(ledEl) {
-  if (!getToken()) {
-    ledEl.className = "brand-dot";
-    return;
-  }
   try {
     const s = await fetchSession();
     setSession(s);
     ledEl.className = "brand-dot on";
+    _setLoggedInUI(true);
   } catch {
-    ledEl.className = "brand-dot off";
+    ledEl.className = isLoggedIn() ? "brand-dot off" : "brand-dot";
   }
 }
 
@@ -190,7 +239,7 @@ async function main() {
   });
 
   const led = document.getElementById("conn-led");
-  wireToken(() => {
+  wireLogin(() => {
     refreshSession(led);
     voiceSocket.disconnect();
     voiceSocket.connect();

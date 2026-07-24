@@ -16,7 +16,8 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>AGENT_WS_URL</key><string>wss://agent.example.com/ws/voice</string>
-    <key>AGENT_WS_TOKEN</key><string>CHANGE_ME</string>
+    <!-- `manage.py login issue-device-token` on the droplet (Slice 0e). -->
+    <key>AGENT_DEVICE_TOKEN</key><string>CHANGE_ME</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

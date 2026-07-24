@@ -91,10 +91,11 @@ mock interview started by voice continues on the phone.
 Brings up Postgres + the kernel + the Telegram bot. Nothing to install but Docker.
 
 ```bash
-cp .env.example .env          # NVIDIA_API_KEY + AGENT_WS_TOKEN at minimum
+cp .env.example .env          # NVIDIA_API_KEY at minimum
 docker compose up -d --build
 curl -s localhost:8000/api/health | python -m json.tool
 
+docker compose exec api python manage.py login set-password   # real login, replaces AGENT_WS_TOKEN
 docker compose --profile test run --rm tests      # the full suite, isolated database
 docker compose exec api python manage.py health   # any CLI command
 docker compose logs -f bot

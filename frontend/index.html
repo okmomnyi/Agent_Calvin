@@ -26,9 +26,16 @@
       <span class="brand-name">AGENTOS</span>
     </div>
     <div class="topbar-meta mono dim" id="shell-meta">—</div>
+    <!-- Slice 0a/0b/0c: no token or password is ever stored in the browser. The password
+         path posts to /api/auth/password; the passkey path (primary factor, gated by the
+         device's own biometric/PIN) never sends a secret at all -- both just get an
+         httpOnly session cookie back. -->
     <div class="topbar-auth">
-      <input id="token-input" type="password" placeholder="access token" autocomplete="off">
-      <button id="token-save" class="btn">Connect</button>
+      <button id="login-passkey" class="btn">Passkey</button>
+      <input id="login-password" type="password" placeholder="password" autocomplete="current-password">
+      <button id="login-submit" class="btn">Log in</button>
+      <button id="login-register-passkey" class="btn" hidden>+ Register this device</button>
+      <button id="login-logout" class="btn" hidden>Log out</button>
     </div>
   </header>
 

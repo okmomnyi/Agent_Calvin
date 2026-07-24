@@ -11,7 +11,9 @@ After=default.target sound.target
 Type=simple
 WorkingDirectory=%h/AgentOS/client
 Environment=AGENT_WS_URL=wss://agent.example.com/ws/voice
-Environment=AGENT_WS_TOKEN=CHANGE_ME
+# `manage.py login issue-device-token` on the droplet, pasted here (Slice 0e — replaces
+# the old AGENT_WS_TOKEN, which no code path reads anymore).
+Environment=AGENT_DEVICE_TOKEN=CHANGE_ME
 ExecStart=%h/AgentOS/.venv/bin/python voice_client.py
 Restart=on-failure
 RestartSec=5

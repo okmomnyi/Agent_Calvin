@@ -43,13 +43,16 @@ class Settings:
     my_email: str
     telegram_bot_token: str
     telegram_chat_id: str
-    ws_token: str
     serpapi_key: str
 
     # server
     host: str
     port: int
     tz: str
+    # The public subdomain (Caddyfile's {$AGENTOS_DOMAIN}) — also WebAuthn's RP ID (Slice
+    # 0c). Empty until DNS + Caddy are set up; core/auth.py refuses to run a real ceremony
+    # against an empty/localhost RP ID rather than silently accepting one that can't work.
+    agentos_domain: str
 
     # paths
     project_root: Path
@@ -123,11 +126,11 @@ def get_settings() -> Settings:
         my_email=os.getenv("MY_EMAIL", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-        ws_token=os.getenv("AGENT_WS_TOKEN", ""),
         serpapi_key=os.getenv("SERPAPI_KEY", ""),
         host=os.getenv("AGENTOS_HOST", "0.0.0.0"),
         port=int(os.getenv("AGENTOS_PORT", "8000")),
         tz=os.getenv("AGENTOS_TZ", raw.get("timezone", "Africa/Nairobi")),
+        agentos_domain=os.getenv("AGENTOS_DOMAIN", ""),
         project_root=PROJECT_ROOT,
         data_dir=DATA_DIR,
         log_dir=LOG_DIR,

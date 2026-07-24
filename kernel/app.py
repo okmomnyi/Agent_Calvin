@@ -1,23 +1,24 @@
 """FastAPI kernel for AgentOS.
 
-Exposes /ws/voice (token-authenticated WebSocket for the laptop voice client),
-/api/command (token-authenticated REST dispatch for the phone shortcut), and /api/health.
-On startup it discovers skills, registers their scheduled jobs with APScheduler
-(Africa/Nairobi tz), and starts the scheduler. The API process is designed to run
-independently — a skill raising never brings the kernel down.
+Exposes /ws/voice (ticket-authenticated WebSocket for the browser dashboard and the laptop
+voice client), /api/command (session-authenticated REST dispatch), /api/auth/* (real login —
+break-glass password, WebAuthn passkeys, recovery codes), and /api/health. On startup it
+discovers skills, registers their scheduled jobs with APScheduler (Africa/Nairobi tz), and
+starts the scheduler. The API process is designed to run independently — a skill raising
+never brings the kernel down.
 """
 
 from __future__ import annotations
 
 import re
-import secrets
 import inspect
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (Depends, FastAPI, HTTPException, Request, Response, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -144,37 +145,336 @@ def _handle_command(text: str, *, use_llm: bool = True, channel: str = "cli"):
     return handler(text, use_llm=use_llm)
 
 
-def _authorize_remote_command(authorization: str | None, x_agent_token: str | None) -> None:
-    """Require the shared agent token for the remotely exposed command endpoint."""
-    expected = get_settings().ws_token
-    if not expected:
-        raise HTTPException(
-            status_code=503,
-            detail="Remote command authentication is not configured.",
-        )
+# ------------------------------------------------------------------ auth (Slice 0a-0e)
+# Replaces AGENT_WS_TOKEN everywhere. The browser dashboard uses the session cookie + WS
+# tickets (0a/0b); the laptop voice client uses a long-lived device credential + the same
+# WS ticket flow (0e) — no code path reads AGENT_WS_TOKEN anymore.
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
 
-    supplied = x_agent_token or ""
-    if authorization:
-        scheme, separator, credential = authorization.partition(" ")
-        if separator and scheme.lower() == "bearer":
-            supplied = credential.strip()
 
-    if not supplied or not secrets.compare_digest(supplied, expected):
+def require_session(request: Request) -> dict[str, Any]:
+    """FastAPI dependency guarding every /api/* route except /api/auth/* and /api/health.
+
+    Reads the httpOnly session cookie, validates it against auth_sessions, and returns the
+    live session row. Deliberately no WWW-Authenticate header on failure — this is a cookie
+    session, not HTTP Basic/Bearer, and offering that scheme back would be misleading.
+    """
+    from core.auth import SESSION_COOKIE_NAME, get_store
+
+    raw = request.cookies.get(SESSION_COOKIE_NAME)
+    session = get_store().validate_session(raw or "")
+    if session is None:
+        raise HTTPException(status_code=401, detail="Not logged in.")
+    return session
+
+
+def _check_lockout(kind: str, request: Request) -> None:
+    """Raises 429 (with Retry-After) if this (kind, ip) is in backoff or lockout (Slice
+    0d). A passive read — never itself recorded as an attempt, so polling while locked out
+    cannot extend the lockout."""
+    from core.auth import get_store
+
+    locked, retry_after = get_store().lockout_status(kind, _client_ip(request))
+    if locked:
         raise HTTPException(
-            status_code=401,
-            detail="Unauthorized.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+            status_code=429, detail="Too many attempts — try again shortly.",
+            headers={"Retry-After": str(max(1, int(retry_after) + 1))})
+
+
+class PasswordLoginRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/auth/password")
+async def auth_password_login(
+    req: PasswordLoginRequest, request: Request, response: Response
+) -> dict[str, Any]:
+    """Break-glass login (Slice 0a). Passkey login (the primary factor) arrives in 0c."""
+    from core.auth import SESSION_COOKIE_NAME, SESSION_MAX_LIFETIME, get_store
+
+    _check_lockout("password", request)
+    store = get_store()
+    ip = _client_ip(request)
+    ok = store.verify_password(req.password)
+    store.record_attempt("password", ok, ip=ip)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Incorrect password.")
+    token = store.create_session(user_agent=request.headers.get("user-agent", ""), ip=ip)
+    response.set_cookie(
+        SESSION_COOKIE_NAME, token, httponly=True, secure=True, samesite="strict",
+        max_age=SESSION_MAX_LIFETIME, path="/",
+    )
+    return {"ok": True}
+
+
+class RecoveryLoginRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+
+
+@app.post("/api/auth/recovery")
+async def auth_recovery_login(
+    req: RecoveryLoginRequest, request: Request, response: Response
+) -> dict[str, Any]:
+    """Single-use recovery-code login (Slice 0d) — the break-glass password's own
+    break-glass, for "I lost my passkey device AND forgot the password" days."""
+    from core.auth import SESSION_COOKIE_NAME, SESSION_MAX_LIFETIME, get_store
+
+    _check_lockout("recovery", request)
+    store = get_store()
+    ip = _client_ip(request)
+    ok = store.verify_recovery_code(req.code)
+    store.record_attempt("recovery", ok, ip=ip)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Invalid or already-used recovery code.")
+    token = store.create_session(user_agent=request.headers.get("user-agent", ""), ip=ip)
+    response.set_cookie(
+        SESSION_COOKIE_NAME, token, httponly=True, secure=True, samesite="strict",
+        max_age=SESSION_MAX_LIFETIME, path="/",
+    )
+    return {
+        "ok": True,
+        "notice": "Logged in with a recovery code — register a fresh passkey soon.",
+        "remaining_recovery_codes": store.unused_recovery_code_count(),
+    }
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request, response: Response) -> dict[str, Any]:
+    from core.auth import SESSION_COOKIE_NAME, get_store
+
+    raw = request.cookies.get(SESSION_COOKIE_NAME)
+    if raw:
+        get_store().revoke_session_by_token(raw)
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ WebAuthn (Slice 0c)
+def _is_localhost(request: Request) -> bool:
+    return _client_ip(request) in ("127.0.0.1", "::1", "localhost")
+
+
+def _webauthn_rp_id() -> str:
+    """The registrable domain — also Caddy's {$AGENTOS_DOMAIN}. "localhost" is the one
+    value browsers treat as a secure context without real TLS, which is what makes local
+    dev/testing of this endpoint possible before a real subdomain exists."""
+    return get_settings().agentos_domain or "localhost"
+
+
+def _webauthn_origin(request: Request) -> str:
+    """Trust the browser's own Origin header over reconstructing one from settings — a
+    mismatch there is exactly what verify_registration/authentication_response checks for,
+    so guessing wrong here would just turn a real security check into a false negative."""
+    origin = request.headers.get("origin")
+    if origin:
+        return origin
+    domain = get_settings().agentos_domain
+    if domain:
+        return f"https://{domain}"
+    return f"http://{_client_ip(request) or 'localhost'}:{request.url.port or 80}"
+
+
+def _require_first_run_or_session(request: Request) -> None:
+    """The bootstrap guard (item 1 of the spec): registering the very FIRST credential
+    when nothing else is configured yet may only happen from localhost / the droplet
+    console — never the public origin, so an attacker can't register their own passkey
+    before Calvin does. Once a password or a passkey already exists, adding another
+    device is an ordinary logged-in action instead."""
+    from core.auth import get_store
+
+    store = get_store()
+    if not store.has_credential() and not store.has_password():
+        if not _is_localhost(request):
+            raise HTTPException(
+                status_code=403,
+                detail="First-time setup must be completed from the droplet console "
+                       "or localhost, not the public origin.")
+        return
+    require_session(request)
+
+
+class RegisterPasskeyOptionsRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=100)
+
+
+@app.post("/api/auth/webauthn/register/options")
+async def webauthn_register_options(
+    req: RegisterPasskeyOptionsRequest, request: Request,
+) -> dict[str, Any]:
+    from webauthn.helpers import options_to_json_dict
+
+    from core.auth import WebAuthnError, get_store
+
+    _require_first_run_or_session(request)
+    try:
+        options = get_store().start_registration(
+            rp_id=_webauthn_rp_id(), user_name=get_settings().my_name)
+    except WebAuthnError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return options_to_json_dict(options)
+
+
+class RegisterPasskeyVerifyRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=100)
+    credential: dict[str, Any]
+
+
+@app.post("/api/auth/webauthn/register/verify")
+async def webauthn_register_verify(
+    req: RegisterPasskeyVerifyRequest, request: Request, response: Response,
+) -> dict[str, Any]:
+    from core.auth import SESSION_COOKIE_NAME, SESSION_MAX_LIFETIME, WebAuthnError, get_store
+
+    _require_first_run_or_session(request)
+    store = get_store()
+    transports = (req.credential.get("response") or {}).get("transports") or []
+    try:
+        store.verify_registration(
+            req.credential, expected_rp_id=_webauthn_rp_id(),
+            expected_origin=_webauthn_origin(request), label=req.label, transports=transports)
+    except WebAuthnError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Registering the FIRST-EVER passkey also logs you in — otherwise the bootstrap flow
+    # would register a credential and then immediately demand a login with it anyway.
+    if not request.cookies.get(SESSION_COOKIE_NAME):
+        token = store.create_session(user_agent=request.headers.get("user-agent", ""),
+                                     ip=_client_ip(request))
+        response.set_cookie(
+            SESSION_COOKIE_NAME, token, httponly=True, secure=True, samesite="strict",
+            max_age=SESSION_MAX_LIFETIME, path="/")
+    return {"ok": True}
+
+
+@app.post("/api/auth/webauthn/login/options")
+async def webauthn_login_options() -> dict[str, Any]:
+    from webauthn.helpers import options_to_json_dict
+
+    from core.auth import WebAuthnError, get_store
+
+    try:
+        options = get_store().start_login(rp_id=_webauthn_rp_id())
+    except WebAuthnError as exc:
+        # "No passkey registered" is not a server error — the caller falls back to the
+        # break-glass password, so this is an ordinary, expected 400.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return options_to_json_dict(options)
+
+
+class LoginPasskeyVerifyRequest(BaseModel):
+    credential: dict[str, Any]
+
+
+@app.post("/api/auth/webauthn/login/verify")
+async def webauthn_login_verify(
+    req: LoginPasskeyVerifyRequest, request: Request, response: Response,
+) -> dict[str, Any]:
+    from webauthn import base64url_to_bytes
+
+    from core.auth import SESSION_COOKIE_NAME, SESSION_MAX_LIFETIME, WebAuthnError, get_store
+
+    _check_lockout("passkey", request)
+    store = get_store()
+    ip = _client_ip(request)
+    raw_id = req.credential.get("rawId") or req.credential.get("id") or ""
+    try:
+        credential_id = base64url_to_bytes(raw_id)
+        token = store.verify_login(
+            req.credential, credential_id, expected_rp_id=_webauthn_rp_id(),
+            expected_origin=_webauthn_origin(request),
+            user_agent=request.headers.get("user-agent", ""), ip=ip)
+    except WebAuthnError as exc:
+        store.record_attempt("passkey", False, ip=ip)
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    store.record_attempt("passkey", True, ip=ip)
+    response.set_cookie(
+        SESSION_COOKIE_NAME, token, httponly=True, secure=True, samesite="strict",
+        max_age=SESSION_MAX_LIFETIME, path="/")
+    return {"ok": True}
+
+
+@app.post("/api/auth/ws-ticket")
+async def auth_ws_ticket(
+    auth_session: dict[str, Any] = Depends(require_session),
+) -> dict[str, Any]:
+    """Mint a single-use, ~15s WS ticket (Slice 0b) — requires a valid session cookie.
+
+    This is the REST half of the fix: auth happens here, over a normal request that CAN
+    carry the cookie; the socket then opens with the ticket instead of anything reusable.
+    """
+    from core.auth import get_store
+
+    ticket = get_store().mint_ws_ticket(auth_session["id"])
+    return {"ticket": ticket}
+
+
+# ------------------------------------------------------------------ approvals + step-up (0d)
+class ApprovalResolveRequest(BaseModel):
+    approve: bool
+    always: bool = False
+    # A fresh WebAuthn assertion (from /api/auth/webauthn/login/options + a browser
+    # navigator.credentials.get(), NOT re-sent from the original login) — required for a
+    # high-tier action when step_up_on_high is on and a passkey is registered.
+    step_up_credential: dict[str, Any] | None = None
+
+
+@app.post("/api/approvals/{action_id}/resolve")
+async def approvals_resolve(
+    action_id: int, req: ApprovalResolveRequest, request: Request,
+    auth_session: dict[str, Any] = Depends(require_session),
+) -> dict[str, Any]:
+    """Dashboard path to ApprovalStore.resolve() — today only Telegram's text-reply parser
+    (`skills/telegram_bot.py`'s `_try_approval_reply`) can resolve a pending_actions row;
+    this is the same call, reached over REST, so the browser has a route to reach it too.
+
+    This is NOT a second approval mechanism (§0 P3's own requirement) — both paths end at
+    the identical `ApprovalStore.resolve()`. For a `high`-tier action, with step_up_on_high
+    on and a passkey registered, this additionally demands a FRESH assertion in the same
+    request before it will call resolve() at all; deny is exempt (§0 P3 already lets a
+    denial through unlearned — refusing something never needs proof of presence). With no
+    passkey registered, step-up is skipped entirely and the ordinary approval goes through,
+    so Calvin can never be locked out of his own gate.
+    """
+    from core.approvals import TIER_HIGH, get_store as get_approval_store
+    from core.auth import WebAuthnError, get_store as get_auth_store
+
+    approvals = get_approval_store()
+    action = approvals.get(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Unknown action id.")
+
+    if (action.tier == TIER_HIGH and req.approve
+            and get_settings().get("auth", "step_up_on_high", default=True)):
+        auth_store = get_auth_store()
+        if auth_store.has_credential():
+            if not req.step_up_credential:
+                raise HTTPException(status_code=401, detail="step_up_required")
+            from webauthn import base64url_to_bytes
+
+            raw_id = (req.step_up_credential.get("rawId")
+                     or req.step_up_credential.get("id") or "")
+            try:
+                credential_id = base64url_to_bytes(raw_id)
+                auth_store.verify_step_up(
+                    req.step_up_credential, credential_id, expected_rp_id=_webauthn_rp_id(),
+                    expected_origin=_webauthn_origin(request))
+            except WebAuthnError as exc:
+                raise HTTPException(
+                    status_code=401, detail=f"step-up failed: {exc}") from exc
+
+    resolved = approvals.resolve(action_id, req.approve, always=req.always)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Unknown action id.")
+    return {"ok": True, "status": resolved.status}
 
 
 @app.post("/api/command", response_model=CommandResponse)
 async def api_command(
     req: CommandRequest,
-    authorization: str | None = Header(default=None),
-    x_agent_token: str | None = Header(default=None),
+    session: dict[str, Any] = Depends(require_session),
 ) -> CommandResponse:
     """Authenticate and route a text command through the intent router and target skill."""
-    _authorize_remote_command(authorization, x_agent_token)
     intent, result = _handle_command(req.text, use_llm=req.use_llm, channel=req.channel)
     text = to_spoken(result.text) if req.spoken else result.text
     _record_turn(req.text, text, req.channel, intent.skill)
@@ -195,11 +495,9 @@ def _record_turn(text: str, reply: str, channel: str, skill: str) -> None:
 
 @app.get("/api/session")
 async def api_session(
-    authorization: str | None = Header(default=None),
-    x_agent_token: str | None = Header(default=None),
+    auth_session: dict[str, Any] = Depends(require_session),
 ) -> dict[str, Any]:
     """The shared session: live skill, last channel, recent turns, pending approvals."""
-    _authorize_remote_command(authorization, x_agent_token)
     from core.session import SessionStore
 
     store = SessionStore()
@@ -280,27 +578,22 @@ def _client_actions(result: Any) -> list[dict[str, str]]:
 
 @app.get("/api/voice")
 async def api_voice(
-    authorization: str | None = Header(default=None),
-    x_agent_token: str | None = Header(default=None),
+    auth_session: dict[str, Any] = Depends(require_session),
 ) -> dict[str, Any]:
     """Return the active pre-built voice + rate for the laptop client to synthesize with.
 
-    Token-authed like every other /api/* route. It was public, which nothing needed: the
+    Session-authed like every other /api/* route. It was public, which nothing needed: the
     client receives voice_id and rate on the /ws/voice reply itself and never calls this.
     """
-    _authorize_remote_command(authorization, x_agent_token)
     return _current_voice()
 
 
 @app.get("/api/health")
-async def api_health(
-    authorization: str | None = Header(default=None),
-    x_agent_token: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """Kernel health. Liveness is public; the detail requires the agent token.
+async def api_health(request: Request) -> dict[str, Any]:
+    """Kernel health. Liveness is public; the detail requires a logged-in session.
 
     Split deliberately. The container HEALTHCHECK and any uptime monitor only need a 200 and
-    ok/degraded, and requiring a token there would mean shipping the token to every probe.
+    ok/degraded, and requiring a session there would mean the probe would have to log in.
     Everything else is a description of the deployment -- which capabilities exist, which
     credentials are configured, how deep the work queue is, what timezone the owner lives in
     -- and that is reconnaissance, not health. It was all served to anyone who asked, on the
@@ -320,7 +613,7 @@ async def api_health(
     }
 
     try:
-        _authorize_remote_command(authorization, x_agent_token)
+        require_session(request)
     except HTTPException:
         return public          # unauthenticated probes get liveness, and nothing else
 
@@ -359,21 +652,39 @@ async def api_health(
 # ------------------------------------------------------------------ WebSocket (voice)
 @app.websocket("/ws/voice")
 async def ws_voice(websocket: WebSocket) -> None:
-    """Token-authed voice channel. Client sends {token, text}; server replies spoken text.
+    """Ticket-authed voice channel (Slice 0b, laptop migrated in 0e).
 
-    Auth: token may be given as ?token= query param or in the first JSON message.
+    `?ticket=<raw>` — a single-use, ~15s credential minted over REST after a real login
+    (POST /api/auth/ws-ticket), which requires a valid session (a browser's cookie, or the
+    laptop voice client's long-lived device credential riding as a Cookie header — see
+    core/auth.py's issue_device_credential). This is the actual fix for "the WS doesn't
+    connect correctly": a browser cannot set an Authorization header on `new WebSocket()`,
+    so any REST bearer scheme is unusable here, and the old approach put a long-lived,
+    reusable AGENT_WS_TOKEN in the URL instead — no code path reads that anymore. The ticket
+    is consumed atomically at handshake time; a second connection attempt with the same raw
+    value fails, and the underlying session is re-checked on every message so a revoked
+    session (browser or device) drops the socket immediately rather than at the next
+    reconnect.
     """
+    from core.auth import get_store
+
     await websocket.accept()
-    settings = get_settings()
-    token = websocket.query_params.get("token", "")
+
+    ticket = websocket.query_params.get("ticket", "")
+    auth_session_id = get_store().consume_ws_ticket(ticket) if ticket else None
+    if auth_session_id is None:
+        await websocket.send_json({"ok": False, "text": "Unauthorized."})
+        await websocket.close(code=4401)
+        return
 
     try:
         while True:
             msg = await websocket.receive_json()
-            token = msg.get("token") or token
-            if (not settings.ws_token or not token
-                    or not secrets.compare_digest(token, settings.ws_token)):
-                await websocket.send_json({"ok": False, "text": "Unauthorized."})
+
+            # Already proved identity at handshake via the ticket; only re-check the
+            # session is still live, so a revoke elsewhere ends this connection too.
+            if get_store().session_by_id(auth_session_id) is None:
+                await websocket.send_json({"ok": False, "text": "Session expired — log in again."})
                 await websocket.close(code=4401)
                 return
 
@@ -409,6 +720,6 @@ async def ws_voice(websocket: WebSocket) -> None:
 # The 4th channel: a browser UI on the same kernel API — no client install anywhere.
 # `html=True` serves frontend/index.html at /dashboard/ and every module/stylesheet under
 # it at its own relative path (e.g. /dashboard/src/ui/boot.js). The page itself is static;
-# every action it takes is token-authed against /api/* exactly like any other client.
+# every action it takes is session-authed against /api/* exactly like any other client.
 # Mounted last so it never shadows an /api/* or /ws/voice route defined above.
 app.mount("/dashboard", StaticFiles(directory=FRONTEND_DIR, html=True), name="dashboard")

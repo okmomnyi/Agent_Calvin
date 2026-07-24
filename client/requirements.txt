@@ -7,7 +7,8 @@ sounddevice>=0.4         # mic capture + playback
 soundfile>=0.12          # decode edge-tts mp3 for playback
 edge-tts>=6.1            # pre-built neural voices ONLY (§0 Principle 9 — no cloning)
 numpy>=1.24
-websockets>=12.0         # authed link to the droplet /ws/voice
+websockets>=12.0         # ticket-authed link to the droplet /ws/voice
+requests>=2.31           # mints the WS ticket over REST (Slice 0e) using the device credential
 python-dotenv>=1.0        # load the project .env for local/window launches
 pystray>=0.19            # tray icon for the desktop window (Phase 24) and HUD (Phase 36)
 # tkinter is stdlib -- no entry needed. agent_window.py is deliberately native, not a

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import types
 from pathlib import Path
 
 import pytest
@@ -66,10 +67,13 @@ def test_to_spoken_truncates_long_text():
     assert out.endswith("…")
 
 
-def test_remote_command_requires_shared_token(monkeypatch):
+def test_remote_command_requires_a_session_cookie(monkeypatch, mem):
+    """Slice 0a: /api/command moved off the shared AGENT_WS_TOKEN onto a real login session.
+    No cookie, or a garbage one, is rejected; logging in via the break-glass password issues
+    a cookie that the same client then rides to a 200 — proving both halves of 0a's own
+    stop-gate ("prove a guarded endpoint rejects without the cookie and accepts with it")."""
     app_module = importlib.import_module("kernel.app")
-    settings = type("Settings", (), {"ws_token": "test-secret"})()
-    monkeypatch.setattr(app_module, "get_settings", lambda: settings)
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
     monkeypatch.setattr(
         app_module.registry,
         "handle_command",
@@ -78,31 +82,491 @@ def test_remote_command_requires_shared_token(monkeypatch):
             CommandResult(text="accepted"),
         ),
     )
-    client = TestClient(app_module.app)
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    # https base_url: the session cookie is Secure, so httpx's cookie jar (correctly)
+    # refuses to send it back over plain http, same as a real browser would.
+    client = TestClient(app_module.app, base_url="https://testserver")
 
     assert client.post("/api/command", json={"text": "hello"}).status_code == 401
-    assert client.post(
-        "/api/command",
-        headers={"Authorization": "Bearer wrong"},
-        json={"text": "hello"},
-    ).status_code == 401
-    response = client.post(
-        "/api/command",
-        headers={"Authorization": "Bearer test-secret"},
-        json={"text": "hello"},
-    )
+    client.cookies.set("agentos_session", "not-a-real-token")
+    assert client.post("/api/command", json={"text": "hello"}).status_code == 401
+    client.cookies.clear()
+
+    login = client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+    assert login.status_code == 200
+    assert "agentos_session" in client.cookies
+
+    response = client.post("/api/command", json={"text": "hello"})
     assert response.status_code == 200
     assert response.json()["text"] == "accepted"
 
 
-def test_remote_command_fails_closed_without_configured_token(monkeypatch):
+def test_password_login_rejects_wrong_password(mem, monkeypatch):
     app_module = importlib.import_module("kernel.app")
-    settings = type("Settings", (), {"ws_token": ""})()
-    monkeypatch.setattr(app_module, "get_settings", lambda: settings)
-    response = TestClient(app_module.app).post(
-        "/api/command", headers={"X-Agent-Token": "anything"}, json={"text": "hello"}
-    )
-    assert response.status_code == 503
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app)
+
+    response = client.post("/api/auth/password", json={"password": "wrong password entirely"})
+    assert response.status_code == 401
+    assert "agentos_session" not in client.cookies
+
+
+def test_session_cookie_is_httponly_secure_samesite_strict(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+    response = client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "httponly" in set_cookie.lower()
+    assert "secure" in set_cookie.lower()
+    assert "samesite=strict" in set_cookie.lower()
+
+
+def test_logout_revokes_the_session(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    monkeypatch.setattr(
+        app_module.registry, "handle_command",
+        lambda text, use_llm=True: (
+            Intent(name="test", skill="chat", action="reply", via="keyword"),
+            CommandResult(text="accepted")))
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+    client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+    assert client.post("/api/command", json={"text": "hi"}).status_code == 200
+    raw_cookie = client.cookies.get("agentos_session")
+
+    logout = client.post("/api/auth/logout")
+    assert logout.status_code == 200
+
+    # Prove the session is REVOKED server-side, not just that the client forgot the cookie:
+    # re-attach the exact same raw value logout deleted and confirm it's still refused.
+    client.cookies.set("agentos_session", raw_cookie)
+    assert client.post("/api/command", json={"text": "hi"}).status_code == 401, \
+        "a revoked session must not keep working even when the raw cookie is replayed"
+
+
+# ================================================================= WS ticket flow (Slice 0b)
+# "This is the bug that started this": a browser cannot set an Authorization header on
+# `new WebSocket()`, so the old static AGENT_WS_TOKEN rode in the URL as a long-lived,
+# reusable value. A ticket is minted over REST (which CAN carry the session cookie), then
+# burned on first use at the WS handshake.
+def _logged_in_client(mem, monkeypatch, app_module):
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    monkeypatch.setattr(
+        app_module.registry, "handle_command",
+        lambda text, use_llm=True: (
+            Intent(name="test", skill="chat", action="reply", via="keyword"),
+            CommandResult(text="accepted")))
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+    client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+    return client
+
+
+def test_ws_ticket_requires_a_session_cookie(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    assert client.post("/api/auth/ws-ticket").status_code == 401
+
+
+def test_ws_handshake_with_no_ticket_is_rejected(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.send_json({"text": "hello"})
+        reply = ws.receive_json()
+        assert reply["ok"] is False
+
+
+def test_ws_handshake_with_a_valid_ticket_is_accepted(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    client = _logged_in_client(mem, monkeypatch, app_module)
+
+    ticket = client.post("/api/auth/ws-ticket").json()["ticket"]
+    with client.websocket_connect(f"/ws/voice?ticket={ticket}") as ws:
+        ws.send_json({"text": "hello"})
+        reply = ws.receive_json()
+        assert reply["ok"] is True
+        assert reply["text"] == "accepted"
+
+
+def test_ws_ticket_is_single_use(mem, monkeypatch):
+    """The other half of the fix: replaying the URL (browser history, a proxy log) must
+    not work a second time."""
+    app_module = importlib.import_module("kernel.app")
+    client = _logged_in_client(mem, monkeypatch, app_module)
+
+    ticket = client.post("/api/auth/ws-ticket").json()["ticket"]
+    with client.websocket_connect(f"/ws/voice?ticket={ticket}") as ws:
+        ws.send_json({"text": "hello"})
+        ws.receive_json()
+
+    with client.websocket_connect(f"/ws/voice?ticket={ticket}") as ws:
+        ws.send_json({"text": "hello again"})
+        reply = ws.receive_json()
+        assert reply["ok"] is False
+
+
+def test_ws_ticket_expires(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    now = [1_000_000.0]
+    store = get_store(mem)
+    store._now = lambda: now[0]
+    monkeypatch.setattr("core.auth.get_store", lambda *a, **k: store)
+    monkeypatch.setattr(
+        app_module.registry, "handle_command",
+        lambda text, use_llm=True: (
+            Intent(name="test", skill="chat", action="reply", via="keyword"),
+            CommandResult(text="accepted")))
+
+    store.set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+    client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+    ticket = client.post("/api/auth/ws-ticket").json()["ticket"]
+
+    now[0] += 20   # past WS_TICKET_TTL (15s)
+    with client.websocket_connect(f"/ws/voice?ticket={ticket}") as ws:
+        ws.send_json({"text": "hello"})
+        reply = ws.receive_json()
+        assert reply["ok"] is False
+
+
+def test_ws_drops_the_connection_if_the_session_is_revoked_mid_stream(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    client = _logged_in_client(mem, monkeypatch, app_module)
+    from core.auth import get_store
+
+    ticket = client.post("/api/auth/ws-ticket").json()["ticket"]
+    raw_cookie = client.cookies.get("agentos_session")
+
+    with client.websocket_connect(f"/ws/voice?ticket={ticket}") as ws:
+        ws.send_json({"text": "hello"})
+        first = ws.receive_json()
+        assert first["ok"] is True
+
+        get_store(mem).revoke_session_by_token(raw_cookie)
+
+        ws.send_json({"text": "still there?"})
+        second = ws.receive_json()
+        assert second["ok"] is False
+
+
+def test_laptop_voice_client_connects_via_a_device_credential_not_a_shared_token(
+    mem, monkeypatch,
+):
+    """Slice 0e: the laptop client (client/voice_client.py) has no browser and so no
+    WebAuthn ceremony — it authenticates with a long-lived, explicitly-issued, revocable
+    device credential instead of the old shared AGENT_WS_TOKEN, riding as a plain Cookie
+    header (nothing browser-specific about a cookie — any HTTP client can set one) to mint
+    the same single-use WS ticket the dashboard uses."""
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    monkeypatch.setattr(
+        app_module.registry, "handle_command",
+        lambda text, use_llm=True: (
+            Intent(name="test", skill="chat", action="reply", via="keyword"),
+            CommandResult(text="accepted")))
+    from core.auth import get_store
+
+    device_token = get_store(mem).issue_device_credential("Test Laptop")
+    client = TestClient(app_module.app, base_url="https://testserver")
+    client.cookies.set("agentos_session", device_token)
+
+    ticket = client.post("/api/auth/ws-ticket").json()["ticket"]
+    with client.websocket_connect(f"/ws/voice?ticket={ticket}") as ws:
+        ws.send_json({"text": "hello"})
+        reply = ws.receive_json()
+        assert reply["ok"] is True
+        assert reply["text"] == "accepted"
+
+
+def test_revoked_device_credential_cannot_mint_a_new_ws_ticket(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    store = get_store(mem)
+    device_token = store.issue_device_credential("Stolen Laptop")
+    store.revoke_session_by_token(device_token)
+
+    client = TestClient(app_module.app, base_url="https://testserver")
+    client.cookies.set("agentos_session", device_token)
+    assert client.post("/api/auth/ws-ticket").status_code == 401
+
+
+# ================================================================= WebAuthn endpoints (Slice 0c)
+# The ceremony logic itself (challenge single-use, sign_count regression) is exercised
+# thoroughly in tests/test_auth.py against injected fake crypto. What matters here is the
+# REST wiring: the bootstrap gate, and that a bad/missing credential fails cleanly (401/400)
+# rather than crashing — a real successful verify needs an actual authenticator + browser,
+# which pytest doesn't have.
+def test_register_options_from_a_non_localhost_origin_is_refused_when_nothing_is_set_up(
+    mem, monkeypatch,
+):
+    """The bootstrap guard: nothing configured yet (no password, no passkey) means only
+    localhost / the droplet console may register the first credential."""
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    monkeypatch.setattr(app_module, "_is_localhost", lambda request: False)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    response = client.post("/api/auth/webauthn/register/options", json={"label": "Laptop"})
+    assert response.status_code == 403
+
+
+def test_register_options_from_localhost_succeeds_when_nothing_is_set_up(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    monkeypatch.setattr(app_module, "_is_localhost", lambda request: True)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    response = client.post("/api/auth/webauthn/register/options", json={"label": "Laptop"})
+    assert response.status_code == 200
+    assert "challenge" in response.json()
+
+
+def test_register_options_once_a_password_exists_requires_a_session(mem, monkeypatch):
+    """Adding a device once something already exists is an ordinary logged-in action, not
+    the bootstrap path — localhost is no longer special, a session is required instead."""
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    monkeypatch.setattr(app_module, "_is_localhost", lambda request: True)  # even from "localhost"
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    assert client.post(
+        "/api/auth/webauthn/register/options", json={"label": "Laptop"}).status_code == 401
+
+    client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+    assert client.post(
+        "/api/auth/webauthn/register/options", json={"label": "Laptop"}).status_code == 200
+
+
+def test_register_verify_from_a_non_localhost_origin_is_refused_when_nothing_is_set_up(
+    mem, monkeypatch,
+):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    monkeypatch.setattr(app_module, "_is_localhost", lambda request: False)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    response = client.post("/api/auth/webauthn/register/verify",
+                           json={"label": "Laptop", "credential": {}})
+    assert response.status_code == 403
+
+
+def test_register_verify_with_a_bad_credential_fails_cleanly_not_a_crash(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    monkeypatch.setattr(app_module, "_is_localhost", lambda request: True)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    # No prior /register/options call, so there is no pending challenge -- this is exactly
+    # the shape of request an attacker replaying an old page would send.
+    response = client.post("/api/auth/webauthn/register/verify",
+                           json={"label": "Laptop", "credential": {}})
+    assert response.status_code == 400
+
+
+def test_login_options_with_no_passkey_registered_returns_400_not_a_dead_end(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    response = client.post("/api/auth/webauthn/login/options")
+    assert response.status_code == 400   # caller falls back to the break-glass password
+
+
+def test_login_verify_with_a_bad_credential_is_401_not_a_crash(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    response = client.post("/api/auth/webauthn/login/verify", json={"credential": {}})
+    assert response.status_code == 401
+
+
+# ================================================================= recovery + lockout (0d)
+def test_recovery_login_succeeds_and_sets_a_session_cookie(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    code = get_store(mem).generate_recovery_codes(1)[0]
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    response = client.post("/api/auth/recovery", json={"code": code})
+    assert response.status_code == 200
+    assert "agentos_session" in client.cookies
+    assert "register a fresh passkey" in response.json()["notice"].lower()
+
+
+def test_recovery_code_is_single_use_over_rest_too(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    code = get_store(mem).generate_recovery_codes(1)[0]
+    client = TestClient(app_module.app, base_url="https://testserver")
+    client.post("/api/auth/recovery", json={"code": code})
+    client.cookies.clear()
+
+    second = client.post("/api/auth/recovery", json={"code": code})
+    assert second.status_code == 401
+
+
+def test_password_login_locks_out_after_repeated_failures(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    for _ in range(5):   # password's lockout threshold
+        client.post("/api/auth/password", json={"password": "wrong"})
+
+    # Even the CORRECT password is refused while locked out.
+    response = client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+    assert response.status_code == 429
+    assert "Retry-After" in response.headers
+
+
+# ================================================================= high-tier step-up (0d)
+def _logged_in_client_with_password(mem, monkeypatch, app_module):
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    # /api/approvals/*/resolve reads core.approvals.ApprovalStore, which resolves its own
+    # memory the same lazy way core.auth does -- both need pointing at the test schema.
+    monkeypatch.setattr("core.approvals.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+    client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+    return client
+
+
+def test_low_tier_approval_resolves_with_no_step_up_required(mem, monkeypatch):
+    from core.approvals import TIER_LOW, get_store as get_approval_store
+
+    app_module = importlib.import_module("kernel.app")
+    client = _logged_in_client_with_password(mem, monkeypatch, app_module)
+    action_id, _ = get_approval_store(mem).propose(
+        "email_trash", "Trash a newsletter", tier=TIER_LOW, permission_key="email_trash:x")
+
+    response = client.post(f"/api/approvals/{action_id}/resolve", json={"approve": True})
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+
+
+def test_high_tier_approval_with_no_passkey_registered_falls_back_to_ordinary_approval(
+    mem, monkeypatch,
+):
+    """"falls back to the normal approval confirmation if no passkey is available so he is
+    never locked out of his own gate" -- the brief's own words."""
+    from core.approvals import TIER_HIGH, get_store as get_approval_store
+
+    app_module = importlib.import_module("kernel.app")
+    client = _logged_in_client_with_password(mem, monkeypatch, app_module)
+    action_id, _ = get_approval_store(mem).propose(
+        "job_apply", "Apply to Acme", tier=TIER_HIGH, permission_key="job_apply:acme")
+
+    response = client.post(f"/api/approvals/{action_id}/resolve", json={"approve": True})
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+
+
+def test_high_tier_approval_with_a_passkey_registered_demands_step_up(mem, monkeypatch):
+    from core.approvals import TIER_HIGH, get_store as get_approval_store
+    from core.auth import get_store as get_auth_store
+
+    app_module = importlib.import_module("kernel.app")
+    client = _logged_in_client_with_password(mem, monkeypatch, app_module)
+
+    def _fake_options(**_):
+        return types.SimpleNamespace(challenge=b"chal")
+
+    get_auth_store(mem).start_registration(
+        rp_id="localhost", user_name="calvin", generate_fn=_fake_options)
+    get_auth_store(mem).verify_registration(
+        {}, expected_rp_id="localhost", expected_origin="https://localhost", label="Laptop",
+        verify_fn=lambda **_: types.SimpleNamespace(
+            credential_id=b"cred-1", credential_public_key=b"pk", sign_count=0))
+
+    action_id, _ = get_approval_store(mem).propose(
+        "job_apply", "Apply to Acme", tier=TIER_HIGH, permission_key="job_apply:acme")
+
+    # No step_up_credential supplied at all -> refused before resolve() ever runs.
+    response = client.post(f"/api/approvals/{action_id}/resolve", json={"approve": True})
+    assert response.status_code == 401
+    assert get_approval_store(mem).get(action_id).status == "pending", \
+        "a high-tier action must stay pending, not silently approved, when step-up fails"
+
+
+def test_high_tier_denial_never_requires_step_up(mem, monkeypatch):
+    """Refusing something never needs proof of presence -- only an approval does."""
+    from core.approvals import TIER_HIGH, get_store as get_approval_store
+    from core.auth import get_store as get_auth_store
+
+    app_module = importlib.import_module("kernel.app")
+    client = _logged_in_client_with_password(mem, monkeypatch, app_module)
+
+    def _fake_options(**_):
+        return types.SimpleNamespace(challenge=b"chal")
+
+    get_auth_store(mem).start_registration(
+        rp_id="localhost", user_name="calvin", generate_fn=_fake_options)
+    get_auth_store(mem).verify_registration(
+        {}, expected_rp_id="localhost", expected_origin="https://localhost", label="Laptop",
+        verify_fn=lambda **_: types.SimpleNamespace(
+            credential_id=b"cred-1", credential_public_key=b"pk", sign_count=0))
+
+    action_id, _ = get_approval_store(mem).propose(
+        "job_apply", "Apply to Acme", tier=TIER_HIGH, permission_key="job_apply:acme")
+
+    response = client.post(f"/api/approvals/{action_id}/resolve", json={"approve": False})
+    assert response.status_code == 200
+    assert response.json()["status"] == "denied"
+
+
+def test_resolving_an_unknown_action_id_is_404(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    client = _logged_in_client_with_password(mem, monkeypatch, app_module)
+
+    response = client.post("/api/approvals/999999/resolve", json={"approve": True})
+    assert response.status_code == 404
+
+
+def test_approvals_resolve_requires_a_session(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    response = client.post("/api/approvals/1/resolve", json={"approve": True})
+    assert response.status_code == 401
 
 
 def test_health_dsn_masker_preserves_user_and_hides_password():
@@ -134,21 +598,26 @@ def test_dashboard_never_assigns_innerhtml_from_server_derived_data():
     assert not offenders, f"innerHTML assignment found in: {offenders}"
 
 
-def test_health_gives_liveness_publicly_but_detail_only_to_the_token(monkeypatch):
+def test_health_gives_liveness_publicly_but_detail_only_to_a_session(mem, monkeypatch):
     """An uptime probe needs 200 + ok/degraded. It does not need the deployment's inventory.
 
     /api/health used to serve the full skill list, timezone, queue depth and which
     credentials were configured to anyone who asked -- on the same droplet whose weekly
     report-only recon scan exists to find exactly this kind of exposure (§0 P12). The split
-    keeps the container HEALTHCHECK working without a token, because requiring one there
-    would mean shipping the secret to every probe.
+    keeps the container HEALTHCHECK working without logging in, because requiring that there
+    would mean shipping a credential to every probe. Migrated off AGENT_WS_TOKEN in 0e —
+    the detail branch now requires a real session, same as every other guarded /api/* route.
     """
     app_module = importlib.import_module("kernel.app")
     settings = type("Settings", (), {
-        "ws_token": "test-secret", "nvidia_api_key": "k", "telegram_bot_token": "t",
+        "nvidia_api_key": "k", "telegram_bot_token": "t",
         "telegram_chat_id": "c", "tz": "Africa/Nairobi"})()
     monkeypatch.setattr(app_module, "get_settings", lambda: settings)
-    client = TestClient(app_module.app)
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
 
     public = client.get("/api/health")
     assert public.status_code == 200                  # the HEALTHCHECK must still pass
@@ -157,19 +626,23 @@ def test_health_gives_liveness_publicly_but_detail_only_to_the_token(monkeypatch
     for leaked in ("skills", "timezone", "queue", "gmail_token", "nim_key_present"):
         assert leaked not in body, f"/api/health disclosed {leaked} to an unauthenticated caller"
 
-    detailed = client.get("/api/health", headers={"Authorization": "Bearer test-secret"})
+    client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+    detailed = client.get("/api/health")
     assert detailed.status_code == 200
     assert "skills" in detailed.json() and "queue" in detailed.json()
 
 
-def test_the_voice_endpoint_is_not_public(monkeypatch):
+def test_the_voice_endpoint_is_not_public(mem, monkeypatch):
     app_module = importlib.import_module("kernel.app")
-    settings = type("Settings", (), {"ws_token": "test-secret"})()
-    monkeypatch.setattr(app_module, "get_settings", lambda: settings)
-    client = TestClient(app_module.app)
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
 
     assert client.get("/api/voice").status_code == 401
-    assert client.get("/api/voice", headers={"Authorization": "Bearer test-secret"}).status_code == 200
+    client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+    assert client.get("/api/voice").status_code == 200
 
 
 def test_config_has_no_key_that_nothing_reads():

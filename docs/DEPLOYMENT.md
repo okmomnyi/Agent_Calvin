@@ -25,7 +25,8 @@ handled for you — skip to §0.
 - [5. Gmail authorization](#5-gmail-authorization)
 - [6. Telegram bot](#6-telegram-bot)
 - [7. PM2 processes](#7-pm2-processes) *(bare-metal only)*
-- [8. Caddy (TLS reverse proxy)](#8-caddy-tls-reverse-proxy) *(bare-metal only)*
+- [8. Caddy (TLS reverse proxy)](#8-caddy-tls-reverse-proxy) — needed for real login, not just bare-metal
+- [8a. Real login (replaces AGENT_WS_TOKEN)](#8a-real-login-replaces-agent_ws_token)
 - [9. Laptop voice client](#9-laptop-voice-client)
 - [10. Phone access](#10-phone-access)
 - [11. Seeding Calvin's data](#11-seeding-calvins-data)
@@ -44,10 +45,11 @@ Four files: [`Dockerfile`](../Dockerfile), [`docker-compose.yml`](../docker-comp
 
 ```bash
 git clone <your-repo> AgentOS && cd AgentOS
-cp .env.example .env && nano .env         # NVIDIA_API_KEY + AGENT_WS_TOKEN at minimum (§2)
+cp .env.example .env && nano .env         # NVIDIA_API_KEY at minimum (§2)
 docker compose up -d --build              # postgres + api + worker + bot
 docker compose ps                         # api should report (healthy) within ~30s
 curl -s localhost:8000/api/health | python -m json.tool
+docker compose exec api python manage.py login set-password   # real login (§8a)
 ```
 
 That's the whole install. No venv, no apt, no PM2 — and the image is the same on your laptop
@@ -228,7 +230,7 @@ MY_NAME=Calvin
 MY_EMAIL=you@example.com
 TELEGRAM_BOT_TOKEN=...            # from @BotFather
 TELEGRAM_CHAT_ID=...              # your numeric chat id (get it from @userinfobot)
-AGENT_WS_TOKEN=<long-random>      # shared secret for /api/command and the voice WebSocket
+AGENTOS_DOMAIN=                   # subdomain Caddy terminates TLS for; also WebAuthn's RP ID (§8/§8a)
 # optional per-task keys (see §3) — blank = fall back to NVIDIA_API_KEY
 NVIDIA_API_KEY_FAST=
 NVIDIA_API_KEY_WRITE=
@@ -430,11 +432,27 @@ Adjust the venv path in `ecosystem.config.js` (`./.venv/bin/python`) if yours di
 
 ## 8. Caddy (TLS reverse proxy)
 
-To expose the voice WebSocket (`/ws/voice`) and `/api/*` over HTTPS/WSS, put Caddy in front:
+To expose the voice WebSocket (`/ws/voice`) and `/api/*` over HTTPS/WSS, put Caddy in front.
+This is also a **hard prerequisite for real login (§8a)**: WebAuthn refuses to run outside a
+secure context, and the RP ID it binds to has to be a real, resolvable domain.
+
+**DNS first.** Point a subdomain — not your root domain if that's already serving something
+else — at the droplet's IP with an `A` record, proxy/orange-cloud **off** (DNS-only), so
+Caddy's own ACME challenge can complete directly: `jarvis.<yourdomain>` → `<droplet IP>`.
+
+**Docker path** (the `tls` compose profile, [`Caddyfile`](../Caddyfile) already generic):
+
+```bash
+echo "AGENTOS_DOMAIN=jarvis.<yourdomain>" >> .env
+docker compose --profile tls up -d
+curl -s https://jarvis.<yourdomain>/api/health | python -m json.tool
+```
+
+**Bare-metal path:**
 
 ```
 # /etc/caddy/Caddyfile
-agent.example.com {
+jarvis.yourdomain.com {
     reverse_proxy localhost:8000
 }
 ```
@@ -443,8 +461,49 @@ agent.example.com {
 apt install -y caddy && systemctl reload caddy
 ```
 
-Caddy auto-provisions TLS. Point your Cloudflare DNS `A`/`AAAA` record at the droplet. The
-laptop client then uses `AGENT_WS_URL=wss://agent.example.com/ws/voice`.
+Either way, Caddy auto-provisions and renews the certificate once DNS resolves — the first
+request after `docker compose --profile tls up -d` may 502 for a few seconds while the ACME
+challenge completes.
+
+---
+
+## 8a. Real login (replaces AGENT_WS_TOKEN)
+
+Built in slices 0a–0e — see `core/auth.py`'s module docstring for the full design. Passkeys
+(WebAuthn) are the primary factor, gated by the device's own biometric/PIN; a break-glass
+password and printed recovery codes are the fallback; the laptop voice client and any phone
+shortcut authenticate with an explicitly-issued, revocable device credential instead (no
+browser there, so no WebAuthn ceremony is possible).
+
+**First-run bootstrap** — from the droplet console or `localhost` only, never the public
+origin (so a public attacker can't register the first passkey before you do):
+
+```bash
+docker compose exec api python manage.py login set-password      # the fallback factor
+# then, in a browser AT the droplet (SSH -L 8000:localhost:8000, or directly on it):
+#   http://127.0.0.1:8000/dashboard → "Passkey" → "+ Register this device"
+```
+
+**Once Caddy + DNS are live**, register a passkey from anywhere at
+`https://jarvis.<yourdomain>/dashboard` (password or an existing passkey logs you in first;
+registering an *additional* device no longer needs to be localhost-only).
+
+**Recovery codes** (print once, store offline):
+
+```bash
+docker compose exec api python manage.py login recovery-codes
+```
+
+**Device credential** for the laptop client or a phone shortcut:
+
+```bash
+docker compose exec api python manage.py login issue-device-token --label "Laptop"
+# paste the printed RAW token into the LAPTOP's own .env as AGENT_DEVICE_TOKEN — never the droplet's
+```
+
+`auth.step_up_on_high` in `config.yaml` (default on) additionally demands a fresh passkey
+touch in front of any `high`-tier approval once a passkey is registered — falls back to the
+ordinary approval confirmation if none is, so this can never lock you out of your own gate.
 
 ---
 
@@ -456,15 +515,15 @@ Runs on Calvin's laptop, not the droplet. Full guide: [`client/README.md`](../cl
 cd AgentOS
 python -m venv .venv && source .venv/bin/activate   # (or Windows equivalent)
 pip install -r client/requirements.txt
-export AGENT_WS_URL="wss://agent.example.com/ws/voice"
-export AGENT_WS_TOKEN="<same AGENT_WS_TOKEN as the droplet>"
+export AGENT_WS_URL="wss://jarvis.<yourdomain>/ws/voice"
+export AGENT_DEVICE_TOKEN="<from `manage.py login issue-device-token` — §8a>"
 python client/voice_client.py          # wake-word mode ("Hey Agent, …")
 python client/voice_client.py --ptt    # push-to-talk (noisy rooms)
 ```
 
 Autostart on boot: files in `client/autostart/` (systemd `.service`, launchd `.plist`, Windows
-`.bat`) — edit paths + token, then enable. **Only pre-built edge-tts voices are used; there is
-no voice-cloning path.**
+`.bat`) — edit paths + the device token, then enable. **Only pre-built edge-tts voices are
+used; there is no voice-cloning path.**
 
 ---
 
@@ -476,8 +535,8 @@ tkinter tray window above. They're independent entry points; run whichever one y
 
 ```bash
 pip install -r client/requirements.txt   # adds pywebview, pynput, screeninfo to the Phase 7 set
-export AGENT_WS_URL="wss://agent.example.com/ws/voice"
-export AGENT_WS_TOKEN="<same AGENT_WS_TOKEN as the droplet>"
+export AGENT_WS_URL="wss://jarvis.<yourdomain>/ws/voice"
+export AGENT_DEVICE_TOKEN="<from `manage.py login issue-device-token` — §8a>"
 python client/hud_window.py --tray                # start hidden, tray icon is the way in
 python client/hud_window.py --compact             # start as the small corner ring
 ```
@@ -507,9 +566,10 @@ No app to install — two paths reuse the same backend:
 1. **Telegram voice notes** — send a voice note to the bot; it's transcribed on the droplet
    (faster-whisper) and routed through the same intent engine, replying as text. Most reliable.
 2. **Push-to-talk shortcut** — an iOS Shortcut / Android tap that POSTs to
-   `https://agent.example.com/api/command` with `{"text": "<words>"}` and the HTTP
-   header `Authorization: Bearer <AGENT_WS_TOKEN>`. Requests without the shared token fail
-   closed; never put the token in the URL.
+   `https://jarvis.<yourdomain>/api/command` with `{"text": "<words>"}` and the HTTP header
+   `Cookie: agentos_session=<device token>`, using its own device credential
+   (`manage.py login issue-device-token --label "iPhone Shortcut"` — §8a). Requests without
+   a valid session fail closed; never put the token in the URL.
 
 ---
 

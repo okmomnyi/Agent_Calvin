@@ -138,17 +138,27 @@ images would let their dependencies drift apart, which is why they share one.
 3. registers each skill's scheduled jobs with **APScheduler** (`Africa/Nairobi` tz),
 4. starts the scheduler.
 
-Endpoints:
-- `POST /api/command` — authenticated with `Authorization: Bearer <AGENT_WS_TOKEN>`;
-  `{text, spoken?, channel?}` → routes through the intent engine → skill → reply, and records
-  the turn on Calvin's session. Used by the phone push-to-talk shortcut and the dashboard. The
-  CLI dispatches locally and does not need this token.
-- `WS /ws/voice` — token-authed voice channel. The reply includes the current `voice_id`+`rate`
-  so the laptop client speaks with the selected pre-built voice.
-- `GET /api/health` — scheduler / DB / NIM-key / Gmail-token / skills snapshot.
+Endpoints (real login, `core/auth.py`, Slices 0a–0e — replaces the old shared
+`AGENT_WS_TOKEN`; no code path reads that variable anymore):
+- `POST /api/command` — guarded by `require_session` (an httpOnly `Secure` `SameSite=Strict`
+  session cookie); `{text, spoken?, channel?}` → routes through the intent engine → skill →
+  reply, and records the turn on Calvin's session. Used by the dashboard and any headless
+  client (laptop voice client, a phone Shortcut) riding a device credential as that same
+  cookie. The CLI dispatches locally and needs no session at all.
+- `WS /ws/voice` — ticket-authed voice channel: `POST /api/auth/ws-ticket` (session-gated)
+  mints a single-use ~15s ticket, since a browser cannot set an `Authorization` header on
+  `new WebSocket()`. The reply includes the current `voice_id`+`rate` so the laptop client
+  speaks with the selected pre-built voice.
+- `GET /api/health` — scheduler / DB / NIM-key / Gmail-token / skills snapshot; liveness is
+  public, the detail requires a session.
 - `GET /api/voice` — the active pre-built voice + rate.
-- `GET /api/session` — token-authed: the current session, recent turns, and pending approvals.
-- `GET /dashboard` — the browser channel (vanilla JS; token kept in `localStorage`).
+- `GET /api/session` — session-gated: the current session, recent turns, and pending approvals.
+- `POST /api/auth/{password,webauthn/*,recovery}` — login; sets the session cookie.
+- `POST /api/approvals/{id}/resolve` — the dashboard's path to `ApprovalStore.resolve()`
+  (previously Telegram-only); demands a fresh passkey assertion in front of a `high`-tier
+  approval when one is registered (`auth.step_up_on_high`).
+- `GET /dashboard` — the browser channel (vanilla JS; no token or password ever touches
+  `localStorage` or a JS variable — the session lives entirely in the httpOnly cookie).
 
 **`kernel/registry.py`** — the seam that makes Principle 6 true:
 - `discover()` imports every module in `skills/` and registers any `SKILL` instance (or

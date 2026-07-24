@@ -2,6 +2,15 @@
 # Principle 2 (§0): model routing, never hardcoding. Every LLM call declares a task
 # class and the router maps class -> model here. Edit models freely; no code change needed.
 
+# Real login (Slices 0a-0e; replaces AGENT_WS_TOKEN).
+auth:
+  # Require a FRESH passkey assertion (a touch/glance) in front of any high-tier approval,
+  # on top of the approval itself (§0 P3 — login is not blanket authorization). Only takes
+  # effect once a passkey is actually registered; with none registered, high-tier approval
+  # falls back to the ordinary confirmation so this can never lock Calvin out of his own
+  # gate. See core/approvals.py's TIER_HIGH and kernel/app.py's /api/approvals/*/resolve.
+  step_up_on_high: true
+
 llm:
   base_url: "https://integrate.api.nvidia.com/v1"   # default NIM endpoint
   default_api_key_env: NVIDIA_API_KEY               # default key env var (fallback for every task)
