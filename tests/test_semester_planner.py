@@ -3,6 +3,8 @@ the unified briefing (sections + top-3), week plan, and cram (surge + MUST mock 
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 from unittest.mock import MagicMock
@@ -124,6 +126,203 @@ def test_briefing_top3_heuristic_without_llm(mem):
     skill = _skill(mem, _DeadLLM())
     res = skill.briefing(notify=False)
     assert "Exam" in res.text   # heuristic top-3 still lists the nearest deadline
+
+
+# ------------------------------------------------------------------ events (#21 regression)
+# Report: the briefing's "📅 Events" line never changed day to day. Root cause: the query was
+# "ORDER BY id DESC LIMIT 3" with no date filter at all -- once the 3 most-recently-marked
+# events had all already happened, those same 3 stale titles kept showing forever.
+def _add_event(mem, ext, title, date, *, status="interested"):
+    mem.upsert_event("test", ext, title=title, fmt="online", date=date)
+    row = mem.event_by_ref("test", ext)
+    mem.set_event_status(row["id"], status)
+    return row["id"]
+
+
+def test_briefing_events_drop_off_once_they_have_passed(mem):
+    from core.time_context import local_now
+
+    today_iso = local_now(NOW).strftime("%Y-%m-%d")
+    _add_event(mem, "past", "Old CTF", "2020-01-01")          # long over
+    upcoming_id = _add_event(mem, "soon", "Cloud Meetup", today_iso)
+
+    skill = _skill(mem)
+    events = skill._upcoming_interested_events(NOW)
+
+    assert [e["title"] for e in events] == ["Cloud Meetup"]
+    assert upcoming_id  # sanity: the row really was created
+
+
+def test_briefing_events_are_soonest_first(mem):
+    _add_event(mem, "later", "DevOps Con", "2099-06-01")
+    _add_event(mem, "sooner", "AWS Community Day", "2099-01-01")
+
+    skill = _skill(mem)
+    events = skill._upcoming_interested_events(NOW)
+
+    assert [e["title"] for e in events] == ["AWS Community Day", "DevOps Con"]
+
+
+def test_briefing_events_section_reflects_the_filtered_list(mem):
+    _add_event(mem, "past", "Old CTF", "2020-01-01")
+    _add_event(mem, "soon", "Cloud Meetup", "2099-01-01")
+
+    skill = _skill(mem)
+    res = skill.briefing(notify=False)
+
+    assert "Cloud Meetup" in res.text
+    assert "Old CTF" not in res.text
+
+
+def test_briefing_events_with_no_parseable_date_still_show_but_sort_last(mem):
+    _add_event(mem, "tba", "Mystery Hackathon", "")
+    _add_event(mem, "dated", "AWS Community Day", "2099-01-01")
+
+    skill = _skill(mem)
+    events = skill._upcoming_interested_events(NOW)
+
+    assert [e["title"] for e in events] == ["AWS Community Day", "Mystery Hackathon"]
+
+
+def test_briefing_events_caps_at_three_soonest(mem):
+    for i in range(5):
+        _add_event(mem, f"ev{i}", f"Event {i}", f"2099-0{i + 1}-01")
+
+    skill = _skill(mem)
+    events = skill._upcoming_interested_events(NOW)
+
+    assert [e["title"] for e in events] == ["Event 0", "Event 1", "Event 2"]
+
+
+# ------------------------------------------------------------------ overdue sign bug (regression)
+# The Telegram log showed a deadline OVERDUE by 2.5d reported by the Top-3 line as "due in 3
+# days" -- days_left (correctly signed, negative once overdue) was interpolated raw into
+# "in {dl:.0f}d" and handed to the LLM, which smoothed the confusing "-2d" into confident,
+# wrong prose. Fixed by pre-formatting through relative_due() before it ever reaches the LLM
+# or the no-LLM fallback, so there's no signed number left for either to misread.
+def test_top3_llm_payload_never_carries_a_raw_signed_day_count(mem):
+    class _RecordingLLM(_PlannerLLM):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.last_messages = None
+
+        def chat(self, task, messages, **kw):
+            self.last_messages = messages
+            return super().chat(task, messages, **kw)
+
+    llm = _RecordingLLM()
+    mem.add_deadline("OmniCTF 2026 Quals", NOW - 2.5 * 86400, unit="general", weight=1.0)
+    skill = _skill(mem, llm)
+    skill.briefing(notify=False)
+
+    payload = json.loads(llm.last_messages[-1]["content"])
+    entry = next(e for e in payload["top_deadlines"] if "OmniCTF" in e)
+    assert "OVERDUE" in entry, f"overdue deadline lost its status in the LLM payload: {entry!r}"
+    assert not re.search(r"\bin -?\d+d\b", entry), \
+        f"a raw signed day count reached the LLM payload: {entry!r}"
+
+
+def test_top3_fallback_reports_overdue_not_due_in(mem):
+    class _DeadLLM(_PlannerLLM):
+        def chat(self, task, messages, **kw):
+            from core.llm import LLMError
+            raise LLMError("down")
+
+    mem.add_deadline("OmniCTF 2026 Quals", NOW - 2.5 * 86400, unit="general", weight=1.0)
+    skill = _skill(mem, _DeadLLM())
+    res = skill.briefing(notify=False)
+    assert "OVERDUE" in res.text
+    assert "due in" not in res.text.lower()
+
+
+# ------------------------------------------------------------------ stale deadlines (regression, #13)
+# Telegram log: the same 5 overdue deadlines appeared in all four briefings, counters
+# climbing, including one titled "DownUnderCTF 2026 - CANCELLED" -- a cancelled event was
+# still occupying a "next 7 days" slot, and nothing ever retired an overdue deadline the way
+# job_hunter retires stale jobs.
+def test_a_cancelled_titled_deadline_is_auto_retired(mem):
+    mem.add_deadline("DownUnderCTF 2026 - CANCELLED", NOW - 5 * 86400, unit="general", weight=1.0)
+    skill = _skill(mem)
+    skill._retire_stale_deadlines()
+    assert skill._ranked_deadlines(7) == []
+    row = mem.execute("SELECT status FROM deadlines WHERE title=%s",
+                      ("DownUnderCTF 2026 - CANCELLED",)).fetchone()
+    assert row["status"] == "cancelled"
+
+
+def test_a_deadline_overdue_past_the_staleness_window_is_auto_retired(mem):
+    mem.add_deadline("Old assignment", NOW - 10 * 86400, unit="CS301", weight=1.0)
+    skill = _skill(mem)
+    skill._retire_stale_deadlines()
+    assert skill._ranked_deadlines(7) == []
+    row = mem.execute("SELECT status FROM deadlines WHERE title='Old assignment'").fetchone()
+    assert row["status"] == "expired"
+
+
+def test_a_recently_overdue_deadline_is_not_retired_yet(mem):
+    """Still worth seeing -- only STALE overdue (>3 days) auto-retires."""
+    mem.add_deadline("Just missed it", NOW - 1 * 86400, unit="CS301", weight=1.0)
+    skill = _skill(mem)
+    skill._retire_stale_deadlines()
+    assert len(skill._ranked_deadlines(7)) == 1
+
+
+def test_briefing_caps_overdue_display_and_still_shows_upcoming(mem):
+    for i in range(4):
+        mem.add_deadline(f"Overdue {i}", NOW - (1 + i * 0.1) * 86400, unit="CS301", weight=1.0)
+    mem.add_deadline("Upcoming CAT", NOW + 2 * 86400, unit="CS305", weight=3.0)
+    skill = _skill(mem)
+    res = skill.briefing(notify=False)
+    assert "more overdue" in res.text.lower()
+    assert "Upcoming CAT" in res.text
+    assert "⚠️ Overdue" in res.text and "🗓 Deadlines" in res.text
+
+
+# ------------------------------------------------------------------ week planner (regression, #23)
+# Telegram log: the same four generic blocks repeated across all seven days, even on days
+# with real classes -- plan() only ever told the model which unit CODES exist
+# (timetable.unit_names().keys()), never when they actually happen.
+def test_weekly_schedule_summary_includes_day_and_time(tmp_path, monkeypatch):
+    import yaml
+
+    data = {"weekly": {"monday": [{"start": "08:00", "end": "10:00", "title": "Data Structures",
+                                   "unit": "CS301"}],
+                       "wednesday": [{"start": "14:00", "end": "16:00", "unit": "CS310"}]},
+           "units": {"CS301": "Data Structures & Algorithms", "CS310": "Systems Analysis"}}
+    p = tmp_path / "tt.yaml"
+    p.write_text(yaml.safe_dump(data), encoding="utf-8")
+    monkeypatch.setattr("skills.semester_planner.timetable._path", lambda: p)
+
+    skill = SemesterPlannerSkill(memory=None)
+    lines = skill._weekly_schedule_summary()
+    assert any("Monday 08:00-10:00: Data Structures" in ln for ln in lines)
+    assert any("Wednesday 14:00-16:00: Systems Analysis" in ln for ln in lines)  # falls back to unit name
+
+
+def test_plan_sends_the_real_weekly_schedule_to_the_model(mem, tmp_path, monkeypatch):
+    import yaml
+
+    data = {"weekly": {"tuesday": [{"start": "10:00", "end": "12:00", "title": "Automata Theory",
+                                    "unit": "CS305"}]}, "units": {"CS305": "Automata Theory"}}
+    p = tmp_path / "tt.yaml"
+    p.write_text(yaml.safe_dump(data), encoding="utf-8")
+    monkeypatch.setattr("skills.semester_planner.timetable._path", lambda: p)
+
+    class _RecordingLLM(_PlannerLLM):
+        def __init__(self):
+            super().__init__()
+            self.last_messages = None
+
+        def chat(self, task, messages, **kw):
+            self.last_messages = messages
+            return super().chat(task, messages, **kw)
+
+    llm = _RecordingLLM()
+    skill = _skill(mem, llm)
+    skill.plan(notify=False)
+
+    payload = json.loads(llm.last_messages[-1]["content"])
+    assert any("Tuesday" in c and "Automata Theory" in c for c in payload["weekly_classes"])
 
 
 def test_briefing_uses_actual_local_time_not_hardcoded_morning(mem):

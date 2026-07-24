@@ -37,6 +37,7 @@ INTENTS: dict[str, tuple[str, str]] = {
     "prep_pack":       ("interview_prep", "prep"),
     "mock_interview":  ("interview_prep", "mock"),
     "check_email":     ("email_agent", "check"),
+    "email_search":    ("email_agent", "search"),
     "compose_email":   ("email_agent", "compose"),
     "summarize_inbox": ("email_agent", "digest"),
     "trash_email":     ("email_agent", "trash"),
@@ -164,14 +165,30 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     # "remove X from my playlist" routed to EMAIL TRASH before this existed.
     ("music_pl_remove", re.compile(
         r"\b(?:remove|delete|drop|take)\s+(?P<t>.+?)\s+"
-        r"(?:from|out\s+of|off)\s+(?:the\s+|my\s+|that\s+)?(?:\w+\s+)?playlist\b",
+        r"(?:from|out\s+of|off)\s+(?:the\s+|my\s+|that\s+)?(?:\w+\s+)?playlists?\b",
         re.I), "track"),
     ("music_pl_remove", re.compile(
-        r"\bremove\s+from\s+(?:the\s+|my\s+)?playlist\b[:,]?\s*(?P<t>.*)", re.I),
+        r"\bremove\s+from\s+(?:the\s+|my\s+)?playlists?\b[:,]?\s*(?P<t>.*)", re.I),
         "track"),
+    # Two word orders, both seen in practice: "create a playlist FOR late night coding" and
+    # "create a late night coding PLAYLIST". `playlist\b` (singular-only) also silently missed
+    # "playlists" — a plural that reads perfectly naturally ("create me a ... playlists") --
+    # since \b requires a boundary immediately after "playlist", which the trailing "s" denies.
+    # Both patterns now accept "playlist" or "playlists".
     ("music_playlist", re.compile(
         r"\b(?:create|make|build|generate|put\s+together)\s+(?:me\s+)?(?:a|an|the)?\s*"
-        r"playlist\b(?:\s+(?:for|about|of|called|named)\s+)?(?P<t>.*)", re.I), "theme"),
+        r"playlists?\b(?:\s+(?:for|about|of|called|named)\s+)?(?P<t>.*)", re.I), "theme"),
+    ("music_playlist", re.compile(
+        r"\b(?:create|make|build|generate|put\s+together)\s+(?:me\s+)?(?:a|an|the)?\s*"
+        r"(?P<t>.+?)\s+playlists?\b", re.I), "theme"),
+    # Read-only listing, ahead of trash_email's catch-all verbs so "list/show/find emails
+    # from X" never gets a mutating action anywhere near it. There was no dedicated action
+    # for this at all before — "list all emails from LinkedIn" fell through to the catalogue
+    # router, which had nothing better than `cleanup` to offer and ran a real inbox pass
+    # instead of answering what was actually asked.
+    ("email_search", re.compile(
+        r"\b(?:list|show|find|search)\s+(?:all\s+)?(?:my\s+)?emails?\s+"
+        r"(?:from|by|about|regarding)\s+(?P<t>.+)", re.I), "sender"),
     ("trash_email", re.compile(
         r"\b(?:delete|trash|remove|clear|clean\s+(?:up|out)|get\s+rid\s+of)\b"
         r"(?P<t>.*\bemails?\b.*)", re.I), "query"),
@@ -262,6 +279,7 @@ _ARG_NAMES = {
     ("proactive", "forget"): "pattern",
     ("youtube", "play"): "query",
     ("contacts", "find"): "name",
+    ("email_agent", "search"): "query",
 }
 
 

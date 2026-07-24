@@ -16,6 +16,7 @@ confirmed before saving — plus /deadline add and voice) and config/timetable.y
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -35,6 +36,11 @@ from core.time_context import (format_local, greeting, local_now, parse_local_da
 log = get_logger("skills.semester_planner")
 
 _PLAN_KEY = "semester.plan"
+_CANCELLED_RE = re.compile(r"\bcancell?ed\b", re.I)
+# Mirrors job_hunter's staleness rule (Phase 34): overdue this long is no longer "upcoming",
+# it's just noise crowding out deadlines that ARE still ahead of him.
+_STALE_OVERDUE_DAYS = 3
+_MAX_OVERDUE_SHOWN = 2
 
 
 class SemesterPlannerSkill(BaseSkill):
@@ -121,6 +127,7 @@ class SemesterPlannerSkill(BaseSkill):
         )
 
     def due(self, days: int = 7, **_: Any) -> CommandResult:
+        self._retire_stale_deadlines()
         rows = self._ranked_deadlines(days)
         if not rows:
             return CommandResult(text=f"Nothing due in the next {days} days. 🎉", data={"count": 0})
@@ -134,6 +141,28 @@ class SemesterPlannerSkill(BaseSkill):
             )
         return CommandResult(text="\n\n".join(lines), data={"count": len(rows),
                              "generated_at": local_now(self._now()).isoformat()})
+
+    def _retire_stale_deadlines(self) -> int:
+        """Auto-retire deadlines that no longer belong in "next 7 days": a CANCELLED event
+        (event_scout.interested() adds a deadline row for the registration/attendance date;
+        nothing ever retired it when the event itself was later cancelled — the log showed
+        the exact same 5 stale rows, including one visibly titled "... - CANCELLED", crowding
+        out the "next 7 days" list for four briefings running) and anything overdue long
+        enough that it clearly isn't happening. Nothing is deleted (§0 P4) — status moves to
+        'cancelled'/'expired' and `_ranked_deadlines`'s `status='active'` filter does the rest.
+        """
+        now = self._now()
+        retired = 0
+        rows = self.mem.execute(
+            "SELECT id, title, due_at FROM deadlines WHERE status='active'").fetchall()
+        for d in rows:
+            if _CANCELLED_RE.search(d["title"] or ""):
+                self.mem.set_deadline_status(d["id"], "cancelled")
+                retired += 1
+            elif d["due_at"] < now - _STALE_OVERDUE_DAYS * 86400:
+                self.mem.set_deadline_status(d["id"], "expired")
+                retired += 1
+        return retired
 
     def _ranked_deadlines(self, days: int) -> list[tuple[Any, float, float]]:
         now = self._now()
@@ -199,6 +228,31 @@ class SemesterPlannerSkill(BaseSkill):
             "ORDER BY processed_at DESC LIMIT 15").fetchall()
         return [{"sender": r["sender"], "subject": r["subject"], "snippet": ""} for r in rows]
 
+    # ------------------------------------------------------------- events (#21)
+    def _upcoming_interested_events(self, now: float) -> list[dict[str, Any]]:
+        """The 3 soonest events he's marked interested in that haven't already happened.
+
+        The old query ("ORDER BY id DESC LIMIT 3") never checked the date at all, so once
+        the top 3 most-recently-marked events had all passed, the briefing kept showing the
+        same three stale titles every single day -- "static", not "upcoming". event_scout
+        never flips status off "interested" on its own (there's no reason it should; that
+        would erase a record of what he cared about), so the filtering has to happen here,
+        at read time, the same way event_scout's own _ranked() drops past events.
+        """
+        from skills.event_scout.sources import parse_event_date
+
+        rows = self.mem.execute(
+            "SELECT title, date FROM events WHERE status='interested' ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+        dated = []
+        for r in rows:
+            epoch = parse_event_date(r["date"])
+            if epoch and epoch < now - 86400:   # already happened; same grace window as _ranked()
+                continue
+            dated.append((epoch if epoch is not None else float("inf"), r))
+        dated.sort(key=lambda pair: pair[0])
+        return [r for _epoch, r in dated[:3]]
+
     # ------------------------------------------------------------- morning briefing
     def briefing(self, notify: bool = True, **_: Any) -> CommandResult:
         """The unified 07:00 briefing (replaces the plain inbox summary)."""
@@ -208,14 +262,14 @@ class SemesterPlannerSkill(BaseSkill):
         names = timetable.unit_names()
 
         classes = timetable.classes_on(local.weekday(), date_iso)
+        self._retire_stale_deadlines()
         ranked = self._ranked_deadlines(7)
         cards_due = len(self.mem.due_cards(now=now))
         job_approvals = self.mem.execute(
             "SELECT COUNT(*) c FROM jobs WHERE status IN ('drafted','notified')").fetchone()["c"]
         interviews = self.mem.execute(
             "SELECT company FROM applications WHERE status='interview'").fetchall()
-        events = self.mem.execute(
-            "SELECT title, date FROM events WHERE status='interested' ORDER BY id DESC LIMIT 3").fetchall()
+        events = self._upcoming_interested_events(now)
         commitments = get_settings().get("planner", "commitments", default=[]) or []
 
         name = get_settings().my_name
@@ -233,12 +287,29 @@ class SemesterPlannerSkill(BaseSkill):
             if classes else "none"))
 
         if ranked:
-            lines.append("\n🗓 Deadlines (next 7 days):")
-            for d, _s, dleft in ranked[:5]:
-                lines.append(
-                    f"  • {d['title']} ({names.get(d['unit'], d['unit'] or 'general')}) "
-                    f"— {relative_due(d['due_at'], now)} · {format_local(d['due_at'])}"
-                )
+            # Overdue and upcoming rendered as separate sections, overdue capped: four stale
+            # overdue rows used to fill every one of the "next 7 days" slots, making genuinely
+            # upcoming deadlines invisible even after _retire_stale_deadlines() cleans out the
+            # oldest ones. A handful of days overdue can still be legitimately worth seeing;
+            # burying the week ahead under all of them is the actual problem.
+            overdue = [(d, s, dl) for d, s, dl in ranked if dl < 0]
+            upcoming = [(d, s, dl) for d, s, dl in ranked if dl >= 0]
+            if overdue:
+                lines.append("\n⚠️ Overdue:")
+                for d, _s, _dl in overdue[:_MAX_OVERDUE_SHOWN]:
+                    lines.append(
+                        f"  • {d['title']} ({names.get(d['unit'], d['unit'] or 'general')}) "
+                        f"— {relative_due(d['due_at'], now)}"
+                    )
+                if len(overdue) > _MAX_OVERDUE_SHOWN:
+                    lines.append(f"  (+{len(overdue) - _MAX_OVERDUE_SHOWN} more overdue)")
+            if upcoming:
+                lines.append("\n🗓 Deadlines (next 7 days):")
+                for d, _s, dleft in upcoming[:5]:
+                    lines.append(
+                        f"  • {d['title']} ({names.get(d['unit'], d['unit'] or 'general')}) "
+                        f"— {relative_due(d['due_at'], now)} · {format_local(d['due_at'])}"
+                    )
         lines.append(f"\n🧠 Flashcards due: {cards_due}   ·   💼 Job approvals pending: {job_approvals}")
 
         # Applications whose window is about to shut. Named individually, not counted: a
@@ -280,8 +351,16 @@ class SemesterPlannerSkill(BaseSkill):
             return ""
 
     def _top3(self, ranked, cards_due: int, job_approvals: int, classes, commitments) -> str:
+        # `dl` (days_left, from _ranked_deadlines) is correctly SIGNED — negative once overdue.
+        # A bare f"in {dl:.0f}d" throws that sign into a string the LLM then has to interpret,
+        # and a model asked to write fluent prose about "in -2d" smooths it into confident,
+        # wrong text ("due in 3 days") rather than preserving the overdue status. Passing the
+        # same relative_due() string already used in the Deadlines section above removes the
+        # ambiguity entirely — there is no signed number left for either the LLM or the
+        # LLMError fallback below to misread.
         summary = {
-            "top_deadlines": [f"{d['title']} in {dl:.0f}d (w{d['weight']})" for d, _s, dl in ranked[:4]],
+            "top_deadlines": [f"{d['title']} — {relative_due(d['due_at'], self._now())} (w{d['weight']})"
+                              for d, _s, _dl in ranked[:4]],
             "cards_due": cards_due, "job_approvals": job_approvals,
             "classes": [c.get("title") for c in classes], "commitments": commitments,
         }
@@ -290,12 +369,16 @@ class SemesterPlannerSkill(BaseSkill):
                 "write",
                 [{"role": "system", "content":
                     "You are a ruthless prioritizer. From this student's day, output EXACTLY 3 numbered, "
-                    "specific, high-leverage actions — most important first. No preamble."},
+                    "specific, high-leverage actions — most important first. Each deadline is already "
+                    "labelled OVERDUE or due-in-N — preserve that status verbatim, never invert or "
+                    "soften it. No preamble."},
                  {"role": "user", "content": json.dumps(summary)}], max_tokens=200).strip()
         except LLMError:
             picks = []
             if ranked:
-                picks.append(f"1. Start '{ranked[0][0]['title']}' (due in {ranked[0][2]:.0f}d)")
+                status = relative_due(ranked[0][0]["due_at"], self._now())
+                picks.append(f"1. {'Finish' if ranked[0][1] >= 10_000 else 'Start'} "
+                             f"'{ranked[0][0]['title']}' ({status})")
             if cards_due:
                 picks.append(f"{len(picks)+1}. Clear {cards_due} due flashcards")
             if job_approvals:
@@ -303,6 +386,23 @@ class SemesterPlannerSkill(BaseSkill):
             return "\n".join(picks[:3]) or "1. Review your goals for the week."
 
     # ------------------------------------------------------------- week planner
+    def _weekly_schedule_summary(self) -> list[str]:
+        """Human-readable day-by-day class times. `plan()` used to hand the model only the
+        list of unit CODES (`timetable.unit_names().keys()`) -- which units exist, never
+        when they actually happen — so it had no way to "leave room for classes" the way its
+        own system prompt claimed, and the same four generic blocks repeated on every day of
+        the week including ones with classes on them.
+        """
+        data = timetable.load()
+        names = timetable.unit_names(data)
+        lines: list[str] = []
+        for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"):
+            for block in (data.get("weekly") or {}).get(day) or []:
+                title = block.get("title") or names.get(block.get("unit"), block.get("unit") or "class")
+                lines.append(f"{day.capitalize()} {block.get('start', '')}"
+                             f"-{block.get('end', '')}: {title}")
+        return lines
+
     def plan(self, notify: bool = True, **_: Any) -> CommandResult:
         """Propose a week plan biased to weakest units + nearest deadlines. Calvin edits & saves."""
         weakest = self.mem.weakest_cards(limit=8)
@@ -313,7 +413,7 @@ class SemesterPlannerSkill(BaseSkill):
             "weak_units": weak_units,
             "deadlines": [f"{d['title']} ({d['unit']}) in {dl:.0f}d" for d, _s, dl in ranked[:8]],
             "commitments": commitments,
-            "timetable_units": list(timetable.unit_names().keys()),
+            "weekly_classes": self._weekly_schedule_summary(),
         }
         try:
             proposal = self.llm.chat(

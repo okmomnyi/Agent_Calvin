@@ -69,13 +69,24 @@ jobs:
     - remote transcription (general, Swahili/English bilingual, audio QC, subtitling, captioning, audio data annotation)
   also:
     - paid internships (software, data, cloud/DevOps, localization/transcription) — remote or Nairobi
-  score_threshold: 60
+  # Raised from 60 -- the diagnostic (#17) found the digest surfacing "Director of Cloud
+  # Operations" at 80/100 for a third-year student. 60 let too much through; 75 is closer to
+  # "would he actually apply to this."
+  score_threshold: 75
   # NOTE: there is no `skip_unpaid` key. Unpaid roles score 0 and are skipped in
   # scoring.py unconditionally -- it is a rule, not a preference. The key used to sit
   # here and was read by nothing, which is worse than absent: it reads like a switch you
   # could flip, so nobody checks whether the behaviour it names is actually wired up.
   max_score_per_run: 40        # cap LLM scoring per hunt; overflow deferred (never silently dropped)
+  # Volume cap on the pending (drafted/notified) queue (#17) -- it climbed 13 -> 34 -> 50 -> 69
+  # over four days because low scorers that hadn't gone stale yet just kept accumulating.
+  # JobExpiry.enforce_cap() retires the lowest-scoring excess beyond this every hourly expire run.
+  queue_cap: 30
   # cybersecurity/pentesting may surface & score normally but has no dedicated source
+  # A posting requiring a language outside this list is hard-rejected before scoring even
+  # runs (skills/job_hunter/scoring.py hard_reject()) — "Spanish (Latin America) QC
+  # Specialist" scored 80 before this existed, despite Calvin speaking neither.
+  known_languages: [english, swahili]
 
   # Generic RSS/Atom feeds — add a line and it works (parsed by sources/rss.py).
   rss_feeds:
@@ -167,12 +178,13 @@ srs:
 # --- Semester planner (Phase 13) ---
 planner:
   briefing_hour: 7        # local hour for the unified morning briefing
-  # Ongoing freelance/client/volunteer commitments surfaced in the briefing. Examples —
-  # replace with your own. Naming a real client here publishes that relationship if this
-  # repo is public, which is theirs to disclose, not yours.
-  commitments:
-    - "Example Co — client web app"
-    - "Local tech hub — volunteer"
+  # Ongoing freelance/client/volunteer commitments surfaced in the briefing. Empty by
+  # default -- add your own real ones below. Naming a real client here publishes that
+  # relationship if this repo is public, which is theirs to disclose, not yours.
+  # (#20: these two example lines shipped to production and briefed "Example Co — client
+  # web app" / "Local tech hub — volunteer" as if real for weeks. seed_data_warnings() in
+  # core/config.py now flags this pattern at startup so it can't happen silently again.)
+  commitments: []
 
 # --- Self-audit / infra recon (Phase 21) — REPORT ONLY, enrolled targets only ---
 infra:

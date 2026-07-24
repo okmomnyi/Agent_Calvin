@@ -284,6 +284,16 @@ class SkillRegistry:
 
         Telegram previously did this itself, which left voice, dashboard and REST follow-up
         answers to fall through the general router.  The registry is the shared narrow waist.
+
+        A session must yield to a high-confidence intent for a DIFFERENT skill (Phase 34's own
+        docs already claimed "re-entry is by keyword... route deterministically" -- this method
+        just never actually implemented that escape). Without it, a forgotten mode is not a
+        mode, it is a trap: "create a playlist for late night coding" landed in code_tutor
+        because "coding" is a substring, and a stale code_tutor.session then swallowed every
+        message -- including unrelated ones -- for two days until it happened to expire, since
+        nothing here ever checked whether the NEXT message was clearly headed somewhere else.
+        The keyword router (not the LLM) decides this, so the escape stays offline-testable and
+        zero-latency, same as everything else _active_continuation dispatches through.
         """
         try:
             from core.memory import get_memory
@@ -296,18 +306,26 @@ class SkillRegistry:
                 ("spaced_rep.session", "quiz_answer", "spaced_rep", "quiz_answer", "answer"),
                 ("code_tutor.session", "tutor_continue", "code_tutor", "continue", "text"),
                 ("phone.call_session", "phone_confirm", "phone", "continue_call", "text"),
+                ("adaptive.retro_session", "retro_answer", "adaptive", "retro", "answer"),
             )
             for key, name, skill, action, arg_name in flows:
-                if mem.kv_get(key):
-                    intent = Intent(
-                        name=name,
-                        skill=skill,
-                        action=action,
-                        args={arg_name: text},
-                        confidence=1.0,
-                        via="session",
-                    )
-                    return intent, self.dispatch_intent(intent)
+                if not mem.kv_get(key):
+                    continue
+                escape = self.router.route(text, use_llm=False)
+                if escape.confidence >= 0.9 and escape.skill != skill:
+                    log.info("session '%s' yielded to a high-confidence '%s.%s' intent",
+                             key, escape.skill, escape.action)
+                    mem.kv_set(key, "")   # one-shot: end the stale mode, don't leave it pending
+                    return escape, self.dispatch_intent(escape)
+                intent = Intent(
+                    name=name,
+                    skill=skill,
+                    action=action,
+                    args={arg_name: text},
+                    confidence=1.0,
+                    via="session",
+                )
+                return intent, self.dispatch_intent(intent)
         except Exception:  # noqa: BLE001 - routing still works if continuity storage is down
             log.debug("could not inspect active conversational sessions", exc_info=True)
         return None

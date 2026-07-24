@@ -152,6 +152,71 @@ def test_after_always_yes_it_just_does_it(mem):
     assert res.data["done"] == 1
 
 
+# ================================================================= readable rows (regression, #12)
+# Telegram log: "Needs you (17)" then ten rows, ALL reading "Bulk job mail" -- the model gave
+# every LinkedIn message in the batch the same generic description, and the header count
+# never matched what was actually printed. Calvin couldn't answer what he couldn't tell apart.
+def test_same_sender_messages_collapse_into_one_row_with_a_count(mem):
+    """The other half of the fix: grouping by sender means five LinkedIn notifications read
+    as ONE row with a count, not five (or, as logged, ten identical-looking) separate lines."""
+    messages = [
+        {"id": f"m{i}", "From": "LinkedIn <news@linkedin.com>", "Subject": subject,
+         "snippet": "s"}
+        for i, subject in enumerate([
+            "10 people viewed your profile", "New jobs match your profile",
+            "Someone reacted to your post", "Weekly digest", "Your network grew",
+        ])
+    ]
+    gm = _Gmail(messages)
+    # The model reuses the SAME description for every message -- exactly the reported bug --
+    # but the row must still be built from real metadata (sender/subject), not that text.
+    actions = [{"kind": "email_trash", "description": "Bulk job mail", "message_id": m["id"],
+               "permission_key": "email_trash:from:linkedin.com",  # same sender -> same key
+               "tier": "low", "reasoning": "bulk"} for m in messages]
+    skill, _gm, _store = _skill(mem, actions, gmail=gm)
+    res = skill.triage(notify=False)
+
+    row_lines = [ln for ln in res.text.splitlines() if ln.strip().startswith("[")]
+    assert len(row_lines) == 1, f"same-sender messages must collapse to one row: {row_lines}"
+    assert "+4 similar" in row_lines[0]
+    assert "10 people viewed your profile" in row_lines[0]  # the first message's real subject
+    assert "Bulk job mail" not in res.text  # the model's reused text never reaches the row
+
+
+def test_different_sender_rows_stay_genuinely_distinguishable(mem):
+    messages = [
+        {"id": "m1", "From": "LinkedIn <news@linkedin.com>", "Subject": "Jobs for you",
+         "snippet": "s"},
+        {"id": "m2", "From": "GitHub <notify@github.com>", "Subject": "PR merged",
+         "snippet": "s"},
+    ]
+    gm = _Gmail(messages)
+    # Same generic description from the model for both -- only sender/subject tell them apart.
+    actions = [{"kind": "email_trash", "description": "Bulk job mail", "message_id": m["id"],
+               "permission_key": f"email_trash:from:{m['id']}", "tier": "low", "reasoning": "r"}
+               for m in messages]
+    skill, _gm, _store = _skill(mem, actions, gmail=gm)
+    res = skill.triage(notify=False)
+
+    row_lines = [ln for ln in res.text.splitlines() if ln.strip().startswith("[")]
+    assert len(row_lines) == 2
+    assert row_lines[0] != row_lines[1]
+    assert "Jobs for you" in res.text and "PR merged" in res.text
+
+
+def test_more_than_ten_pending_shows_an_honest_truncation_count(mem):
+    messages = [{"id": f"m{i}", "From": f"sender{i}@example.com", "Subject": f"Subject {i}",
+                "snippet": "s"} for i in range(14)]
+    gm = _Gmail(messages)
+    actions = [{"kind": "email_trash", "description": "x", "message_id": m["id"],
+               "permission_key": f"email_trash:from:sender{i}", "tier": "low", "reasoning": "r"}
+               for i, m in enumerate(messages)]
+    skill, _gm, _store = _skill(mem, actions, gmail=gm)
+    res = skill.triage(notify=False)
+    assert res.data["pending"] == 14
+    assert "showing" in res.text.lower() and "of 14" in res.text
+
+
 def test_always_no_is_honoured_silently(mem):
     skill, gm, store = _skill(mem, _TRASH_LINKEDIN)
     store.remember("email_trash:from:linkedin.com", ALWAYS_DENY)

@@ -83,10 +83,14 @@ CREATE TABLE IF NOT EXISTS applications (
     source         TEXT,
     category       TEXT,
     applied_at     DOUBLE PRECISION,
-    status         TEXT NOT NULL DEFAULT 'applied',  -- applied|replied|interview|offer|rejected
+    -- applied|tracked|replied|interview|offer|rejected. 'tracked' means a portal/notify-only
+    -- job was recorded for Calvin to apply via the link himself -- AgentOS never sent it, and
+    -- the weekly report must never count it as "sent" (see application_stats()).
+    status         TEXT NOT NULL DEFAULT 'applied',
     cv_variant_used TEXT,
     notes          TEXT,
     updated_at     DOUBLE PRECISION NOT NULL,
+    kind           TEXT NOT NULL DEFAULT 'email',    -- email (we sent it) | portal (tracked only)
     FOREIGN KEY(job_id) REFERENCES jobs(id)
 );
 
@@ -630,6 +634,11 @@ class Memory:
             # Phase 20: rules are scoped to a category; skills only read their own
             "standing_instructions": {"category": "TEXT NOT NULL DEFAULT 'general'",
                                       "source": "TEXT NOT NULL DEFAULT 'calvin'"},
+            # Distinguishes an application AgentOS actually sent from a portal/notify job
+            # merely tracked for Calvin to apply via the link himself -- both used to record
+            # as status='applied' with no way to tell them apart afterward, so the weekly
+            # report's "Applications sent: N" counted rows that were never sent.
+            "applications": {"kind": "TEXT NOT NULL DEFAULT 'email'"},
         }
         with self.tx():
             for table, cols in wanted.items():
@@ -736,15 +745,26 @@ class Memory:
     def record_application(
         self, *, job_id: int | None, company: str | None, source: str | None,
         category: str | None, cv_variant: str | None = None, notes: str | None = None,
+        kind: str = "email",
     ) -> int:
+        """`kind='email'` is an application actually sent on Calvin's behalf; `kind='portal'`
+        is a portal/notify-only job merely TRACKED for him to apply via the link himself.
+        Portal rows start at status='tracked', never 'applied' — the weekly report used to
+        count both identically ("Applications sent: 3" when nothing was emailed), which is
+        untrue about what actually happened and made the 0% response rate meaningless (there
+        was nothing to respond to)."""
         now = time.time()
+        status = "applied" if kind == "email" else "tracked"
         cur = self.conn.execute(
             "INSERT INTO applications(job_id, company, source, category, applied_at, status, "
-            "cv_variant_used, notes, updated_at) VALUES(%s,%s,%s,%s,%s, 'applied', %s, %s, %s) "
+            "cv_variant_used, notes, updated_at, kind) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "RETURNING id",
-            (job_id, company, source, category, now, cv_variant, notes, now),
+            (job_id, company, source, category, now, status, cv_variant, notes, now, kind),
         )
         if job_id is not None:
+            # The JOB's own status is queue membership ("resolved, out of your approval
+            # queue") regardless of kind; the precise, honest record of HOW it was resolved
+            # lives on the applications row above (status/kind), not here.
             self.conn.execute(
                 "UPDATE jobs SET status='applied', updated_at=%s WHERE id=%s", (now, job_id)
             )
@@ -759,14 +779,23 @@ class Memory:
 
     def application_stats(self, since: float) -> dict[str, Any]:
         rows = self.conn.execute(
-            "SELECT category, status FROM applications WHERE applied_at >= %s", (since,)
+            "SELECT category, status, kind FROM applications WHERE applied_at >= %s", (since,)
         ).fetchall()
         by_category: dict[str, int] = {}
         by_status: dict[str, int] = {}
+        emailed = tracked = 0
         for r in rows:
             by_category[r["category"] or "other"] = by_category.get(r["category"] or "other", 0) + 1
             by_status[r["status"]] = by_status.get(r["status"], 0) + 1
-        return {"total": len(rows), "by_category": by_category, "by_status": by_status}
+            if r["kind"] == "portal":
+                tracked += 1
+            else:
+                emailed += 1
+        # `total` stays "every row touched this week" for anything that still wants a raw
+        # count; `emailed`/`tracked` are what report() actually surfaces, because "total" is
+        # exactly the number that used to read as "Applications sent: 3" when zero were sent.
+        return {"total": len(rows), "by_category": by_category, "by_status": by_status,
+               "emailed": emailed, "tracked": tracked}
 
     # -------------------------------------------------------------- emails
     def record_email(

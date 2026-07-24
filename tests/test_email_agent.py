@@ -101,6 +101,49 @@ def test_cleanup_is_idempotent(fake_llm, mem):
     assert svc.users.return_value.messages.return_value.get.called is False
 
 
+# ------------------------------------------------------------------ search (regression, #9)
+# Telegram log: "List all emails from LinkedIn" -> "Inbox cleanup done. Processed 0 new
+# message(s)" -- there was no read-only listing action, so the catalogue router's best guess
+# was `cleanup`, which ran a real inbox pass and reported on THAT instead of answering the
+# question. search() must never archive/label/trash anything it looks at.
+def test_search_by_sender_lists_matches_without_mutating_anything(fake_llm, mem):
+    svc = _mock_service(_message(subject="10 people viewed your profile", sender="LinkedIn <no-reply@linkedin.com>"))
+    skill = _skill(svc, fake_llm, mem)
+
+    result = skill.search(sender="LinkedIn")
+    assert result.data["count"] == 1
+    assert "LinkedIn" in result.text
+    assert "10 people viewed your profile" in result.text
+    # read-only: no archive/label/trash call of any kind
+    messages = svc.users.return_value.messages.return_value
+    assert messages.modify.called is False
+
+
+def test_search_with_no_matches_says_so_honestly(fake_llm, mem):
+    svc = MagicMock()
+    svc.users.return_value.messages.return_value.list.return_value.execute.return_value = {}
+    skill = _skill(svc, fake_llm, mem)
+
+    result = skill.search(sender="nobody-like-this")
+    assert result.data["count"] == 0
+    assert "no emails found" in result.text.lower()
+
+
+def test_search_with_neither_query_nor_sender_asks_rather_than_guessing(fake_llm, mem):
+    skill = _skill(_mock_service(_message()), fake_llm, mem)
+    result = skill.search()
+    assert result.ok is False
+
+
+def test_search_gmail_failure_is_honest_not_a_crash(fake_llm, mem):
+    svc = MagicMock()
+    svc.users.return_value.messages.return_value.list.return_value.execute.side_effect = RuntimeError("down")
+    skill = _skill(svc, fake_llm, mem)
+    result = skill.search(sender="LinkedIn")
+    assert result.ok is False
+    assert "couldn't reach gmail" in result.text.lower()
+
+
 def test_draft_creates_draft_and_never_sends(fake_llm, mem):
     fake_llm.post_result = "Thanks — I'll get back to you tomorrow.\nCalvin"
     svc = _mock_service(_message(subject="Quick question", sender="Jane <jane@corp.com>"))
@@ -132,6 +175,19 @@ def test_digest_groups_and_returns_counts(fake_llm, mem):
     assert result.data["action_needed"] == 1
     assert result.data["ignored"] == 1     # the promotion
     assert "ACTION NEEDED" in result.text
+
+
+# Regression (#15): the interactive dispatch path ("summarize my inbox" via Telegram) calls
+# digest() with no explicit `notify=`, so the METHOD's own default decides. It used to
+# default to True, double-sending: once via the reply channel echoing CommandResult.text,
+# once via digest()'s own internal notify() call -- "sent twice, identical, same minute" in
+# the log. manage.py's CLI is unaffected: it always passes an explicit notify= value.
+def test_digest_default_does_not_double_send(fake_llm, mem):
+    notify = MagicMock()
+    skill = EmailAgentSkill(gmail=None, llm=fake_llm, memory=mem, notify=notify)
+    result = skill.digest()  # no explicit notify= -- exactly how interactive dispatch calls it
+    assert "Nothing new" in result.text or "digest" in result.text.lower()
+    notify.assert_not_called()
 
 
 def test_trash_starts_with_a_question_and_changes_nothing(fake_llm, mem):

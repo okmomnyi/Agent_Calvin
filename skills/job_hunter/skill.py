@@ -11,6 +11,7 @@ report, and runs the 15-minute interview watcher.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -32,6 +33,15 @@ from skills.job_hunter.sources import build_sources
 from skills.job_hunter.sources.base import RawJob
 
 log = get_logger("skills.job_hunter")
+
+_TITLE_NOISE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_title(title: str) -> str:
+    """Collapse punctuation/case/whitespace differences so two listings of the SAME role
+    ("Senior Software Engineer, Infrastructure - Compute Platform" scraped twice with
+    different ids) compare equal. Not fuzzy — just noise-insensitive."""
+    return _TITLE_NOISE_RE.sub(" ", (title or "").lower()).strip()
 
 
 class JobHunterSkill(BaseSkill):
@@ -155,8 +165,15 @@ class JobHunterSkill(BaseSkill):
 
     def scheduled_jobs(self) -> list[ScheduledJob]:
         return [
-            ScheduledJob(id="job_hunter.hunt", func=self.hunt, trigger="interval",
-                         kwargs={"hours": 6},
+            # `interval hours=6` used to fire every 6h from whenever the process last booted
+            # — timezone-blind by construction, since an interval trigger only knows elapsed
+            # time, never wall-clock time. A restart around 01:30 EAT meant every digest
+            # landed at 01:3x/07:3x/13:3x/19:3x from then on, including the middle of the
+            # night. `cron` fires at these EXACT local hours regardless of restarts — the
+            # scheduler is already constructed with `timezone=get_settings().tz`
+            # (kernel/app.py), so "07" here really is 07:00 in Africa/Nairobi, not UTC.
+            ScheduledJob(id="job_hunter.hunt", func=self.hunt, trigger="cron",
+                         kwargs={"hour": "7,13,19", "minute": 0},
                          queued=True, skill="job_hunter", action="hunt"),
             ScheduledJob(id="job_hunter.report", func=self.report, trigger="cron",
                          kwargs={"day_of_week": "sun", "hour": 18, "minute": 0}),
@@ -172,7 +189,7 @@ class JobHunterSkill(BaseSkill):
         Nothing is deleted -- §0 Principle 4. Expired jobs leave the queue and the briefing
         but keep every scrape, score and draft, so a wrong heuristic stays falsifiable.
         """
-        expiry = JobExpiry(self.mem)
+        expiry = JobExpiry(self.mem, queue_cap=self.queue_cap)
         expiry.backfill_deadlines()
         result = expiry.run()
         if result.total and notify:
@@ -189,6 +206,10 @@ class JobHunterSkill(BaseSkill):
     @property
     def max_score_per_run(self) -> int:
         return int(get_settings().get("jobs", "max_score_per_run", default=40))
+
+    @property
+    def queue_cap(self) -> int:
+        return int(get_settings().get("jobs", "queue_cap", default=30))
 
     # ------------------------------------------------------------- hunt
     def hunt(self, notify: bool = True, **_: Any) -> CommandResult:
@@ -251,6 +272,17 @@ class JobHunterSkill(BaseSkill):
                 if is_new:
                     row = self.mem.get_job_by_ref(raw.source, raw.external_id)
                     if row:
+                        # Cross-listing dedup: (source, external_id) only catches the SAME
+                        # source posting the SAME id twice, which is why [9714] and [9710] --
+                        # identical title and company, two different source ids -- both got
+                        # scored (95 and 85). Skip scoring a listing that's already an active
+                        # row for the same (title, company); the original keeps its score.
+                        dup_id = self._duplicate_of(row["id"], raw.title, raw.company)
+                        if dup_id:
+                            self.mem.set_job_status(row["id"], "skipped")
+                            log.info("job %s skipped — duplicate of %s (%s @ %s)",
+                                    row["id"], dup_id, raw.title, raw.company)
+                            continue
                         # Parse the application window at scrape time -- the description is
                         # the only place it appears, and it is not kept after this.
                         stamp = parse_deadline(f"{raw.title} {raw.description}")
@@ -261,6 +293,20 @@ class JobHunterSkill(BaseSkill):
                                     (stamp, row["id"]))
                         new.append((row["id"], raw))
         return new
+
+    def _duplicate_of(self, job_id: int, title: str, company: str) -> int | None:
+        """An earlier, still-active row with the same normalized title + company, if any."""
+        norm_title, company_norm = normalize_title(title), (company or "").strip().lower()
+        if not norm_title or not company_norm:
+            return None
+        rows = self.mem.execute(
+            "SELECT id, title FROM jobs WHERE lower(company)=%s AND id != %s "
+            "AND status NOT IN ('skipped','expired')",
+            (company_norm, job_id)).fetchall()
+        for r in rows:
+            if normalize_title(r["title"]) == norm_title:
+                return r["id"]
+        return None
 
     def _score_and_draft(self, job_id: int, raw: RawJob) -> dict[str, Any] | None:
         """Score a job; for keepers, draft summary+cover and persist. Returns keeper dict or None."""
@@ -396,6 +442,7 @@ class JobHunterSkill(BaseSkill):
                     job_id=job["id"], company=job["company"], source=job["source"],
                     category=job["category"], cv_variant=job["cv_variant"],
                     notes=f"{job['apply_kind']} apply: {job['apply_target']}",
+                    kind="portal",
                 )
                 manual.append(job_id)
                 tailored_notes.append(f"[{job_id}] {tailored_note} (apply via link)")
@@ -410,10 +457,12 @@ class JobHunterSkill(BaseSkill):
         if missing:
             parts.append(f"Unknown job id(s): {missing}.")
         summary = " ".join(parts) or "Nothing approved."
-        # Confirm the application back to Calvin (his ask: notified in Telegram AND on /status).
-        # Only when something actually happened, and never from a test (injected notifier).
-        if applied or manual:
-            self._notify(f"📨 Application update:\n{summary}")
+        # NOT also pushed via self._notify(): approve() is exclusively an interactive action
+        # (a direct reply to "approve X" or a button press), never scheduled -- the caller's
+        # own channel (Telegram's reply, the dashboard, TTS) already delivers this exact text
+        # via CommandResult below. Calling _notify() too was a real double-send in the log:
+        # "Tracked 1 portal/notify job(s)..." arrived once bare (the reply) and once wrapped
+        # in "📨 Application update:" (this call), a moment apart.
         return CommandResult(text=summary,
                              data={"applied": applied, "manual": manual, "missing": missing})
 
@@ -474,17 +523,27 @@ class JobHunterSkill(BaseSkill):
         return CommandResult(text="\n".join(lines), data={"counts": counts})
 
     def report(self, notify: bool = True, **_: Any) -> CommandResult:
-        """Weekly Sunday report: applications, response rate, interviews, per-category."""
+        """Weekly Sunday report: applications, response rate, interviews, per-category.
+
+        `emailed` (AgentOS actually sent it) and `tracked` (a portal/notify job Calvin still
+        has to apply to himself via the link) are reported SEPARATELY — the Telegram log
+        showed "Applications sent: 3" in a week where every single job was `apply on site`;
+        nothing had been emailed, so the 0% response rate was a metric counting the wrong
+        thing rather than a signal about the CV. Response rate is computed only against
+        `emailed`, since a tracked row was never sent and has no reply to measure.
+        """
         since = time.time() - 7 * 86400
         stats = self.mem.application_stats(since)
         interviews = stats["by_status"].get("interview", 0)
         replied = stats["by_status"].get("replied", 0) + interviews + stats["by_status"].get("offer", 0)
-        total = stats["total"]
-        rate = f"{(replied / total * 100):.0f}%" if total else "n/a"
+        emailed = stats["emailed"]
+        tracked = stats["tracked"]
+        rate = f"{(replied / emailed * 100):.0f}%" if emailed else "n/a"
         cats = ", ".join(f"{k}:{v}" for k, v in stats["by_category"].items()) or "none"
         text = (
             f"📊 Weekly job report ({time.strftime('%d %b')})\n"
-            f"Applications sent: {total}\n"
+            f"Applications sent by email: {emailed}\n"
+            f"Tracked — awaiting you to apply via the link: {tracked}\n"
             f"Responses: {replied} (rate {rate}), interviews: {interviews}\n"
             f"By category: {cats}"
         )
@@ -574,15 +633,32 @@ class JobHunterSkill(BaseSkill):
         lines = [f"💼 {name}'s job digest — {len(keepers)} match(es)"]
         if not is_seeded(self.mem):
             lines.append("⚠️ Persona not seeded — covers are placeholders until persona-init (Phase 4).")
-        for k in sorted(keepers, key=lambda x: x["score"], reverse=True):
+        # Sorted ONCE and reused for both the listing and the suggestion below — these used to
+        # be two independent expressions (`sorted(keepers, ...)` here, bare `keepers[:3]` in
+        # the suggestion), so the suggestion silently fell back to whatever order `keepers`
+        # arrived in (job id), offering the three lowest-id matches instead of the three best.
+        ranked = sorted(keepers, key=lambda x: x["score"], reverse=True)
+        for k in ranked:
             route = {"email": "✉️ email-apply", "portal": "🔗 apply on site",
                      "notify_only": "📝 portal signup"}.get(k["apply_kind"], k["apply_kind"])
+            # A source (himalayas.app among them) can hand back a posting with no company
+            # field at all -- "[3589] DevOps Engineer @ " read as broken, and Calvin can't
+            # judge a match without knowing the employer. Say so plainly rather than leave a
+            # blank; guessing a name from page furniture risks being confidently WRONG,
+            # which is worse than an honest gap (§0 P5).
+            company = k["company"] or "company not listed — check the posting"
             lines.append(
-                f"\n[{k['id']}] {k['title']} @ {k['company']}  ({k['score']}/100 · {k['category']})\n"
+                f"\n[{k['id']}] {k['title']} @ {company}  ({k['score']}/100 · {k['category']})\n"
                 f"    {k['summary']}\n    {route}: {k['apply_target'] or k['url']}"
             )
-        lines.append(f"\n➡️ Reply `approve {','.join(str(k['id']) for k in keepers[:3])}` to apply, "
-                     "or use the Telegram buttons (Phase 8).")
+        # "approve" doesn't mean the same thing for every route: email-apply jobs actually
+        # get sent; portal/notify jobs only get TRACKED and still need Calvin to click
+        # through himself. Saying "to apply" for both implied the second group would be
+        # applied to automatically, which it never was.
+        top_ids = ",".join(str(k["id"]) for k in ranked[:3])
+        lines.append(f"\n➡️ Reply `approve {top_ids}` — sends the ✉️ email-apply ones for you, "
+                     "tracks the 🔗/📝 ones for you to finish via the link. "
+                     "Or use the Telegram buttons (Phase 8).")
         if queued:
             lines.append(f"(⚙️ {queued} more posting(s) queued — workers are scoring them now.)")
         if deferred:

@@ -234,9 +234,19 @@ class ProactiveSkill(BaseSkill):
             label = str(p.get("label") or "").strip().lower()
             if label not in LABEL_CATEGORIES:
                 label = _DEFAULT_LABEL
+            # Built from the message's own metadata, not trusted from the model's freeform
+            # `description` field: the model gave every LinkedIn notification in a batch the
+            # SAME description ("Bulk job mail"), which made ten pending rows read as
+            # identical text with no way to tell them apart. Sender + subject is always
+            # distinct per real message (or, when genuinely identical, correctly reads as
+            # the same thing rather than by coincidence of what the model happened to write).
+            sender = by_id[msg_id]["sender"]
+            subject = by_id[msg_id]["subject"][:60] or "(no subject)"
+            description = f"{sender} — \"{subject}\""
             action_id, status = self.store.propose(
-                kind, str(p.get("description") or kind)[:200], tier=tier, permission_key=key,
-                payload={"message_id": msg_id, "doc_id": msg_id, "label": label},
+                kind, description, tier=tier, permission_key=key,
+                payload={"message_id": msg_id, "doc_id": msg_id, "label": label,
+                        "sender": sender, "subject": subject},
                 reasoning=str(p.get("reasoning") or "")[:200])
             if status == APPROVED:
                 if self._execute(action_id, kind, msg_id, label):
@@ -275,8 +285,28 @@ class ProactiveSkill(BaseSkill):
                 lines.append(f"  … and {len(done) - 8} more")
         if pending:
             lines.append(f"\nNeeds you ({len(pending)}):")
-            for a in pending[:10]:
-                lines.append(f"  [{a.id}] {a.description}")
+            # Grouped by sender (each row's description is now "sender — subject", see
+            # _apply()) so ten LinkedIn notifications collapse into one readable line with a
+            # count, instead of ten identical-looking rows. The header said 17 while only 10
+            # rows ever printed, with no indication the list was cut short -- Calvin could
+            # never answer what he couldn't see, so the same 17 got re-presented daily until
+            # they expired. `showing N of M` makes the truncation honest.
+            groups: dict[str, list[Any]] = {}
+            for a in pending:
+                sender = (a.payload or {}).get("sender") or "unknown sender"
+                groups.setdefault(sender, []).append(a)
+            max_rows = 10
+            shown_actions = 0
+            for sender, items in groups.items():
+                if len(lines) - 1 >= max_rows:  # rows appended below this point so far
+                    break
+                first = items[0]
+                subject = (first.payload or {}).get("subject", first.description)
+                suffix = f" (+{len(items) - 1} similar)" if len(items) > 1 else ""
+                lines.append(f"  [{first.id}] {sender} — {subject}{suffix}")
+                shown_actions += len(items)
+            if shown_actions < len(pending):
+                lines.append(f"\n(showing {shown_actions} of {len(pending)})")
             lines.append("\nReply `3 yes`, `3 no`, or `always yes 3` to settle the pattern.")
         if not done and not pending:
             lines.append("\nNothing needed doing.")

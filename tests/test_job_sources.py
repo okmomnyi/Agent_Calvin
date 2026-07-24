@@ -99,6 +99,31 @@ def test_parse_feed_category_hint_override():
     assert all(j.category_hint == "cloud_devops" for j in jobs)
 
 
+# Regression (#19): "[3589] DevOps Engineer @ " with a blank company -- himalayas.app-style
+# feeds don't use WWR's "Company: Title" format and have no <author> element either; the
+# company sits in <dc:creator> instead, which the parser never checked.
+RSS_DC_CREATOR = """<?xml version="1.0"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+<item><title>DevOps Engineer</title><link>https://himalayas/1</link><guid>him-1</guid>
+<dc:creator>Nimbus Cloud</dc:creator><description>Run infra</description></item>
+</channel></rss>"""
+
+
+def test_parse_feed_falls_back_to_dc_creator_for_company():
+    jobs = parse_feed(RSS_DC_CREATOR, "himalayas")
+    assert jobs[0].title == "DevOps Engineer"
+    assert jobs[0].company == "Nimbus Cloud"
+
+
+def test_parse_feed_with_no_company_signal_anywhere_stays_honestly_empty():
+    """No colon in the title, no author, no dc:creator -- company must stay '', never a
+    guess. The digest layer (skill.py's _render_digest) is what turns '' into an honest
+    "company not listed" line; the parser itself must not invent one."""
+    jobs = parse_feed(RSS, "weworkremotely")
+    assert jobs[1].title == "Plain Transcription Job"
+    assert jobs[1].company == ""
+
+
 # ------------------------------------------------------------------ watched HTML
 def test_extract_job_links_filters_non_job_links():
     jobs = extract_job_links(CAREERS_HTML, "https://co.com/careers", "CoCo")

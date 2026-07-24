@@ -254,6 +254,8 @@ KEYWORDS = [
     ("play some jazz on youtube", "youtube", "play"),
     ("search youtube for lofi hip hop", "youtube", "play"),
     ("find contact mum", "contacts", "find"),
+    ("list all emails from LinkedIn", "email_agent", "search"),
+    ("show my emails from recruiting@acme.com", "email_agent", "search"),
     ("call mum", "phone", "call"),
     ("call the pizza place", "phone", "call"),
     ("answer the call", "phone", "answer"),

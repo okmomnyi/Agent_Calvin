@@ -79,6 +79,13 @@ async def lifespan(app: FastAPI):
     _register_scheduled_jobs()
     if not scheduler.running:
         scheduler.start()
+    from core.config import seed_data_warnings
+
+    try:
+        for warning in seed_data_warnings(get_settings()):
+            log.warning("unfilled config: %s", warning)
+    except Exception:  # noqa: BLE001 - a startup check must never block the kernel coming up
+        log.debug("could not check for seed/placeholder config", exc_info=True)
     log.info("AgentOS kernel ready.")
     yield
     if scheduler.running:
@@ -325,6 +332,13 @@ async def api_health(
     except Exception as exc:  # noqa: BLE001
         gmail_token = {"present": None, "error": str(exc)}
 
+    from core.config import seed_data_warnings
+
+    try:
+        seed_warnings = seed_data_warnings(settings)
+    except Exception:  # noqa: BLE001 - a sub-check must never take down /api/health itself
+        seed_warnings = []
+
     return {
         **public,
         # Phase 26: a backlog or a
@@ -336,6 +350,9 @@ async def api_health(
         "telegram_configured": bool(settings.telegram_bot_token and settings.telegram_chat_id),
         "skills": sorted(registry.skills.keys()),
         "timezone": settings.tz,
+        # Config that still matches the shipped example text -- never actually filled in, and
+        # otherwise silently reaches the daily briefing forever (§0: never fabricate).
+        "seed_data_warnings": seed_warnings,
     }
 
 

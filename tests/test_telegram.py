@@ -96,6 +96,38 @@ def test_voiceoff_voiceon_route_to_voice_skill(mem):
     assert ("voice", "unmute") in actions
 
 
+# ------------------------------------------------------------------ approval namespace (regression)
+# Telegram log: a job digest says "Reply `approve 6229,6234,6235`" (JOB ids); the reply
+# instead hit "No pending action #6229" -- _try_approval_reply() checks core.approvals'
+# pending_actions table (a totally different id sequence, owned by proactive.py) and used to
+# dead-end there instead of falling through to the router that would resolve job ids
+# correctly.
+def test_approve_reply_falls_through_to_the_router_when_the_id_is_not_a_pending_action(mem):
+    from core.approvals import get_store
+
+    core = _core(mem)
+    # A real pending action exists (so _try_approval_reply doesn't bail out early on "no
+    # pending actions at all") but its id has nothing to do with the job digest's ids.
+    get_store(mem).propose("email_trash", "trash newsletter", tier="low",
+                            permission_key="email_trash:test")
+    result = core.route_text("approve 6229,6234,6235")
+    assert result == "routed:approve 6229,6234,6235"
+    assert ("__route__", "approve 6229,6234,6235") in core.registry.calls
+
+
+def test_approve_reply_still_resolves_a_real_pending_action(mem):
+    """The fallthrough must not break the case it was built for."""
+    from core.approvals import get_store
+
+    core = _core(mem)
+    action_id, status = get_store(mem).propose(
+        "email_trash", "trash newsletter", tier="low", permission_key="email_trash:test")
+    assert status == "pending"
+    result = core.route_text(f"{action_id} yes")
+    assert "Approved" in result
+    assert not any(c[0] == "__route__" for c in core.registry.calls)
+
+
 # ------------------------------------------------------------------ free text + mock
 def test_route_text_uses_intent_engine(mem):
     core = _core(mem)
@@ -169,6 +201,27 @@ def test_jobs_payload_lists_awaiting(mem):
     header, jobs = core.jobs_payload()
     assert len(jobs) == 1 and jobs[0]["id"] == jid
     assert "awaiting" in header.lower()
+
+
+def test_jobs_payload_sorts_across_statuses_by_score_not_status_group(mem):
+    """Regression: jobs_by_status() sorts WITHIN one status, but the old code concatenated
+    "notified" jobs then "drafted" jobs without re-sorting the combined list -- an 85-scored
+    draft could land behind a 60-scored notified job just because of which status it was in.
+    Telegram log: "16 of 28 awaiting your call" with 85s at positions 1, 7 and 8."""
+    core = _core(mem)
+    mem.upsert_job("remoteok", "low", title="Low notified", company="Acme")
+    low_id = mem.get_job_by_ref("remoteok", "low")["id"]
+    mem.score_job(low_id, 60, category="cloud_devops")
+    mem.set_job_status(low_id, "notified")
+
+    mem.upsert_job("remoteok", "high", title="High drafted", company="Acme")
+    high_id = mem.get_job_by_ref("remoteok", "high")["id"]
+    mem.score_job(high_id, 85, category="cloud_devops")
+    mem.set_job_status(high_id, "drafted")
+
+    header, jobs = core.jobs_payload()
+    assert [j["id"] for j in jobs] == [high_id, low_id], \
+        "the 85-scored drafted job must be listed ahead of the 60-scored notified job"
 
 
 def test_jobs_payload_empty(mem):

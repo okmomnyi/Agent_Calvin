@@ -258,6 +258,65 @@ def test_retro_rejects_an_invariant_breaking_suggestion(mem, adaptive):
     assert engine.instructions() == []
 
 
+# --------------------------------------------------------------------- session (#22)
+# Telegram log: "19/07 17:59 -- retro prompt. No answer, no reminder, no expiry notice,
+# never asked again." Root cause found by reading the code, not just the log: retro() never
+# opened a session, so kernel/registry.py's _active_continuation had nowhere to route a reply
+# even if he'd given one -- it would have fallen through to the general router and vanished.
+def test_asking_opens_a_session_so_a_reply_has_somewhere_to_land(mem, adaptive):
+    skill, _, _ = adaptive
+    skill.retro()
+    assert mem.kv_get("adaptive.retro_session"), \
+        "no session means a reply to this prompt has nowhere to route"
+
+
+def test_answering_closes_the_session(mem, adaptive):
+    skill, _, _ = adaptive
+    skill.retro()
+    skill.retro(answer="the CTFs were great, the meetups were not")
+    assert mem.kv_get("adaptive.retro_session") in (None, ""), \
+        "a processed answer must not leave the session open for the next reply"
+
+
+def test_reasking_after_a_silent_week_names_the_miss(mem, adaptive):
+    """The other half of "no expiry notice": a session left open from a prompt that was
+    never answered must be acknowledged, not silently re-asked as if nothing happened."""
+    skill, _, notes = adaptive
+    skill.retro()                          # first prompt, never answered
+    res = skill.retro()                    # next Sunday's cron fires again
+    assert res.data["previous_unanswered"] is True
+    assert "never heard back" in res.text.lower()
+    assert any("never heard back" in n.lower() for n in notes)
+
+
+def test_reasking_after_an_answered_week_stays_plain(mem, adaptive):
+    skill, _, notes = adaptive
+    skill.retro()
+    skill.retro(answer="all good this week")
+    notes.clear()
+    res = skill.retro()
+    assert res.data["previous_unanswered"] is False
+    assert "never heard back" not in res.text.lower()
+
+
+def test_retro_reply_routes_through_the_registry_continuation(mem, monkeypatch, fake_llm):
+    """End-to-end: a free-text reply while the session is open must reach adaptive.retro,
+    not the general router -- this is the actual mechanism that was missing."""
+    from kernel.registry import SkillRegistry
+    from core.intent import IntentRouter
+
+    monkeypatch.setattr("core.memory.get_memory", lambda: mem)
+    mem.kv_set("adaptive.retro_session", "1")
+
+    reg = SkillRegistry(router=IntentRouter(llm=fake_llm))
+    reg.discover()
+    intent, result = reg.handle_command(
+        "the morning deep work blocks helped a lot, evening notifications were too noisy")
+
+    assert intent.skill == "adaptive" and intent.action == "retro", \
+        "without the session, this freeform reply has no route to adaptive.retro at all"
+
+
 # ================================================================= contracts view
 def test_contracts_view_lists_scope_and_invariants(mem, adaptive):
     skill, _, _ = adaptive

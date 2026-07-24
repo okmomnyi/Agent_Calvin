@@ -65,7 +65,7 @@ SERVICES: dict[str, list[str]] = {
                                             "test_youtube.py", "test_weather.py"],
     "phone control": ["test_adb_bridge.py", "test_phone.py"],
     "kernel & routing": ["test_kernel.py", "test_intent.py", "test_router.py",
-                         "test_llm_routing.py", "test_memory.py"],
+                         "test_llm_routing.py", "test_memory.py", "test_config.py"],
 }
 
 

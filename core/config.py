@@ -80,6 +80,31 @@ class Settings:
         return node
 
 
+# Placeholder values shipped in config.yaml's own comments/examples. If one of these is still
+# live, it was never actually replaced -- and unlike most bad config, this class of mistake is
+# silent: the app runs fine, the placeholder just quietly reaches the daily briefing forever
+# (the exact case that motivated this: "Example Co" and "Local tech hub" turned up in every
+# single morning briefing because config.yaml's shipped example was never edited).
+KNOWN_SEED_VALUES = {
+    "Example Co — client web app",
+    "Local tech hub — volunteer",
+}
+
+
+def seed_data_warnings(settings: "Settings") -> list[str]:
+    """Config values that still match shipped example text — never actually filled in.
+    Checked at startup and surfaced in /api/health so this can't silently persist (§0: a
+    fake commitment reported as real is exactly the kind of thing that must not happen)."""
+    warnings: list[str] = []
+    commitments = settings.get("planner", "commitments", default=[]) or []
+    seeded = [c for c in commitments if c in KNOWN_SEED_VALUES]
+    if seeded:
+        warnings.append(
+            f"config.yaml planner.commitments still has the shipped example value(s), "
+            f"never replaced: {seeded}")
+    return warnings
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Build (and cache) the Settings object. Call this everywhere instead of reading os.environ."""

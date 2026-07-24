@@ -39,8 +39,16 @@ def parse_feed(feed_text: str, source_name: str, category_hint: str | None = Non
     for entry in parsed.entries:
         raw_title = entry.get("title", "")
         company, title = _split_company_title(raw_title)
-        if entry.get("author"):
-            company = company or entry.get("author", "")
+        # WWR-style feeds put it in the title ("Company: Position"); others (Himalayas
+        # among them) don't, and left company permanently blank -- "[3589] DevOps Engineer
+        # @ " in the digest, with nothing Calvin could judge the match against. author /
+        # author_detail.name / dc:creator (feedparser's dc_creator) are where several
+        # boards actually put it instead.
+        if not company:
+            company = (entry.get("author")
+                      or (entry.get("author_detail") or {}).get("name")
+                      or entry.get("dc_creator")
+                      or "")
         url = entry.get("link", "")
         desc = _strip_html(entry.get("summary", "") or entry.get("description", ""))
         tags = [t.get("term", "") for t in entry.get("tags", []) if t.get("term")]

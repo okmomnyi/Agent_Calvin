@@ -279,3 +279,52 @@ def test_client_actions_drops_a_malformed_or_non_e164_number(number):
 def test_client_actions_passes_through_answer_and_hangup():
     out = _client_actions(_result({"client_actions": [{"op": "answer"}, {"op": "hangup"}]}))
     assert out == [{"op": "answer"}, {"op": "hangup"}]
+
+
+# ==================================================== sticky sessions yield (regression)
+# Telegram log: a code_tutor session swallowed "create a playlist for late night coding" and
+# every message after it for two days, because _active_continuation() had no escape at all --
+# any active session key intercepted everything unconditionally, before the keyword router
+# ever ran. Fixed: a high-confidence (0.9) intent for a DIFFERENT skill now ends the stale
+# session instead of being swallowed by it.
+def test_sticky_session_yields_to_a_high_confidence_different_skill_intent(mem, monkeypatch, fake_llm):
+    monkeypatch.setattr("core.memory.get_memory", lambda: mem)
+    mem.kv_set("code_tutor.session", '{"mode": "explain", "topic": "pointers"}')
+
+    reg = SkillRegistry(router=IntentRouter(llm=fake_llm))
+    reg.discover()
+    intent, result = reg.handle_command("create me a late night coding playlists")
+
+    assert intent.skill == "music" and intent.action == "playlist"
+    assert mem.kv_get("code_tutor.session") in (None, ""), \
+        "the stale session must be cleared, not left pending, once it yields"
+
+
+def test_sticky_session_still_owns_a_message_with_no_high_confidence_match(mem, monkeypatch, fake_llm):
+    """The escape only fires for a clear, differently-routed intent -- an ordinary tutor
+    answer ("a hash table maps keys to values") must still reach the tutor, not fall through."""
+    monkeypatch.setattr("core.memory.get_memory", lambda: mem)
+    mem.kv_set("code_tutor.session", '{"mode": "explain", "topic": "pointers"}')
+
+    reg = SkillRegistry(router=IntentRouter(llm=fake_llm))
+    reg.discover()
+    intent, result = reg.handle_command("a hash table maps keys to values")
+
+    assert intent.skill == "code_tutor" and intent.action == "continue"
+    assert mem.kv_get("code_tutor.session"), "an ordinary answer must not clear the session"
+
+
+def test_sticky_session_does_not_yield_to_its_own_skill(mem, monkeypatch, fake_llm):
+    """A high-confidence match for the SAME skill that owns the session isn't a foreign
+    interruption -- it should still go through the session's own continuation, not be treated
+    as an escape (there is nothing to escape TO)."""
+    monkeypatch.setattr("core.memory.get_memory", lambda: mem)
+    mem.kv_set("spaced_rep.session", '{"mode": "quiz"}')
+
+    reg = SkillRegistry(router=IntentRouter(llm=fake_llm))
+    reg.discover()
+    intent, result = reg.handle_command("quiz me on kubernetes")
+
+    assert intent.skill == "spaced_rep" and intent.action == "quiz_answer"
+    assert mem.kv_get("spaced_rep.session"), \
+        "same-skill traffic must stay in the continuation, not be treated as foreign"

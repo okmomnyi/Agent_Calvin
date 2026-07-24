@@ -3,6 +3,8 @@ session machine, LLM answer-judging, weekly report, and exam-surge."""
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from core.llm import LLMClient
 from core.sm2 import CardState, schedule
 from skills.spaced_rep import SpacedRepSkill
@@ -149,3 +151,52 @@ def test_add_manual_card(mem):
     r = skill.add_card(front="What is TCP?", back="Transmission Control Protocol", unit="NET")
     assert r.data["added"] is True
     assert mem.count_flashcards(unit="NET", status="candidate") == 1
+
+
+# ------------------------------------------------------------------ daily nag (regression, #14)
+# Telegram log: "0 flashcard(s) due today. 1 candidate(s) to approve." repeated, identically,
+# for 5 consecutive days -- the same single candidate, never named, nagged daily with nothing
+# to act on directly from the notification.
+def test_no_cards_and_no_candidates_stays_silent(mem):
+    notify = MagicMock()
+    skill = SpacedRepSkill(memory=mem, notify=notify, clock=lambda: 1_000_000.0)
+    res = skill.daily_reminder()
+    assert res.data["due"] == 0
+    notify.assert_not_called()
+
+
+def test_a_fresh_lone_candidate_does_not_nag_yet(mem):
+    """Day 1 of a new candidate: due=0, one candidate -- must NOT push daily immediately."""
+    mem.add_flashcard("What is a hash table?", "A key-value structure", unit="CS", status="candidate")
+    notify = MagicMock()
+    skill = SpacedRepSkill(memory=mem, notify=notify, clock=lambda: 1_000_000.0)
+    res = skill.daily_reminder()
+    notify.assert_not_called()
+    assert "No cards due" in res.text
+
+
+def test_a_stale_lone_candidate_escalates_with_its_content_shown(mem):
+    mem.add_flashcard("What is a hash table?", "A key-value structure", unit="CS", status="candidate")
+    cid = mem.candidate_cards()[0]["id"]
+    old_created = 1_000_000.0 - 4 * 86400  # 4 days ago
+    with mem.tx() as conn:
+        conn.execute("UPDATE flashcards SET created_at=%s WHERE id=%s", (old_created, cid))
+
+    notify = MagicMock()
+    skill = SpacedRepSkill(memory=mem, notify=notify, clock=lambda: 1_000_000.0)
+    res = skill.daily_reminder()
+    notify.assert_called_once()
+    assert "What is a hash table?" in res.text  # the card's actual content, not just a count
+
+
+def test_due_cards_still_notify_daily_regardless_of_candidates(mem):
+    """Due cards ARE meant to be reviewed daily (that's spaced repetition) -- only the
+    candidate-only case is throttled."""
+    mem.add_flashcard("Q1", "A1", unit="CS", status="active")  # due_at NULL -> due now
+    mem.add_flashcard("Q2", "A2", unit="CS", status="candidate")
+    notify = MagicMock()
+    skill = SpacedRepSkill(memory=mem, notify=notify, clock=lambda: 1_000_000.0)
+    res = skill.daily_reminder()
+    assert res.data["due"] == 1
+    notify.assert_called_once()
+    assert "1 flashcard(s) due today" in res.text

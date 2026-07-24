@@ -261,7 +261,15 @@ class BotCore:
         action = store.resolve(parsed["id"], approve=parsed["approve"],
                                always=parsed.get("always", False))
         if action is None:
-            return f"No pending action #{parsed['id']}."
+            # Namespace collision, not a real miss: "approve 6229,6234,6235" from a job
+            # digest names JOB ids, a completely different sequence from pending_actions
+            # (Phase 30's proposal queue, used by proactive.py). Returning an error here
+            # dead-ended the message before it ever reached job_hunter.approve(), which
+            # would have resolved it correctly. Returning None instead lets route_text()
+            # fall through to the normal router -- and if the id genuinely isn't valid
+            # ANYWHERE, whichever skill actually owns that id space reports its own honest
+            # "unknown id" rather than this one guessing on the wrong table.
+            return None
         verb = "✅ Approved" if parsed["approve"] else "🚫 Denied"
         note = ""
         if parsed.get("always"):
@@ -390,7 +398,12 @@ class BotCore:
     # ------------------------------------------------------------- jobs + callbacks
     def jobs_payload(self) -> tuple[str, list[dict[str, Any]]]:
         """Return (header text, jobs) for drafted/notified jobs awaiting approval."""
-        rows = self.mem.jobs_by_status("notified", limit=10) + self.mem.jobs_by_status("drafted", limit=10)
+        # jobs_by_status() sorts by score WITHIN one status, but concatenating two already-
+        # sorted lists doesn't sort them together — every "notified" job (whatever its score)
+        # used to land ahead of every "drafted" job, so an 85-scored draft could sit behind a
+        # 60-scored notified job. Fetch generously, re-sort the combined set by score, THEN cap.
+        rows = self.mem.jobs_by_status("notified", limit=20) + self.mem.jobs_by_status("drafted", limit=20)
+        rows = sorted(rows, key=lambda r: r["score"] or 0, reverse=True)[:10]
         jobs = [{"id": r["id"], "title": r["title"], "company": r["company"],
                  "score": r["score"], "category": r["category"],
                  "apply_kind": r["apply_kind"], "apply_target": r["apply_target"]} for r in rows]

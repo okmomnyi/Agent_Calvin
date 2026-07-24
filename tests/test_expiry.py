@@ -48,15 +48,16 @@ def test_refuses_to_guess_a_deadline(text):
 
 # --------------------------------------------------------------------- expiry rules
 def _job(mem, *, ext: str, status: str = "drafted", age_days: float = 0.0,
-         deadline: float | None = None, now: float | None = None) -> int:
+         deadline: float | None = None, now: float | None = None,
+         score: int | None = None) -> int:
     now = now if now is not None else time.time()
     mem.upsert_job("test", ext, title=f"Role {ext}", company="Acme",
                    raw_json=json.dumps({"description": ""}))
     row = mem.get_job_by_ref("test", ext)
     with mem.tx():
         mem.conn.execute(
-            "UPDATE jobs SET status=%s, first_seen=%s, deadline=%s WHERE id=%s",
-            (status, now - age_days * DAY, deadline, row["id"]))
+            "UPDATE jobs SET status=%s, first_seen=%s, deadline=%s, score=%s WHERE id=%s",
+            (status, now - age_days * DAY, deadline, score, row["id"]))
     return row["id"]
 
 
@@ -162,3 +163,83 @@ def test_summary_names_both_reasons(mem):
     _job(mem, ext="closed", deadline=now - DAY, now=now)
     summary = JobExpiry(mem).run(now=now).summary()
     assert "2" in summary and "deadline" in summary and "unreviewed" in summary
+
+
+# --------------------------------------------------------------------- queue cap (#17)
+# Report: "pending approvals climbing 13 -> 34 -> 50 -> 69 over four days" -- low scorers
+# that hadn't gone stale YET just kept accumulating, because the only retirement rules were
+# age-based. This is the volume-based rule that complements them.
+def test_caps_the_active_queue_to_top_n_by_score(mem):
+    now = time.time()
+    keep_a = _job(mem, ext="a", status="drafted", score=90, now=now)
+    keep_b = _job(mem, ext="b", status="notified", score=80, now=now)
+    bump_c = _job(mem, ext="c", status="drafted", score=70, now=now)
+    bump_d = _job(mem, ext="d", status="notified", score=60, now=now)
+
+    result = JobExpiry(mem, queue_cap=2).run(now=now)
+
+    assert {r["id"] for r in result.capped} == {bump_c, bump_d}
+    assert mem.get_job(keep_a)["status"] == "drafted"
+    assert mem.get_job(keep_b)["status"] == "notified"
+    assert mem.get_job(bump_c)["status"] == "expired"
+    assert mem.get_job(bump_d)["status"] == "expired"
+
+
+def test_cap_only_counts_statuses_actually_shown_to_him(mem):
+    """"new"/"scored" haven't been drafted yet -- they can't be part of a queue he is
+    failing to review, so they must not count against the cap or get capped themselves."""
+    now = time.time()
+    shown = _job(mem, ext="shown", status="drafted", score=50, now=now)
+    unscored = _job(mem, ext="new", status="new", score=None, now=now)
+    scored_only = _job(mem, ext="scored", status="scored", score=99, now=now)
+
+    result = JobExpiry(mem, queue_cap=1).run(now=now)
+
+    assert not result.capped
+    assert mem.get_job(shown)["status"] == "drafted"
+    assert mem.get_job(unscored)["status"] == "new"
+    assert mem.get_job(scored_only)["status"] == "scored"
+
+
+def test_cap_never_touches_work_already_acted_on(mem):
+    now = time.time()
+    approved = _job(mem, ext="approved", status="approved", score=1, now=now)
+    kept = _job(mem, ext="kept", status="drafted", score=99, now=now)
+
+    JobExpiry(mem, queue_cap=1).run(now=now)
+
+    assert mem.get_job(approved)["status"] == "approved"
+    assert mem.get_job(kept)["status"] == "drafted"
+
+
+def test_cap_prefers_age_and_deadline_reasons_when_they_overlap(mem):
+    """A job that is both stale AND over the cap is reported once, under the more specific
+    age-based reason -- enforce_cap excludes rows this run already retired."""
+    now = time.time()
+    stale_and_low = _job(mem, ext="stale-low", status="drafted", score=10, age_days=5, now=now)
+    kept = _job(mem, ext="kept", status="drafted", score=90, now=now)
+
+    result = JobExpiry(mem, queue_cap=1).run(now=now)
+
+    assert [r["id"] for r in result.stale] == [stale_and_low]
+    assert not result.capped
+    assert mem.get_job(kept)["status"] == "drafted"
+
+
+def test_summary_mentions_the_capped_count(mem):
+    now = time.time()
+    _job(mem, ext="keep", status="drafted", score=90, now=now)
+    _job(mem, ext="cut", status="drafted", score=10, now=now)
+    summary = JobExpiry(mem, queue_cap=1).run(now=now).summary()
+    assert "1" in summary and "higher-scoring" in summary
+
+
+def test_cap_is_idempotent(mem):
+    now = time.time()
+    _job(mem, ext="keep", status="drafted", score=90, now=now)
+    _job(mem, ext="cut", status="drafted", score=10, now=now)
+    expiry = JobExpiry(mem, queue_cap=1)
+    first = expiry.run(now=now)
+    second = expiry.run(now=now)
+    assert len(first.capped) == 1
+    assert not second.capped, "re-running the cap re-retired an already-expired job"

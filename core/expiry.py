@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -43,6 +43,10 @@ DAY = 86400.0
 PENDING = ("new", "scored", "drafted", "notified")
 # Statuses expiry must never touch: he has already acted on these.
 PROTECTED = ("approved", "applied", "skipped", "expired")
+# The subset of PENDING actually surfaced to him (digest + /jobs) -- "new"/"scored" haven't
+# been drafted yet, so they can't be part of a queue he is failing to review. Cap only counts
+# what he would actually see.
+ACTIVE = ("drafted", "notified")
 
 _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
@@ -105,10 +109,11 @@ def parse_deadline(text: str, *, now: float | None = None) -> float | None:
 class ExpiryResult:
     stale: list[dict[str, Any]]
     expired: list[dict[str, Any]]
+    capped: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def total(self) -> int:
-        return len(self.stale) + len(self.expired)
+        return len(self.stale) + len(self.expired) + len(self.capped)
 
     def summary(self) -> str:
         if not self.total:
@@ -118,15 +123,18 @@ class ExpiryResult:
             bits.append(f"{len(self.expired)} past their deadline")
         if self.stale:
             bits.append(f"{len(self.stale)} unreviewed for over 2 days")
+        if self.capped:
+            bits.append(f"{len(self.capped)} bumped by higher-scoring roles")
         return f"🗂 Retired {self.total} job(s) from the queue — " + " and ".join(bits) + "."
 
 
 class JobExpiry:
     """Retires jobs Calvin can no longer act on. Idempotent: re-running changes nothing."""
 
-    def __init__(self, memory: Any, *, stale_days: float = 2.0) -> None:
+    def __init__(self, memory: Any, *, stale_days: float = 2.0, queue_cap: int = 30) -> None:
         self.mem = memory
         self.stale_days = stale_days
+        self.queue_cap = queue_cap
 
     def backfill_deadlines(self, limit: int = 500) -> int:
         """Parse deadlines for jobs scraped before this column existed."""
@@ -165,7 +173,37 @@ class JobExpiry:
             self.mem.set_job_status(row["id"], "expired")
         if expired or stale:
             log.info("expiry: %d past deadline, %d stale", len(expired), len(stale))
-        return ExpiryResult(stale=list(stale), expired=list(expired))
+
+        # Volume cap, on top of the two age-based rules above. A queue nobody can read is a
+        # queue nobody reviews (Calvin's own words) -- 13 pending grew to 69 over four days
+        # because low scorers that hadn't gone stale YET just kept accumulating. This retires
+        # them the moment a higher scorer bumps them past queue_cap, rather than waiting
+        # stale_days for the age rule to catch up. Expired/staled rows above are excluded from
+        # the cap query since they already changed status.
+        already = {row["id"] for row in list(expired) + list(stale)}
+        capped = self.enforce_cap(exclude=already)
+
+        return ExpiryResult(stale=list(stale), expired=list(expired), capped=capped)
+
+    def enforce_cap(self, *, exclude: set[int] | None = None) -> list[dict[str, Any]]:
+        """Keep only the top `queue_cap` ACTIVE (drafted/notified) jobs by score; retire the rest.
+
+        Unlike the age-based rules, this is volume-based: the lowest scorers in an oversized
+        queue are the ones a real review would skip anyway, so there is no reason to wait for
+        them to go stale first.
+        """
+        exclude = exclude or set()
+        rows = self.mem.conn.execute(
+            "SELECT id, title, company, score FROM jobs WHERE status = ANY(%s) "
+            "ORDER BY COALESCE(score, 0) DESC, id ASC",
+            (list(ACTIVE),)).fetchall()
+        rows = [r for r in rows if r["id"] not in exclude]
+        overflow = rows[self.queue_cap:]
+        for row in overflow:
+            self.mem.set_job_status(row["id"], "expired")
+        if overflow:
+            log.info("expiry: %d job(s) capped beyond top %d", len(overflow), self.queue_cap)
+        return list(overflow)
 
     def upcoming_deadlines(self, *, within_days: float = 3.0,
                            now: float | None = None) -> list[dict[str, Any]]:

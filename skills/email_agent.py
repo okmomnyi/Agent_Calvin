@@ -94,6 +94,7 @@ class EmailAgentSkill(BaseSkill):
         return {
             "check": self.cleanup,
             "cleanup": self.cleanup,
+            "search": self.search,
             "digest": self.digest,
             "draft": self.draft,
             "trash": self.request_trash,
@@ -183,9 +184,49 @@ class EmailAgentSkill(BaseSkill):
             data={"processed": processed, "counts": counts},
         )
 
+    # ------------------------------------------------------------- search (read-only)
+    def search(self, query: str = "", sender: str = "", max_results: int = 10, **_: Any) -> CommandResult:
+        """List matching inbox messages. Read-only, `trivial` tier — no archive, no label, no
+        trash, nothing mutated. "List all emails from LinkedIn" used to have no dedicated
+        action to route to at all, so the catalogue router's best guess was `cleanup` — which
+        ran a real inbox pass and reported on that instead of answering what was asked.
+        """
+        term = (sender or query).strip()
+        if not term:
+            return CommandResult(text="Who or what should I search for?", ok=False)
+        gmail_query = f"from:{term}" if sender else term
+        try:
+            ids = self.gmail.list_inbox(max_results=50, query=gmail_query)
+        except Exception as exc:  # noqa: BLE001 - surfaces auth/network issues cleanly
+            log.exception("Email search failed")
+            return CommandResult(text=f"Couldn't reach Gmail: {exc}", ok=False)
+        if not ids:
+            return CommandResult(text=f"No emails found matching \"{term}\".", data={"count": 0})
+        shown = ids[:max_results]
+        lines = [f"📧 {len(ids)} email(s) matching \"{term}\":"]
+        rows = []
+        for mid in shown:
+            msg = self.gmail.get_message(mid, fmt="metadata")
+            subject = self.gmail.header(msg, "Subject")
+            from_hdr = self.gmail.header(msg, "From")
+            lines.append(f"  • {subject or '(no subject)'} — {from_hdr}")
+            rows.append({"id": mid, "subject": subject, "from": from_hdr})
+        if len(ids) > len(shown):
+            lines.append(f"  (+{len(ids) - len(shown)} more — refine the search to narrow it)")
+        return CommandResult(text="\n".join(lines), data={"count": len(ids), "messages": rows})
+
     # ------------------------------------------------------------- daily digest
-    def digest(self, notify: bool = True, **_: Any) -> CommandResult:
-        """Build and send the grouped daily digest from today's processed emails."""
+    def digest(self, notify: bool = False, **_: Any) -> CommandResult:
+        """Build the grouped daily digest from today's processed emails.
+
+        `notify=False` by default: digest() is no longer scheduled (the unified 07:00
+        briefing replaced that), so every caller today is either (a) an interactive command
+        ("summarize my inbox"), where the reply channel already delivers CommandResult.text
+        back to Calvin, or (b) `manage.py digest`, which passes an EXPLICIT `notify=` value
+        regardless of this default. The interactive path used to inherit `notify=True` with
+        no override available, which meant every /summarize also pushed a second, separate
+        Telegram message — the exact "inbox digest sent twice, same minute" from the log.
+        """
         since = start_of_local_day(self._now())
         rows = self.mem.execute(
             "SELECT category, subject, sender, action FROM emails "

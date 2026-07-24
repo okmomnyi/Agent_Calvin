@@ -34,6 +34,12 @@ log = get_logger("skills.adaptive")
 
 DEFAULT_THRESHOLD = 4
 
+# Set while a retro prompt is awaiting his reply; kernel/registry.py's _active_continuation
+# routes the next free-text message here instead of the general router. Without this (#22)
+# an answer to "what worked this week" had nowhere to land -- it just fell through to
+# whatever the keyword/LLM router guessed, and was silently lost either way.
+_RETRO_SESSION_KEY = "adaptive.retro_session"
+
 # Phrases that would switch off a §0 invariant. A proposed rule matching one is refused
 # outright — no instruction, however often the pattern repeats, can disable these.
 _INVARIANT_TRIPWIRES: list[tuple[str, str]] = [
@@ -230,12 +236,19 @@ class AdaptiveSkill(BaseSkill):
     def retro(self, answer: str = "", notify: bool = True, **_: Any) -> CommandResult:
         """Sunday retro. With no answer it asks; with an answer it mines it for candidates."""
         if not answer:
+            # A session already open means last week's prompt never got a reply -- say so
+            # instead of silently re-asking as if nothing happened (#22: "no expiry notice").
+            unanswered = bool(self.mem.kv_get(_RETRO_SESSION_KEY))
             prompt = ("🪞 Weekly retro — quick one: what worked this week, and what didn't? "
                       "(Anything you say here I'll turn into proposed rules, never silent changes.)")
+            if unanswered:
+                prompt = "🪞 Never heard back on last week's retro — skipping it. " + prompt
             if notify:
                 self._notify(prompt)
-            return CommandResult(text=prompt, data={"asked": True})
+            self.mem.kv_set(_RETRO_SESSION_KEY, "1")
+            return CommandResult(text=prompt, data={"asked": True, "previous_unanswered": unanswered})
 
+        self.mem.kv_set(_RETRO_SESSION_KEY, "")
         try:
             data = self.llm.chat_json(
                 "classify",

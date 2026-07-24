@@ -23,6 +23,8 @@ from core.sm2 import CardState, GRADES, schedule
 from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.spaced_rep")
+# A candidate with nothing due doesn't earn a daily push until it's been sitting this long.
+_CANDIDATE_ESCALATE_DAYS = 3
 
 _SESSION_KEY = "spaced_rep.session"
 
@@ -239,9 +241,27 @@ class SpacedRepSkill(BaseSkill):
 
     def daily_reminder(self, **_: Any) -> CommandResult:
         due = len(self.mem.due_cards(now=self._now()))
-        cand = self.mem.count_flashcards(status="candidate")
+        candidates = self.mem.candidate_cards()
+        cand = len(candidates)
         if not due and not cand:
             return CommandResult(text="No cards due today.", data={"due": 0})
+
+        if not due and cand:
+            # A lone candidate with nothing due is not urgent enough for a DAILY push -- the
+            # exact same single card nagged identically for 5 days straight in the log, never
+            # saying what it even was. Escalate once it's genuinely been sitting a while, and
+            # show its content -- an actionable notification, not a repeating count.
+            oldest = min(c["created_at"] for c in candidates)
+            age_days = (self._now() - oldest) / 86400
+            if age_days < _CANDIDATE_ESCALATE_DAYS:
+                return CommandResult(text="No cards due today.", data={"due": 0, "candidates": cand})
+            preview = candidates[0]["front"][:80]
+            more = f" (+{cand - 1} more)" if cand > 1 else ""
+            msg = (f"🧠 No cards due today, but {cand} candidate(s) have been waiting "
+                  f"{age_days:.0f}+ days:\n  • {preview}{more}\nSay '/cards' to approve or reject.")
+            self._notify(msg)
+            return CommandResult(text=msg, data={"due": due, "candidates": cand})
+
         msg = f"🧠 {due} flashcard(s) due today." + (f" {cand} candidate(s) to approve." if cand else "")
         msg += " Say 'quiz me' or /quiz to start."
         self._notify(msg)
