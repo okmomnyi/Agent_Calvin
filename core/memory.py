@@ -770,6 +770,18 @@ class Memory:
             )
         return int(cur.fetchone()["id"])
 
+    def latest_application_for_company(self, company: str) -> dict[str, Any] | None:
+        """Most recent application row for this company (case-insensitive), or None.
+
+        Used to link an inbound acknowledgement/response email back to the specific
+        application it's replying to (#27) -- "most recent" because a second application to
+        the same company should update the newer row, not a stale earlier rejection.
+        """
+        return self.conn.execute(
+            "SELECT * FROM applications WHERE lower(company)=lower(%s) "
+            "ORDER BY applied_at DESC LIMIT 1", (company,)
+        ).fetchone()
+
     def set_application_status(self, app_id: int, status: str) -> None:
         with self.tx():
             self.conn.execute(

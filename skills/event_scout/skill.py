@@ -25,6 +25,7 @@ from skills.job_hunter.sources.base import keyword_category  # noqa: F401 (kept 
 log = get_logger("skills.event_scout")
 
 _TAGS_KV = "events.tags_override"      # runtime tag edits merged over config defaults
+_REMINDED_KV = "events.t24h_reminded"  # ids already sent a registration_reminder() push
 _TOKEN_RE = __import__("re").compile(r"[a-z0-9]+")
 
 
@@ -70,6 +71,8 @@ class EventScoutSkill(BaseSkill):
                          kwargs={"day_of_week": "mon", "hour": 8}),
             ScheduledJob(id="events.closing", func=self.closing_soon, trigger="interval",
                          kwargs={"hours": 6}),
+            ScheduledJob(id="events.registration_reminder", func=self.registration_reminder,
+                         trigger="interval", kwargs={"hours": 6}),
         ]
 
     # ------------------------------------------------------------- tags
@@ -193,6 +196,36 @@ class EventScoutSkill(BaseSkill):
                 self.mem.set_event_status(r["id"], "notified")
                 pushed += 1
         return CommandResult(text=f"Pushed {pushed} closing-soon event(s).", data={"pushed": pushed})
+
+    def registration_reminder(self, **_: Any) -> CommandResult:
+        """T-24h push for events he's already marked interested in (#26's simplest fix).
+
+        closing_soon() only ever looks at status='new' -- an event he'd already committed to
+        gets no reminder at all from it, which is exactly how five CTFs he'd said "interested"
+        to sat unregistered until they went OVERDUE in the briefing and nobody noticed in
+        time. Full auto-registration (a real form submission) is a bigger, riskier ask the
+        report explicitly deferred; a timely nudge is the honest first step.
+        """
+        from skills.event_scout.sources import parse_event_date
+
+        now = self._now()
+        interested = self.mem.events_by_status("interested", limit=200)
+        # Bounded by construction: only ids still in `interested` survive the intersection,
+        # so this can't grow forever the way a plain append-only log would.
+        reminded = set(json.loads(self.mem.kv_get(_REMINDED_KV) or "[]")) & {r["id"] for r in interested}
+        pushed = 0
+        for r in interested:
+            if r["id"] in reminded:
+                continue
+            epoch = parse_event_date(r["date"])
+            if epoch and now <= epoch <= now + 24 * 3600:
+                self._notify(
+                    f"⏰ Starting within 24h — you said you're interested: {r['title']}\n"
+                    f"{r['url'] or 'No link on file — check your notes for how to register.'}")
+                reminded.add(r["id"])
+                pushed += 1
+        self.mem.kv_set(_REMINDED_KV, json.dumps(sorted(reminded)))
+        return CommandResult(text=f"Sent {pushed} T-24h event reminder(s).", data={"pushed": pushed})
 
     # ------------------------------------------------------------- interested / skip
     def interested(self, event_id: int | str = 0, **_: Any) -> CommandResult:

@@ -62,12 +62,15 @@ def _weak_job():
                   description="ads", category_hint="other")
 
 
-def _skill(sources, llm, mem, mailer, prep=None, notify=None):
+def _skill(sources, llm, mem, mailer, prep=None, notify=None, notify_document=None):
     # prep is injected (a mock by default) so the interview watcher never fires the real
     # Phase-6 prep pack, which would hit live search + the LLM.
     # notify likewise: without it the watcher test pushed a real "Interview invite detected!
     # From: hr@acme.com" to Calvin's phone on every suite run.
+    # notify_document likewise: without it, approve() on a portal job with a cv_variant would
+    # hit the real Telegram sendDocument endpoint on every suite run.
     return JobHunterSkill(llm=llm, memory=mem, sources=sources, mailer=mailer,
+                          notify_document=notify_document or MagicMock(return_value=True),
                           prep=prep or MagicMock(), notify=notify or MagicMock())
 
 
@@ -239,6 +242,94 @@ def test_approve_portal_job_tracks_without_sending(fake_settings, mem):
     assert row["status"] == "tracked", "a portal-tracked row must never carry status='applied'"
 
 
+# ------------------------------------------------------------------ #24 option 1 (regression)
+# Report: 100% of jobs in the log were portal-apply, and approving one only left a filename on
+# the server -- Calvin had to SSH in to actually get the CV. "The manual step is 60 seconds"
+# only holds if the CV and cover letter actually reach him.
+def test_approve_portal_job_pushes_the_tailored_cv_as_a_document(fake_settings, mem):
+    llm = _HuntLLM({"Cloud Support": (75, "cloud_devops")})
+    mailer = MagicMock()
+    notify_doc = MagicMock(return_value=True)
+    skill = _skill([_FakeSource("remotive", [_portal_job()])], llm, mem, mailer,
+                   notify_document=notify_doc)
+    skill.hunt(notify=False)
+    job_id = mem.get_job_by_ref("remotive", "p1")["id"]
+
+    # Real cv_tailor.tailor() writes cv_variant to the job row as a side effect (see
+    # skills/cv_tailor.py's tailor()) -- a bare MagicMock doesn't reproduce that, so the
+    # fake here does what the real dependency actually does.
+    tailor = MagicMock()
+
+    def _fake_tailor(job_id, company=""):
+        mem.set_job_cv_variant(int(job_id), "data/cv/variants/nimbus.pdf")
+        return type("R", (), {"ok": True, "data": {"variant": "data/cv/variants/nimbus.pdf",
+                                                    "ats_before": 20, "ats_after": 55}})()
+    tailor.tailor.side_effect = _fake_tailor
+    skill._cv_tailor = tailor
+
+    skill.approve(selection=[job_id])
+
+    notify_doc.assert_called_once()
+    assert notify_doc.call_args.args[0] == "data/cv/variants/nimbus.pdf"
+    assert str(job_id) in notify_doc.call_args.kwargs["caption"]
+
+
+def test_approve_portal_job_includes_the_cover_letter_in_the_reply(fake_settings, mem):
+    """The cover text rides in CommandResult.text -- the same channel that already delivers
+    the summary -- rather than a second push, so this isn't a repeat of the #15 double-send."""
+    llm = _HuntLLM({"Cloud Support": (75, "cloud_devops")})
+    skill = _skill([_FakeSource("remotive", [_portal_job()])], llm, mem, MagicMock())
+    skill.hunt(notify=False)
+    job_id = mem.get_job_by_ref("remotive", "p1")["id"]
+    cover_text = mem.get_job(job_id)["cover_text"]
+    assert cover_text   # drafted at hunt time
+
+    result = skill.approve(selection=[job_id])
+
+    assert cover_text in result.text
+    assert "https://remotive/p1" in result.text   # apply link alongside it
+
+
+def test_approve_email_job_does_not_also_push_a_cv_document(fake_settings, mem):
+    """An email-apply job already gets the CV as a real email attachment (_send_application) --
+    pushing it again via Telegram would be redundant, not helpful."""
+    llm = _HuntLLM({"DevOps Engineer": (85, "cloud_devops")})
+    notify_doc = MagicMock(return_value=True)
+    skill = _skill([_FakeSource("remoteok", [_email_job()])], llm, mem, MagicMock(),
+                   notify_document=notify_doc)
+    skill.hunt(notify=False)
+    job_id = mem.get_job_by_ref("remoteok", "e1")["id"]
+
+    skill.approve(selection=[job_id])
+
+    notify_doc.assert_not_called()
+
+
+def test_approve_portal_job_falls_back_to_master_cv_when_tailoring_fails(fake_settings, mem):
+    """Mirrors _send_application's own fallback: a tailoring failure must not mean he gets
+    nothing to attach, same as it never blocks the email-apply send."""
+    llm = _HuntLLM({"Cloud Support": (75, "cloud_devops")})
+    tailor = MagicMock()
+    tailor.tailor.side_effect = RuntimeError("NIM timed out")
+    notify_doc = MagicMock(return_value=True)
+    skill = _skill([_FakeSource("remotive", [_portal_job()])], llm, mem, MagicMock(),
+                   notify_document=notify_doc)
+    skill._cv_tailor = tailor
+    skill.hunt(notify=False)
+    job_id = mem.get_job_by_ref("remotive", "p1")["id"]
+
+    skill.approve(selection=[job_id])
+
+    from skills.job_hunter.skill import find_master_cv
+
+    master = find_master_cv()
+    if master:
+        notify_doc.assert_called_once()
+        assert notify_doc.call_args.args[0] == str(master)
+    else:
+        notify_doc.assert_not_called()
+
+
 # ------------------------------------------------------------------ sent vs tracked (regression)
 # Telegram log: "Applications sent: 3" in a week where every job was `apply on site` -- nothing
 # was actually emailed. record_application()'s kind/status split, and report()'s wording, must
@@ -335,6 +426,67 @@ def test_interview_watcher_alerts_on_invite(fake_settings, mem):
     again = skill.interview_check(messages=msgs)
     assert again.data["alerts"] == 0
     assert notify.call_count == 1
+    # #27: an interview invite is itself a response -- the application row must reflect it,
+    # not just the Telegram alert (which tells him once and is easy to lose in the log).
+    app = mem.latest_application_for_company("Acme")
+    assert app["status"] == "interview"
+
+
+# ------------------------------------------------------------------ confirmation loop (#27)
+# Report: "nothing watches for the acknowledgement... Responses: 0 becomes a real number."
+# interview_check() already classified inbound mail as interview_invite/response/unrelated --
+# the "response" branch just threw the result away instead of linking it to the application.
+class _ResponseLLM(_HuntLLM):
+    def classify(self, text, labels, **kw):  # type: ignore[override]
+        if "interview" in text.lower():
+            return "interview_invite"
+        if "thank you for applying" in text.lower():
+            return "response"
+        return "unrelated"
+
+
+def test_interview_check_links_a_plain_acknowledgement_to_the_application(fake_settings, mem):
+    llm = _ResponseLLM({})
+    skill = _skill([], llm, mem, MagicMock(), notify=MagicMock())
+    mem.record_application(job_id=None, company="Acme", source="remoteok", category="cloud_devops")
+
+    msgs = [{"gmail_id": "m1", "sender": "hr@acme.com", "subject": "Your application",
+             "snippet": "Thank you for applying, we'll be in touch."}]
+    result = skill.interview_check(messages=msgs)
+
+    assert result.data["alerts"] == 0                     # not an interview invite
+    app = mem.latest_application_for_company("Acme")
+    assert app["status"] == "replied"
+    # the response feeds report()'s rate, which used to stay 0 no matter how many replied
+    stats = mem.application_stats(since=0)
+    assert stats["by_status"].get("replied", 0) == 1
+
+
+def test_interview_check_response_does_not_downgrade_an_interview_status(fake_settings, mem):
+    llm = _ResponseLLM({})
+    skill = _skill([], llm, mem, MagicMock(), notify=MagicMock())
+    app_id = mem.record_application(job_id=None, company="Acme", source="remoteok",
+                                    category="cloud_devops")
+    mem.set_application_status(app_id, "interview")
+
+    msgs = [{"gmail_id": "m2", "sender": "hr@acme.com", "subject": "Re: your application",
+             "snippet": "Thank you for applying -- following up on scheduling."}]
+    skill.interview_check(messages=msgs)
+
+    assert mem.latest_application_for_company("Acme")["status"] == "interview"
+
+
+def test_interview_check_response_with_no_matching_company_is_a_no_op(fake_settings, mem):
+    llm = _ResponseLLM({})
+    skill = _skill([], llm, mem, MagicMock(), notify=MagicMock())
+    mem.record_application(job_id=None, company="Acme", source="remoteok", category="cloud_devops")
+
+    msgs = [{"gmail_id": "m3", "sender": "hr@unrelatedco.com", "subject": "Your application",
+             "snippet": "Thank you for applying, we'll be in touch."}]
+    result = skill.interview_check(messages=msgs)   # sender doesn't match any applied company
+
+    assert result.data["alerts"] == 0
+    assert mem.latest_application_for_company("Acme")["status"] == "applied"
 
 
 def test_approve_auto_tailors_cv_and_confirms(fake_settings, mem):

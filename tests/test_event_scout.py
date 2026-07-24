@@ -75,8 +75,9 @@ class _FakeSource:
         return self._events
 
 
-def _skill(mem, events, now=NOW):
-    return EventScoutSkill(memory=mem, sources=[_FakeSource(events)], clock=lambda: now)
+def _skill(mem, events, now=NOW, notify=None):
+    return EventScoutSkill(memory=mem, sources=[_FakeSource(events)], clock=lambda: now,
+                           notify=notify)
 
 
 def test_scan_stores_only_free_and_dedupes(mem):
@@ -146,6 +147,93 @@ def test_skip_marks_skipped(mem):
     eid = mem.events_by_status("new")[0]["id"]
     skill.skip(event_id=eid)
     assert mem.get_event(eid)["status"] == "skipped"
+
+
+# ------------------------------------------------------------------ registration reminder (#26)
+# Report: five CTFs he'd said "interested" to sat unregistered and went OVERDUE, unnoticed,
+# because closing_soon() only ever looks at status='new' events -- one he'd already committed
+# to got no reminder at all. Full auto-registration is deferred; a T-24h nudge is the
+# "simpler first step" the report itself suggested.
+def test_registration_reminder_pushes_for_an_interested_event_starting_soon(mem):
+    from unittest.mock import MagicMock
+
+    notify = MagicMock(return_value=True)
+    events = [RawEvent("ctftime", "1", "CyberQuest CTF", date="2027-06-01", tags=["ctf"], free=True)]
+    skill = _skill(mem, events, notify=notify)
+    skill.scan()
+    eid = mem.events_by_status("new")[0]["id"]
+    skill.interested(event_id=eid)
+
+    from skills.event_scout.sources import parse_event_date
+
+    epoch = parse_event_date("2027-06-01")
+    soon_skill = _skill(mem, [], now=epoch - 3600, notify=notify)   # 1h before start
+    result = soon_skill.registration_reminder()
+
+    assert result.data["pushed"] == 1
+    notify.assert_called_once()
+    assert "CyberQuest CTF" in notify.call_args.args[0]
+
+
+def test_registration_reminder_ignores_events_more_than_24h_out(mem):
+    from unittest.mock import MagicMock
+
+    notify = MagicMock(return_value=True)
+    events = [RawEvent("ctftime", "1", "Far Off CTF", date="2027-06-01", tags=["ctf"], free=True)]
+    skill = _skill(mem, events, notify=notify)
+    skill.scan()
+    eid = mem.events_by_status("new")[0]["id"]
+    skill.interested(event_id=eid)
+
+    from skills.event_scout.sources import parse_event_date
+
+    epoch = parse_event_date("2027-06-01")
+    far_skill = _skill(mem, [], now=epoch - 5 * 86400, notify=notify)   # 5 days before
+    result = far_skill.registration_reminder()
+
+    assert result.data["pushed"] == 0
+    notify.assert_not_called()
+
+
+def test_registration_reminder_never_touches_an_event_still_status_new(mem):
+    """This is closing_soon()'s job, not this one -- a merely-discovered event he hasn't
+    reacted to yet must not get a "you said you're interested" message he never said."""
+    from unittest.mock import MagicMock
+
+    notify = MagicMock(return_value=True)
+    events = [RawEvent("ctftime", "1", "Undecided CTF", date="2027-06-01", tags=["ctf"], free=True)]
+    skill = _skill(mem, events, notify=notify)
+    skill.scan()   # status stays 'new' -- interested() never called
+
+    from skills.event_scout.sources import parse_event_date
+
+    epoch = parse_event_date("2027-06-01")
+    soon_skill = _skill(mem, [], now=epoch - 3600, notify=notify)
+    result = soon_skill.registration_reminder()
+
+    assert result.data["pushed"] == 0
+    notify.assert_not_called()
+
+
+def test_registration_reminder_does_not_repeat_for_the_same_event(mem):
+    from unittest.mock import MagicMock
+
+    notify = MagicMock(return_value=True)
+    events = [RawEvent("ctftime", "1", "CyberQuest CTF", date="2027-06-01", tags=["ctf"], free=True)]
+    skill = _skill(mem, events, notify=notify)
+    skill.scan()
+    eid = mem.events_by_status("new")[0]["id"]
+    skill.interested(event_id=eid)
+
+    from skills.event_scout.sources import parse_event_date
+
+    epoch = parse_event_date("2027-06-01")
+    soon_skill = _skill(mem, [], now=epoch - 3600, notify=notify)
+    soon_skill.registration_reminder()
+    again = soon_skill.registration_reminder()
+
+    assert again.data["pushed"] == 0
+    notify.assert_called_once()   # not called a second time for the same event
 
 
 def test_cancelled_or_postponed_events_are_not_recommended(mem):

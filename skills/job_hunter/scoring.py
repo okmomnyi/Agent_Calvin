@@ -124,7 +124,14 @@ def _profile_text() -> str:
         f"- ALSO acceptable: {also}\n"
         "- Unpaid roles => unpaid:true and score 0 (auto-skip).\n"
         "- Cybersecurity/pentest roles may score normally if they match general skills, "
-        "but are not a priority category."
+        "but are not a priority category.\n"
+        # #25: a PAID INTERNSHIP for a Year-3 student is an excellent, on-level match, not a
+        # fallback from a full role he isn't ready for yet -- being a student is the
+        # qualification the role is asking for. Score it as generously as SECONDARY when the
+        # field lines up, not as an afterthought behind two other tiers.
+        "- category=\"internship\" (paid only) should score as generously as SECONDARY when "
+        "the field lines up with PRIMARY or SECONDARY: he is a Year-3 student, so being a "
+        "student is the qualification the internship is asking for, not a gap."
     )
 
 

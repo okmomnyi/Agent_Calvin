@@ -23,7 +23,7 @@ from skills.job_hunter.enrich import enrich_job
 from core.logging_setup import get_logger
 from core.mailer import ApplicationMailer
 from core.memory import Memory, get_memory
-from core.notify import send_telegram
+from core.notify import send_telegram, send_telegram_document
 from core.queue import get_queue, handler
 from core.persona_store import get_engine, is_seeded, verified_facts_text
 from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
@@ -57,6 +57,7 @@ class JobHunterSkill(BaseSkill):
         prep: Any | None = None,
         notify: Callable[[str], bool] | None = None,
         cv_tailor: Any | None = None,
+        notify_document: Callable[..., bool] | None = None,
     ) -> None:
         self._llm = llm
         self._mem = memory
@@ -66,6 +67,9 @@ class JobHunterSkill(BaseSkill):
         # a real "Interview invite detected! From: hr@acme.com" to Calvin's phone on every
         # suite run. The dependency a test cannot replace is the one that reaches a human.
         self._notify = notify or send_telegram
+        # #24 option 1: a portal job's tailored CV used to be a filename on the server —
+        # Calvin had to SSH in to actually get it, which is not "a 60-second manual step".
+        self._notify_document = notify_document or send_telegram_document
         self._sources = list(sources) if sources is not None else None
         self._mailer = mailer
         self._prep = prep
@@ -412,7 +416,7 @@ class JobHunterSkill(BaseSkill):
         if not ids:
             return CommandResult(text="Nothing to approve — give me job numbers (e.g. approve 1,3).",
                                  ok=False)
-        applied, manual, missing, tailored_notes = [], [], [], []
+        applied, manual, missing, tailored_notes, manual_packets = [], [], [], [], []
         for job_id in ids:
             job = self.mem.get_job(int(job_id))
             if job is None:
@@ -446,6 +450,23 @@ class JobHunterSkill(BaseSkill):
                 )
                 manual.append(job_id)
                 tailored_notes.append(f"[{job_id}] {tailored_note} (apply via link)")
+                # #24 option 1: hand him the actual materials, not a filename. A portal job
+                # was "tracked" and left him to separately dig up the CV and cover text — the
+                # report's whole complaint was that this made "60 seconds" untrue. The CV goes
+                # as a real document (best-effort; never blocks the approval on a send failure)
+                # and the cover text rides in the reply itself, since that already reaches him
+                # through whatever channel triggered `approve`.
+                where = f" @ {job['company']}" if job.get("company") else ""
+                # Mirrors _send_application's fallback: tailoring failing must not mean he
+                # gets nothing to attach, same as it never blocks the email-apply send.
+                cv = job["cv_variant"] or find_master_cv()
+                if cv:
+                    self._notify_document(
+                        str(cv), caption=f"📄 CV for [{job_id}] {job['title']}{where}")
+                if keeper["cover"]:
+                    manual_packets.append(
+                        f"✉️ [{job_id}] {job['title']}{where} — apply at {job['apply_target']}\n"
+                        f"{keeper['cover']}")
 
         parts = []
         if applied:
@@ -457,6 +478,8 @@ class JobHunterSkill(BaseSkill):
         if missing:
             parts.append(f"Unknown job id(s): {missing}.")
         summary = " ".join(parts) or "Nothing approved."
+        if manual_packets:
+            summary += "\n\n" + "\n\n".join(manual_packets)
         # NOT also pushed via self._notify(): approve() is exclusively an interactive action
         # (a direct reply to "approve X" or a button press), never scheduled -- the caller's
         # own channel (Telegram's reply, the dashboard, TTS) already delivers this exact text
@@ -590,16 +613,43 @@ class JobHunterSkill(BaseSkill):
                 ["interview_invite", "response", "unrelated"],
                 instruction="Is this a job interview invitation, a general response to an application, or unrelated?",
             )
+            matched = next((c for c in companies if c in blob), "")
             if label == "interview_invite":
-                matched = next((c for c in companies if c in blob), "")
                 self._notify(f"🎯 Interview invite detected!\nFrom: {msg.get('sender')}\n"
                               f"Subject: {msg.get('subject')}\n\nGenerating your prep pack…")
                 self._auto_prep(matched or msg.get("sender", ""))
+                self._link_response(matched, "interview")
                 alerts += 1
+            elif label == "response":
+                # #27: the classifier already told us this was a reply -- it used to be
+                # thrown away the moment it wasn't an interview invite, so "Responses: 0"
+                # stayed 0 even when companies genuinely wrote back. Link it to the
+                # application row so report()'s rate becomes a real number.
+                self._link_response(matched, "replied")
             if label in ("interview_invite", "response"):
                 alerted.add(gid)
         self.mem.kv_set("job_hunter.interview_alerted", json.dumps(sorted(alerted)))
         return CommandResult(text=f"Interview check done — {alerts} new invite(s).", data={"alerts": alerts})
+
+    # Progression only ever moves forward -- a later "response" classification (e.g. a
+    # calendar-invite follow-up after the interview mail) must never downgrade a company
+    # already marked "interview" back to a plain "replied".
+    _STATUS_RANK = {"applied": 0, "tracked": 0, "replied": 1, "interview": 2, "offer": 3}
+
+    def _link_response(self, company: str, status: str) -> None:
+        """Best-effort: link an inbound reply to the application row it answers (#27)."""
+        if not company:
+            return
+        try:
+            app = self.mem.latest_application_for_company(company)
+            if not app:
+                return
+            current = self._STATUS_RANK.get(app["status"], 0)
+            if self._STATUS_RANK.get(status, 0) <= current:
+                return
+            self.mem.set_application_status(app["id"], status)
+        except Exception:  # noqa: BLE001 - never let bookkeeping break the watcher
+            log.exception("could not link response to an application for %s", company)
 
     def _auto_prep(self, company: str) -> None:
         """Fire the Phase 6 prep pack for a detected interview invite (best-effort)."""

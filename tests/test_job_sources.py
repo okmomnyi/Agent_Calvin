@@ -6,6 +6,7 @@ import json
 
 from skills.job_hunter.fetcher import Fetcher
 from skills.job_hunter.sources.base import keyword_category, stable_id
+from skills.job_hunter.sources.himalayas_api import parse_himalayas_internships
 from skills.job_hunter.sources.jsonapi import parse_jobicy, parse_remoteok, parse_remotive
 from skills.job_hunter.sources.rss import parse_feed
 from skills.job_hunter.sources.serpapi import parse_serpapi
@@ -40,6 +41,27 @@ RSS = """<?xml version="1.0"?><rss version="2.0"><channel>
 <item><title>Plain Transcription Job</title><link>https://wwr/2</link><guid>wwr-2</guid>
 <description>Transcribe interviews</description></item>
 </channel></rss>"""
+
+# Shape verified live against https://himalayas.app/jobs/api/search?employment_type=Intern
+# (no key required) -- field names match the real response, not the documented-but-unchecked
+# ones.
+HIMALAYAS_INTERNSHIPS = json.dumps({"updatedAt": 1784870859, "offset": 0, "limit": 20,
+                                    "totalCount": 1251, "jobs": [
+    {"title": "Cloud Engineering Intern", "excerpt": "Support our AWS infra team.",
+     "companyName": "Nimbus Cloud", "companySlug": "nimbus-cloud", "employmentType": "Intern",
+     "seniority": ["Intern"], "locationRestrictions": ["Worldwide"],
+     "categories": ["Cloud-Engineering", "DevOps"],
+     "description": "<p>Support our <b>AWS</b> infrastructure team.</p>" + "x" * 400,
+     "applicationLink": "https://himalayas.app/companies/nimbus-cloud/jobs/cloud-eng-intern",
+     "guid": "https://himalayas.app/companies/nimbus-cloud/jobs/cloud-eng-intern",
+     "pubDate": 1784800000, "expiryDate": 1790000000},
+    # A non-intern row (the API's own filter isn't airtight in every response) must be dropped.
+    {"title": "Senior DevOps Engineer", "companyName": "BigCo", "employmentType": "Full Time",
+     "locationRestrictions": ["Germany"], "categories": ["DevOps"],
+     "description": "5+ years experience required.",
+     "applicationLink": "https://himalayas.app/companies/bigco/jobs/senior-devops",
+     "guid": "https://himalayas.app/companies/bigco/jobs/senior-devops"},
+]})
 
 SERPAPI = json.dumps({"jobs_results": [
     {"job_id": "g1", "title": "DevOps Intern", "company_name": "StartTech",
@@ -76,6 +98,36 @@ def test_parse_jobicy():
     jobs = parse_jobicy(json.loads(JOBICY))
     assert jobs[0].title == "Junior SRE"
     assert "DevOps" in jobs[0].tags
+
+
+# ------------------------------------------------------------------ Himalayas internships (#25)
+def test_parse_himalayas_internships_extracts_full_description_and_category():
+    jobs = parse_himalayas_internships(json.loads(HIMALAYAS_INTERNSHIPS))
+    assert len(jobs) == 1                          # the Full Time row is dropped
+    j = jobs[0]
+    assert j.title == "Cloud Engineering Intern"
+    assert j.company == "Nimbus Cloud"
+    assert j.category_hint == "internship"
+    assert j.source == "himalayas_internships"
+    assert "<b>" not in j.description and "AWS" in j.description
+    # Regression motivation for this source (#16): the RSS himalayas feed averaged 168
+    # characters of pure logistics text -- this endpoint gives the real description.
+    assert len(j.description) > 300
+
+
+def test_parse_himalayas_internships_belt_and_braces_filter():
+    """Even if the query's own employment_type filter ever misses, the parser must not
+    let a non-intern posting through under an internship source/category."""
+    non_intern_only = json.dumps({"jobs": [
+        {"title": "Staff Engineer", "companyName": "BigCo", "employmentType": "Full Time",
+         "applicationLink": "https://x/1", "guid": "https://x/1"},
+    ]})
+    assert parse_himalayas_internships(json.loads(non_intern_only)) == []
+
+
+def test_parse_himalayas_internships_skips_rows_with_no_id():
+    no_id = json.dumps({"jobs": [{"title": "Intern role", "employmentType": "Intern"}]})
+    assert parse_himalayas_internships(json.loads(no_id)) == []
 
 
 def test_parse_serpapi_uses_apply_link():
