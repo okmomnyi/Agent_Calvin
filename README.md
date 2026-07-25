@@ -195,6 +195,6 @@ routes:
 Python 3.11+ · FastAPI + APScheduler · **PostgreSQL** (raw SQL via psycopg 3 — no ORM) · WebSocket ·
 python-telegram-bot · google-api-python-client (Gmail) · feedparser + BeautifulSoup
 (scraping) · ReportLab (PDFs) · **pgvector** (HNSW cosine) + NIM-hosted
-`baai/bge-m3` embeddings, hashing embedder as fallback · faster-whisper + edge-tts *(voice, laptop-side)* · Africa's Talking (SMS/WhatsApp) ·
+`nvidia/nv-embedqa-e5-v5` embeddings, hashing embedder as fallback · faster-whisper + edge-tts *(voice, laptop-side)* · Africa's Talking (SMS/WhatsApp) ·
 Spotify Web API *(optional, Premium)* · OSV.dev (CVE lookups, keyless) · NVIDIA NIM (all LLMs) ·
 PM2 + Caddy (deploy).

@@ -685,7 +685,7 @@ class Memory:
                     " ref TEXT NOT NULL,"            # stable id in its own table
                     " text TEXT NOT NULL,"
                     " meta JSONB NOT NULL DEFAULT '{}'::jsonb,"
-                    " embedding vector(1024),"       # bge-m3 via NIM; hashing fallback matches it
+                    " embedding vector(1024),"       # NIM embedding model; hashing fallback matches it
                     " dim INTEGER NOT NULL,"
                     " UNIQUE(kind, ref))")
                 # HNSW over cosine: this is what makes recall an index lookup rather than a

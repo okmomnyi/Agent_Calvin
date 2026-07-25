@@ -7,7 +7,7 @@ already enforces: every line in the digest traces back to an actual fetched head
 category with nothing fresh in the window says so plainly rather than being padded out.
 
 Phase 37b: headlines are clustered into stories by embedding similarity (core.embeddings,
-the same bge-m3 helper semantic.py uses for persona/CV recall) before synthesis, so two wires
+the same NIM-hosted embedder helper semantic.py uses for persona/CV recall) before synthesis, so two wires
 covering one event collapse into one cited line instead of two separate ones. Clustering is
 in-memory and per-run — nothing here writes to semantic_index, which is a closed namespace
 for durable facts/notes/docs, not a day's transient headlines.
@@ -68,8 +68,8 @@ CATEGORY_LABEL = {
 
 _WINDOW_SECONDS = 24 * 3600  # only items from roughly the last day count as "today"
 _MAX_STORIES_TO_MODEL = 15  # a category can return 40+ headlines; the newest handful of STORIES is plenty
-# Cosine threshold above which two headlines are treated as the same story. bge-m3 output is
-# normalized, so this sits in the "same event, different wording" band rather than "same
+# Cosine threshold above which two headlines are treated as the same story. NIM embedding
+# output is normalized, so this sits in the "same event, different wording" band rather than "same
 # topic" -- deliberately conservative (merging two distinct stories is the worse failure: it
 # would let one source's framing stand in for another's). Config-overridable since the right
 # value benefits from tuning against real production output, not guessed once and frozen.
@@ -194,8 +194,8 @@ class WorldNewsSkill(BaseSkill):
         if self._embedder is None:
             from core.embeddings import get_embedder
 
-            # Same helper semantic.py uses for persona/CV recall (NIM bge-m3 -> sentence-
-            # transformers -> hashing). Used here purely in-memory for same-run headline
+            # Same helper semantic.py uses for persona/CV recall (NIM embedding model ->
+            # sentence-transformers -> hashing). Used here purely in-memory for same-run headline
             # clustering -- not persisted to semantic_index, which is a closed namespace
             # (fact/note/doc) for durable recall, not a day's transient headlines.
             self._embedder = get_embedder("auto")

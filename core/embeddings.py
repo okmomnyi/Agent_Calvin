@@ -135,12 +135,20 @@ class NimEmbedder:
     only because the word literally appeared. It cannot connect "containerisation experience"
     to a Docker fact, which is most of what semantic recall is for.
 
-    bge-m3 is hosted, already covered by the NIM key, and returns in ~1.1s -- so the quality
-    ceiling stops being set by what fits in a 1GB droplet. Falls back to hashing on any
-    failure, because recall degrading is survivable and recall crashing is not.
+    Model is `nvidia/nv-embedqa-e5-v5` (1024-dim, same shape as the bge-m3 this originally
+    shipped with). Switched during world-news dedup work (Phase 37b) after discovering
+    `baai/bge-m3` returns a bare 500 ("Something went wrong with the request") on every call
+    to this account's NIM endpoint -- reproduced directly with a minimal request, confirmed
+    NOT a parameter issue (tried with/without input_type/truncate/encoding_format), and
+    confirmed the /embeddings endpoint itself is fine (nv-embedqa-e5-v5 returns 200 with real
+    vectors on the identical request shape). Because NimEmbedder already degrades silently to
+    hashing on any failure (the whole point -- recall degrading beats recall crashing), this
+    had been quietly running on lexical hashing in production the entire time bge-m3 was
+    broken, with no visible error anywhere. Falls back to hashing on any failure, because
+    recall degrading is survivable and recall crashing is not.
     """
 
-    def __init__(self, model: str = "baai/bge-m3", dim: int = 1024) -> None:
+    def __init__(self, model: str = "nvidia/nv-embedqa-e5-v5", dim: int = 1024) -> None:
         self.model = model
         self.dim = dim
         self._fallback = HashingEmbedder(dim=dim)
@@ -159,9 +167,9 @@ class NimEmbedder:
                 f"{settings.llm.get('base_url', 'https://integrate.api.nvidia.com/v1')}/embeddings",
                 headers={"Authorization": f"Bearer {key}"},
                 json={"input": texts, "model": self.model,
-                      # bge-m3 distinguishes the two sides of a search: indexing a document
-                      # and asking a question are not the same operation, and telling it
-                      # which is which measurably improves the match.
+                      # This model distinguishes the two sides of a search: indexing a
+                      # document and asking a question are not the same operation, and
+                      # telling it which is which measurably improves the match.
                       "input_type": input_type, "encoding_format": "float"},
                 timeout=30)
             if resp.status_code != 200:

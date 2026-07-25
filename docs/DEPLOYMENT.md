@@ -138,7 +138,7 @@ read-write (the Gmail client rewrites the token on every hourly refresh).
 notes and lecture capture) are **excluded by default** — they pull ~2GB of torch.
 
 ⚠️ **Do not install `sentence-transformers` on a small droplet.** Semantic recall no longer
-needs it: since Phase 33 embeddings come from NIM-hosted `baai/bge-m3` over the network, which
+needs it: since Phase 33 embeddings come from a NIM-hosted model (`nvidia/nv-embedqa-e5-v5`) over the network, which
 is why a 961 MB / 1 CPU droplet can do semantic search at all. A local torch model there is not
 merely slow, it does not fit. Without these extras the vault still embeds via NIM and voice notes
 aren't transcribed. To include them:

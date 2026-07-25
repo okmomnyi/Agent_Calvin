@@ -91,7 +91,7 @@ The addendum phases (16–22) added three more, enforced the same way:
 │    skill.py          Skill interface + SkillContract + UNIVERSAL_INVARIANTS                   │
 │    session.py        one cross-device session, turn history, cross-skill approvals            │
 │    persona_store.py  PersonaEngine (answer-as-Calvin, facts, instructions, learning loop)     │
-│    embeddings.py     pluggable embedder (NIM bge-m3 | hashing)                                │
+│    embeddings.py     pluggable embedder (NIM model | hashing)                                 │
 │    doc_extract.py    pdf/pptx/docx/txt/md/image → text + chunking                             │
 │    transcribe.py     faster-whisper wrapper (audio → text)                                    │
 │    ats.py            CV keyword scoring + anti-fabrication check                              │
@@ -196,7 +196,10 @@ keyword matches. Intents map to `(skill, action, args)`.
   and the nightly `distill_edits()` learning loop that turns Calvin's edits into unverified
   candidate facts for confirmation.
 - **`embeddings.py`** — a pluggable `Embedder`. `get_embedder("auto")` now tries
-  **`NimEmbedder`** first (NIM-hosted `baai/bge-m3`, 1024-dim), falling back to the
+  **`NimEmbedder`** first (NIM-hosted `nvidia/nv-embedqa-e5-v5`, 1024-dim — switched from
+  `baai/bge-m3` during Phase 37b after discovering that model returns a bare 500 on every
+  call to this account's NIM endpoint, meaning semantic recall had been silently running on
+  the hashing fallback), falling back to the
   dependency-free `HashingEmbedder`. The NIM route exists because the droplet has 961 MB of RAM
   and one CPU, which makes a local `sentence-transformers` model impossible rather than merely
   slow — the embedding runs where the compute is. The hashing embedder uses a **stable** hash
@@ -699,9 +702,14 @@ vocabulary, since the model must not be able to widen its own remit by naming a 
 
 ### Phase 33 — Semantic memory (`core/semantic.py`, `core/embeddings.py`)
 Calvin: *"set up vector databases instead of stuffing it with too much in context"*. pgvector
-with an HNSW cosine index, embeddings from NIM-hosted **`baai/bge-m3`** (1024-dim) — no local
-model, because the droplet has 961 MB of RAM and one CPU, which makes `sentence-transformers`
+with an HNSW cosine index, embeddings from NIM-hosted **`nvidia/nv-embedqa-e5-v5`** (1024-dim)
+— no local model, because the droplet has 961 MB of RAM and one CPU, which makes `sentence-transformers`
 impossible rather than merely slow. Measured **~71% context reduction** on CV tailoring.
+Originally shipped on `baai/bge-m3`; switched in Phase 37b after discovering that model
+returns a bare 500 on every call to this account's NIM endpoint (confirmed not a request-shape
+issue — `nv-embedqa-e5-v5` succeeds on the identical payload). Because `NimEmbedder` already
+degrades silently to the hashing fallback on any failure, this had been running on lexical
+hashing in production the whole time, with nothing anywhere surfacing it as broken.
 Two deliberate choices: `MIN_RELEVANCE` exists because **nearest-neighbour search always
 returns something** — without a floor, an unrelated fact is retrieved with total confidence
 simply for being least-unrelated. And the vector table is created **outside** the main schema

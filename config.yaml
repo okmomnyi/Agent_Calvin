@@ -210,7 +210,7 @@ planner:
 world_news:
   briefing_hour: 7          # local hour for the daily "what's up today" push
   briefing_minute: 30       # staggered 30 min after the academic briefing, not a hard requirement
-  # Cosine similarity above which two headlines are treated as the same story (bge-m3
+  # Cosine similarity above which two headlines are treated as the same story (NIM
   # embeddings, normalized). Conservative on purpose -- merging two DIFFERENT stories is the
   # worse failure than leaving two duplicates unmerged. Worth tuning once real production
   # clustering output has been eyeballed against a few real mornings.
