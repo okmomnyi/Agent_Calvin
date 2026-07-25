@@ -138,9 +138,10 @@ class _BrokenEmbedder:
         raise RuntimeError("embedding service down")
 
 
-def _headline(source: str, title: str, category: str = "world") -> Headline:
+def _headline(source: str, title: str, category: str = "world", group: str = "") -> Headline:
     return Headline(category=category, source=source, title=title,
-                    url=f"https://x.test/{source}/{title[:8]}", published_at=time.time())
+                    url=f"https://x.test/{source}/{title[:8]}", published_at=time.time(),
+                    group=group)
 
 
 def test_ten_headlines_about_one_event_collapse_into_one_cluster():
@@ -465,3 +466,61 @@ def test_whats_up_degrades_to_showing_everything_when_delivered_state_is_unreada
 
     assert result.ok is True
     assert result.data["new_story_count"] == 1  # degraded to "show everything", not a crash/silent drop
+
+
+# ------------------------------------------------------------------ independence groups (S3)
+def test_all_feeds_have_a_non_empty_independence_group():
+    for category, sources in FEEDS.items():
+        for src in sources:
+            assert src.group, f"{src.name} in {category!r} has no independence group set"
+
+
+def test_fetch_category_stamps_the_source_group_onto_headlines():
+    now = 2_000_000.0
+    urls = FEEDS["world"]
+    fetcher = _FakeFetcher({
+        urls[0][1]: _FakeResponse(200, _rss([("BBC story", "https://x.test/bbc", _rfc822(now))])),
+    })
+    skill = WorldNewsSkill(fetcher=fetcher, clock=lambda: now)
+
+    headlines = skill._fetch_category("world")
+
+    assert headlines[0].group == urls[0].group == "bbc"
+
+
+def test_cluster_with_only_bbc_group_members_has_corroboration_one():
+    """Two feeds, one publisher (BBC World + BBC Technology) -- one independent source."""
+    cluster = Cluster(category="world", members=[
+        _headline("BBC World", "Story", group="bbc"),
+        _headline("BBC Technology", "Story variant", group="bbc"),
+    ])
+    assert cluster.independent_groups == {"bbc"}
+    assert cluster.corroboration == 1
+
+
+def test_cluster_spanning_three_independent_groups_has_corroboration_three():
+    """BBC + Guardian + UN News -- three genuinely separate editorial voices on one story
+    (Reuters/AP substituted per the S3 stop-gate: neither has a working free RSS feed)."""
+    cluster = Cluster(category="world", members=[
+        _headline("BBC World", "Story", group="bbc"),
+        _headline("The Guardian", "Story", group="guardian"),
+        _headline("UN News", "Story", group="un"),
+    ])
+    assert cluster.corroboration == 3
+
+
+def test_nation_africa_and_business_daily_africa_share_one_independence_group():
+    """The specific source-monoculture case S3 exists to close: two Kenyan outlets, one
+    publisher (Nation Media Group)."""
+    groups = {s.name: s.group for s in FEEDS["kenya"]}
+    assert groups["Nation Africa"] == groups["Business Daily Africa"]
+    assert groups["Nation Africa"] != groups["The Standard"]  # a genuinely different publisher
+
+
+def test_a_same_publisher_cluster_does_not_inflate_corroboration():
+    cluster = Cluster(category="kenya", members=[
+        _headline("Nation Africa", "Budget story A", group="nation_media_group"),
+        _headline("Nation Africa", "Budget story B", group="nation_media_group"),
+        _headline("Business Daily Africa", "Budget story C", group="nation_media_group"),
+    ])
+    assert cluster.corroboration == 1, "3 headlines, ONE publisher -- must not read as 3 independent sources"

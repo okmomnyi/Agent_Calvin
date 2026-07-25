@@ -18,6 +18,15 @@ window — the scheduled 07:30 push and the on-demand path read and advance the 
 they can never drift onto two different ideas of "since last time". Pass full=True (or the
 word "full" in the categories text, e.g. "/news full") to force the whole window regardless.
 
+Phase 37b/S3: every source carries an independence GROUP (shared ownership/editorial
+control) alongside its (name, url) — Nation Africa and Business Daily Africa both belong to
+Nation Media Group, all BBC feeds share one group, and so on. Cluster.corroboration counts
+DISTINCT groups, not raw headline count, so two feeds from one publisher can never masquerade
+as two independent sources agreeing on a story. This is what S5's breaking-news bar checks
+against. Sources were widened beyond BBC/Al Jazeera (The Guardian, UN News, AllAfrica, arXiv
+cs.AI, OpenAI's blog) — Reuters and AP were tried first but neither has a working free RSS
+feed left, so they're not in the list.
+
 Deliberately NOT market prediction or financial advice — see skills/markets.py (a later,
 separate piece) for real price data correlated with news; nothing here forecasts or advises.
 """
@@ -27,7 +36,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 from xml.etree import ElementTree as ET
 
 from core.config import get_settings
@@ -40,28 +49,58 @@ from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
 log = get_logger("skills.world_news")
 
-# category -> [(source name, RSS url), ...]. All free, no API key, verified live (a dead feed
-# degrades to "nothing fresh from this source" for that one run, never fails the briefing).
-FEEDS: dict[str, list[tuple[str, str]]] = {
+class Source(NamedTuple):
+    """A NamedTuple, not a plain dataclass, so `source[1]` still means "the URL" for any
+    code that indexes it positionally -- same shape as the old (name, url) tuples, `group`
+    just extends it. `group` is the INDEPENDENCE tag (Phase 37b/S3): sources sharing real
+    editorial/ownership control share a group, so two feeds from one publisher never count
+    as two independent corroborating sources for a story (see Cluster.corroboration)."""
+    name: str
+    url: str
+    group: str
+
+
+# category -> [Source(name, url, group), ...]. All free, no API key, verified live (a dead
+# feed degrades to "nothing fresh from this source" for that one run, never fails the
+# briefing). Reuters and AP were tried first (per the original ask) and dropped: Reuters no
+# longer publishes free public RSS at all (feeds.reuters.com is dead), and every AP RSS URL
+# tried returns the plain HTML site, not a feed -- neither offers a free, ToS-clean feed to
+# wire in. The Guardian and UN News substitute as editorially-independent world coverage.
+FEEDS: dict[str, list[Source]] = {
     "world": [
-        ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml"),
-        ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+        Source("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml", "bbc"),
+        Source("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml", "aljazeera"),
+        Source("The Guardian", "https://www.theguardian.com/world/rss", "guardian"),
+        Source("UN News", "https://news.un.org/feed/subscribe/en/news/all/rss.xml", "un"),
     ],
     "tech_ai": [
-        ("TechCrunch", "https://techcrunch.com/feed/"),
-        ("BBC Technology", "http://feeds.bbci.co.uk/news/technology/rss.xml"),
+        Source("TechCrunch", "https://techcrunch.com/feed/", "techcrunch"),
+        Source("BBC Technology", "http://feeds.bbci.co.uk/news/technology/rss.xml", "bbc"),
+        # A dedicated AI-releases source instead of leaning entirely on TechCrunch's general
+        # tech firehose: arXiv cs.AI catches research/model releases days before mainstream
+        # tech press covers them; OpenAI's own blog catches product announcements directly.
+        Source("arXiv cs.AI", "http://export.arxiv.org/rss/cs.AI", "arxiv"),
+        Source("OpenAI News", "https://openai.com/news/rss.xml", "openai"),
     ],
     "sports": [
-        ("BBC Sport", "http://feeds.bbci.co.uk/sport/rss.xml"),
-        ("ESPN", "https://www.espn.com/espn/rss/news"),
+        Source("BBC Sport", "http://feeds.bbci.co.uk/sport/rss.xml", "bbc"),
+        Source("ESPN", "https://www.espn.com/espn/rss/news", "espn"),
     ],
     "business": [
-        ("BBC Business", "http://feeds.bbci.co.uk/news/business/rss.xml"),
+        Source("BBC Business", "http://feeds.bbci.co.uk/news/business/rss.xml", "bbc"),
     ],
     "kenya": [
-        ("Nation Africa", "https://nation.africa/kenya/rss.xml"),
-        ("The Standard", "https://www.standardmedia.co.ke/rss/headlines.php"),
-        ("Business Daily Africa", "https://www.businessdailyafrica.com/bd/rss.xml"),
+        # Nation Africa and Business Daily Africa are BOTH published by Nation Media Group --
+        # the same independence group. Without this tag they'd count as two corroborating
+        # sources on a story that really has only one editorial voice behind it; this is
+        # exactly the "source monoculture gaming the novelty/corroboration detector" case
+        # S3 exists to close.
+        Source("Nation Africa", "https://nation.africa/kenya/rss.xml", "nation_media_group"),
+        Source("Business Daily Africa", "https://www.businessdailyafrica.com/bd/rss.xml",
+               "nation_media_group"),
+        Source("The Standard", "https://www.standardmedia.co.ke/rss/headlines.php", "standard_group"),
+        # Continental breadth beyond Kenya-only coverage, per the original ask.
+        Source("AllAfrica", "https://allafrica.com/tools/headlines/rdf/latest/headlines.rdf", "allafrica"),
     ],
 }
 
@@ -94,6 +133,10 @@ class Headline:
     title: str
     url: str
     published_at: float | None = None
+    # Independence group of the source that reported it (Phase 37b/S3), e.g. "bbc" or
+    # "nation_media_group". Defaults to "" for any caller that doesn't set it (tests
+    # constructing a Headline directly); production always stamps a real group from FEEDS.
+    group: str = ""
 
 
 @dataclass
@@ -102,6 +145,20 @@ class Cluster:
     cites all of them; nothing here merges their TEXT, only the fact that they co-occur."""
     category: str
     members: list[Headline]
+
+    @property
+    def independent_groups(self) -> set[str]:
+        """Distinct independence groups among this story's sources (Phase 37b/S3) -- two
+        headlines from the SAME group (e.g. two BBC feeds, or Nation Africa + Business Daily
+        Africa) count once. This is what S5's breaking-news corroboration bar checks against,
+        not the raw member count."""
+        return {h.group for h in self.members}
+
+    @property
+    def corroboration(self) -> int:
+        """How many INDEPENDENT sources are behind this story. A cluster with 5 headlines
+        all from one publisher's group has corroboration 1, not 5."""
+        return len(self.independent_groups)
 
     @property
     def sources(self) -> list[str]:
@@ -141,7 +198,7 @@ def _cluster_headlines(headlines: list[Headline], embedder: Any, threshold: floa
     return clusters
 
 
-def _parse_rss(xml_text: str, source: str, category: str) -> list[Headline]:
+def _parse_rss(xml_text: str, source: str, category: str, group: str = "") -> list[Headline]:
     """RSS 2.0 <item> parsing via stdlib ElementTree — no new dependency for something this
     simple. Malformed XML degrades to an empty list rather than raising."""
     out: list[Headline] = []
@@ -163,7 +220,7 @@ def _parse_rss(xml_text: str, source: str, category: str) -> list[Headline]:
             except (ValueError, TypeError):
                 published_at = None
         out.append(Headline(category=category, source=source, title=title, url=link,
-                            published_at=published_at))
+                            published_at=published_at, group=group))
     return out
 
 
@@ -239,12 +296,12 @@ class WorldNewsSkill(BaseSkill):
     def _fetch_category(self, category: str) -> list[Headline]:
         cutoff = self._now() - _WINDOW_SECONDS
         out: list[Headline] = []
-        for source, url in FEEDS.get(category, []):
-            resp = self.fetcher.get(url, accept="application/rss+xml, text/xml")
+        for src in FEEDS.get(category, []):
+            resp = self.fetcher.get(src.url, accept="application/rss+xml, text/xml")
             if resp is None or resp.status_code != 200:
-                log.warning("world_news: %s (%s) unreachable, skipping this run", source, category)
+                log.warning("world_news: %s (%s) unreachable, skipping this run", src.name, category)
                 continue
-            items = _parse_rss(resp.text, source, category)
+            items = _parse_rss(resp.text, src.name, category, src.group)
             # Undated items (a feed with no pubDate) are kept — there's no basis to exclude
             # them; dated items outside the window are dropped rather than shown as "today".
             out.extend(h for h in items if h.published_at is None or h.published_at >= cutoff)
