@@ -607,12 +607,23 @@ CREATE TABLE IF NOT EXISTS credential_password (
 
 CREATE TABLE IF NOT EXISTS auth_attempts (
     id      SERIAL PRIMARY KEY,
-    kind    TEXT NOT NULL,                   -- passkey | password | recovery
+    kind    TEXT NOT NULL,                   -- passkey | password | recovery | password_reset_otp
     ok      BOOLEAN NOT NULL,
     ip_hash TEXT,
     at      DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_auth_attempts_kind_at ON auth_attempts(kind, ip_hash, at);
+
+-- Telegram-initiated password reset (Phase 36): a short-lived, single-use, EMAILED code --
+-- the second factor for changing the break-glass password from a chat, since "you're the
+-- authorized Telegram chat" alone is not proof enough to hand out a fresh account password.
+CREATE TABLE IF NOT EXISTS password_reset_otp (
+    id         SERIAL PRIMARY KEY,
+    code_hash  TEXT NOT NULL,                -- argon2, same as the password/recovery codes
+    created_at DOUBLE PRECISION NOT NULL,
+    expires_at DOUBLE PRECISION NOT NULL,    -- ~10 min: minted, emailed, must be used by then
+    used_at    DOUBLE PRECISION              -- set once verified, or superseded by a newer code
+);
 """
 
 

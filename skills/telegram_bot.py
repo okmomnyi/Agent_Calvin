@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import secrets
 import time
 from typing import Any, Callable
 
@@ -77,6 +78,7 @@ HELP = (
     "/cv [update|tailor <JD>|facts] — CV tailoring & ATS optimization\n"
     "/rules · /retro · /contracts — patterns I've noticed & what each skill may read\n"
     "/summarize <thing> · /voiceoff · /voiceon\n"
+    "/resetpassword — reset your break-glass password (emails a code first; reply with it)\n"
     "Send a voice note or just type — it routes like everything else."
 )
 
@@ -89,6 +91,8 @@ _TUTOR_KEY = "code_tutor.session"
 _LIVE_SESSION_TTL = 45 * 60
 _TRASH_KEY = "email_agent.trash_session"
 _SEND_KEY = "email_agent.send_session"
+_PW_RESET_KEY = "account_security.password_reset_session"
+_PW_RESET_TTL = 600  # 10 minutes: matches the OTP's own expiry (core/auth.py)
 
 
 def parse_callback(data: str) -> tuple[str | None, int | None]:
@@ -151,19 +155,31 @@ class BotCore:
     """All bot logic, decoupled from python-telegram-bot for testability."""
 
     def __init__(self, registry: SkillRegistry | None = None, memory: Memory | None = None,
-                 transcribe: Callable[[str], str] | None = None) -> None:
+                 transcribe: Callable[[str], str] | None = None,
+                 mailer: Any | None = None) -> None:
         self.settings = get_settings()
         self.mem = memory or get_memory()
         self.registry = registry or SkillRegistry()
         if registry is None:
             self.registry.discover()
         self._transcribe = transcribe
+        self._mailer = mailer
         self.started = time.time()
 
     # ------------------------------------------------------------- auth
     def is_authorized(self, chat_id: int | str) -> bool:
         allowed = self.settings.telegram_chat_id
         return bool(allowed) and str(chat_id) == str(allowed)
+
+    @property
+    def mailer(self) -> Any:
+        # Injected so tests can never send a real email -- same pattern as email_agent.py's
+        # own mailer property.
+        if self._mailer is None:
+            from core.mailer import ApplicationMailer
+
+            self._mailer = ApplicationMailer()
+        return self._mailer
 
     # ------------------------------------------------------------- dispatch helpers
     def _dispatch(self, skill: str, action: str, payload: dict[str, Any]) -> str:
@@ -330,6 +346,82 @@ class BotCore:
         self.mem.kv_set(key, "")
         out = self._dispatch(skill, action, payload)
         return out + "\n\n(Session closed — say it again any time to pick it back up.)"
+
+    # ------------------------------------------------------------- password reset (Phase 36)
+    # Being the one authorized Telegram chat is not proof enough to hand out a fresh account
+    # password over it (§0 P3: this is the master credential, so it gets its own second
+    # factor). The code only ever reaches config.yaml's auth.password_reset_email inbox --
+    # never Telegram itself -- and the new password is shown here exactly once, then the PTB
+    # layer deletes that one message a few minutes later (see build_application's on_text).
+    def _password_reset_target(self) -> str:
+        try:
+            return self.settings.get("auth", "password_reset_email", default="") or ""
+        except AttributeError:  # a bare test-fixture Settings has no .get() -- fail closed
+            return ""
+
+    def start_password_reset(self) -> str:
+        """/resetpassword — mints and emails an OTP, then waits for the reply."""
+        from core.auth import get_store
+
+        store = get_store(self.mem)
+        locked, retry_after = store.lockout_status("password_reset_otp", "")
+        if locked:
+            return f"Too many recent attempts — try again in about {int(retry_after)}s."
+        target = self._password_reset_target()
+        if not target:
+            return ("No password-reset email is configured "
+                    "(set auth.password_reset_email in config.yaml).")
+        code = store.request_password_reset_otp()
+        try:
+            self.mailer.send_email(
+                to=target, subject="AgentOS password reset code",
+                body=(f"Your AgentOS password reset code is {code}\n\n"
+                      "It expires in 10 minutes and works once. Reply with it in Telegram "
+                      "to finish resetting your password.\n\n"
+                      "Didn't request this? Ignore it — nothing changes until the code is used."))
+        except Exception as exc:  # noqa: BLE001 - never claim a code was sent if it wasn't
+            return f"Couldn't send the verification email: {exc}"
+        self.mem.kv_set(_PW_RESET_KEY, json.dumps({"created_at": time.time()}))
+        return (f"📧 Sent a verification code to {target}. Reply with the 6-digit code within "
+                "10 minutes to reset your password, or 'cancel' to stop.")
+
+    def awaiting_password_reset_code(self) -> bool:
+        return self._session_fresh(_PW_RESET_KEY, ttl=_PW_RESET_TTL)
+
+    def continue_password_reset(self, text: str) -> tuple[str, bool]:
+        """Second step: verify the OTP and, on success, set + reveal a fresh password.
+
+        Returns (reply_text, self_destruct) — self_destruct tells the caller to delete its
+        own reply a few minutes later. The OTP itself is never echoed back here; only a
+        freshly-generated PASSWORD is, and only after the code has actually verified.
+        """
+        from core.auth import get_store
+
+        store = get_store(self.mem)
+        answer = (text or "").strip()
+        if answer.lower() in {"cancel", "stop", "no"}:
+            self.mem.kv_set(_PW_RESET_KEY, "")
+            return "Cancelled — your password wasn't changed.", False
+
+        locked, retry_after = store.lockout_status("password_reset_otp", "")
+        if locked:
+            self.mem.kv_set(_PW_RESET_KEY, "")
+            return (f"Too many wrong codes — locked for about {int(retry_after)}s. "
+                    "Run /resetpassword again once that passes."), False
+
+        ok = store.verify_password_reset_otp(answer)
+        store.record_attempt("password_reset_otp", ok, ip="")
+        if not ok:
+            return ("That code didn't match (or it expired). Reply with the code again, "
+                    "or 'cancel'."), False
+
+        self.mem.kv_set(_PW_RESET_KEY, "")
+        new_password = secrets.token_urlsafe(18)
+        store.set_password(new_password)
+        revoked = store.revoke_all_sessions(keep_devices=True)
+        note = f" ({revoked} other signed-in session(s) signed out.)" if revoked else ""
+        return (f"🔑 Password reset. New password:\n\n{new_password}\n\n"
+                f"Save it now — this message deletes itself in 3 minutes.{note}"), True
 
     def route_text(self, text: str) -> str:
         """Free text: continue an active (FRESH) session if one is running, else route via intent."""
@@ -533,6 +625,23 @@ def _chunks(text: str, size: int = 4000):
         yield text[i:i + size] or " "
 
 
+async def _delete_later(bot: Any, chat_id: int, message_id: int, delay: float) -> None:
+    """Best-effort self-destruct for the one message that ever shows the reset password.
+
+    In-process only (an asyncio task, not a persisted job) -- if the bot restarts within the
+    window the delete simply never fires. That's an accepted gap: the OTP gate and the
+    argon2-hashed password are the actual security boundary, this only shrinks how long the
+    plaintext sits visible in the chat.
+    """
+    import asyncio
+
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:  # noqa: BLE001 - already deleted/too old/etc. is fine
+        log.debug("could not auto-delete the password-reset message", exc_info=True)
+
+
 def build_application(core: BotCore | None = None):
     """Build the python-telegram-bot Application with all handlers wired."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -635,6 +744,9 @@ def build_application(core: BotCore | None = None):
             else:
                 await _reply(update, core.run_command_raw("cv_tailor", "view", {}))
             return
+        if cmd == "resetpassword":
+            await _reply(update, core.start_password_reset())
+            return
         await _reply(update, core.run_command(cmd, arg))
 
     async def on_callback(update: "Update", context) -> None:  # noqa: ANN001
@@ -659,6 +771,16 @@ def build_application(core: BotCore | None = None):
         if not await _guard(update):
             return
         text = update.message.text
+        # Checked before anything else: a pending password-reset code must never be
+        # swallowed by an unrelated session/router match, and its reply needs to self-destruct,
+        # which the generic _reply() helper below has no way to signal.
+        if core.awaiting_password_reset_code():
+            reply_text, self_destruct = core.continue_password_reset(text)
+            msg = await update.message.reply_text(reply_text)
+            if self_destruct:
+                context.application.create_task(
+                    _delete_later(context.bot, msg.chat_id, msg.message_id, delay=180))
+            return
         # Say what is being started BEFORE doing it. Calvin: "when i tell the bot to clear
         # emails i need to see clearing emails in progress ... when i say create a playlist i
         # need to se a creating playlist feedback". A long task with no acknowledgement is
@@ -685,7 +807,8 @@ def build_application(core: BotCore | None = None):
 
     app = Application.builder().token(settings.telegram_bot_token).build()
     known = (["start", "help", "status", "jobs", "approve", "voiceoff", "voiceon", "summarize",
-              "quiz", "cards", "deadline", "deadlines", "events", "tags"] + list(COMMAND_MAP.keys()))
+              "quiz", "cards", "deadline", "deadlines", "events", "tags", "resetpassword"]
+             + list(COMMAND_MAP.keys()))
     app.add_handler(CommandHandler(known, on_command))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))

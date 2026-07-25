@@ -46,6 +46,7 @@ DEVICE_MAX_LIFETIME = 365 * 24 * 3600    # a headless device credential (Slice 0
 WS_TICKET_TTL = 15                       # seconds: minted, handed to the socket, burned
 WEBAUTHN_CHALLENGE_TTL = 300             # 5 minutes to complete a passkey ceremony
 WEBAUTHN_RP_NAME = "AgentOS"
+PASSWORD_RESET_OTP_TTL = 600             # 10 minutes: minted, emailed, must be used by then
 
 _hasher = PasswordHasher()
 
@@ -476,13 +477,77 @@ class AuthStore:
             "SELECT COUNT(*) c FROM recovery_codes WHERE used_at IS NULL").fetchone()
         return row["c"]
 
+    # ------------------------------------------------------------- password reset OTP (Phase 36)
+    # Telegram is already a single-authorized-chat channel, but that alone is not enough proof
+    # to hand out a fresh account password over it -- this is the second factor: a short-lived
+    # code that only reaches an inbox Telegram itself has no access to.
+    def request_password_reset_otp(self) -> str:
+        """Mint a 6-digit OTP. Returns the RAW code -- the caller emails it and never stores
+        or echoes it anywhere else; only its argon2 hash is kept. Any still-unused code from
+        an earlier request is superseded (marked used) so an old email can never be replayed
+        once a newer one has been sent."""
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        now = self._now()
+        with self.mem.tx() as conn:
+            conn.execute(
+                "UPDATE password_reset_otp SET used_at=%s WHERE used_at IS NULL", (now,))
+            conn.execute(
+                "INSERT INTO password_reset_otp(code_hash, created_at, expires_at) "
+                "VALUES(%s,%s,%s)",
+                (_hasher.hash(code), now, now + PASSWORD_RESET_OTP_TTL))
+        return code
+
+    def verify_password_reset_otp(self, raw_code: str) -> bool:
+        """Single-use and time-limited, same shape as verify_recovery_code(). Brute-force
+        protection is the caller's job (record_attempt/lockout_status with kind
+        'password_reset_otp'), same as every other human-typed secret here."""
+        raw_code = (raw_code or "").strip()
+        if not raw_code:
+            return False
+        now = self._now()
+        rows = self.mem.execute(
+            "SELECT id, code_hash FROM password_reset_otp "
+            "WHERE used_at IS NULL AND expires_at > %s", (now,)).fetchall()
+        for row in rows:
+            try:
+                _hasher.verify(row["code_hash"], raw_code)
+            except VerifyMismatchError:
+                continue
+            except Exception:  # noqa: BLE001 - a malformed stored hash must not crash this
+                continue
+            with self.mem.tx() as conn:
+                marked = conn.execute(
+                    "UPDATE password_reset_otp SET used_at=%s WHERE id=%s AND used_at IS NULL "
+                    "RETURNING id", (now, row["id"])).fetchone()
+            return marked is not None
+        return False
+
+    def revoke_all_sessions(self, *, keep_devices: bool = True) -> int:
+        """Sign out every active session -- used right after a password reset, since resetting
+        the master credential should end every other logged-in place, not just rotate the
+        password quietly. Device credentials (the laptop/voice client) were issued separately
+        and explicitly, so they survive by default; pass keep_devices=False to drop those too.
+        Returns how many sessions were revoked."""
+        now = self._now()
+        with self.mem.tx() as conn:
+            if keep_devices:
+                rows = conn.execute(
+                    "UPDATE auth_sessions SET revoked_at=%s "
+                    "WHERE revoked_at IS NULL AND is_device=0 RETURNING id", (now,)).fetchall()
+            else:
+                rows = conn.execute(
+                    "UPDATE auth_sessions SET revoked_at=%s "
+                    "WHERE revoked_at IS NULL RETURNING id", (now,)).fetchall()
+        return len(rows)
+
     # ------------------------------------------------------------- attempts + lockout (0d)
     # Password/recovery are the weaker factors (a guessable secret) so they lock out harder
     # and faster than passkey (already gated by physical possession + device biometric).
     _LOCKOUT_THRESHOLDS = {
-        "password": (5, 900),    # 5 failures -> 15 min lockout
-        "recovery": (3, 1800),   # 3 failures -> 30 min lockout
-        "passkey": (10, 300),    # 10 failures -> 5 min lockout
+        "password": (5, 900),             # 5 failures -> 15 min lockout
+        "recovery": (3, 1800),            # 3 failures -> 30 min lockout
+        "passkey": (10, 300),             # 10 failures -> 5 min lockout
+        "password_reset_otp": (5, 900),   # 5 failures -> 15 min lockout, same weight as password
     }
     _BACKOFF_CAP = 60.0  # seconds
 

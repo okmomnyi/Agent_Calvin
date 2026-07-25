@@ -17,6 +17,10 @@ auth:
   # Flip this on ONLY for local dev; kernel/app.py logs a loud warning at startup while it's
   # set, and the WS ticket flow and every other guardrail stay exactly as strict.
   dev_insecure: false
+  # Where /resetpassword's email-OTP second factor gets sent (skills/telegram_bot.py). Being
+  # the authorized Telegram chat alone is not proof enough to hand out a fresh password over
+  # it -- the code only ever reaches this inbox, never Telegram itself.
+  password_reset_email: "okmomanyi@gmail.com"
 
 llm:
   base_url: "https://integrate.api.nvidia.com/v1"   # default NIM endpoint

@@ -540,6 +540,79 @@ def test_recovery_locks_out_faster_than_password_matching_its_weaker_factor(mem)
     assert store.lockout_status("recovery", "203.0.113.5")[0] is True
 
 
+# ================================================================= password reset OTP (Phase 36)
+def test_reset_otp_is_stored_argon2_hashed_never_raw(store, mem):
+    code = store.request_password_reset_otp()
+    row = mem.execute(
+        "SELECT code_hash FROM password_reset_otp ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["code_hash"] != code
+    assert row["code_hash"].startswith("$argon2")
+    assert len(code) == 6 and code.isdigit()
+
+
+def test_reset_otp_verifies_once_then_is_rejected(store):
+    code = store.request_password_reset_otp()
+    assert store.verify_password_reset_otp(code) is True
+    assert store.verify_password_reset_otp(code) is False, "an OTP must be single-use"
+
+
+def test_an_unknown_reset_otp_is_rejected(store):
+    store.request_password_reset_otp()
+    assert store.verify_password_reset_otp("000000") is False
+
+
+def test_requesting_a_new_reset_otp_invalidates_the_previous_unused_one(store):
+    first = store.request_password_reset_otp()
+    second = store.request_password_reset_otp()
+    assert store.verify_password_reset_otp(first) is False, \
+        "only the newest emailed code should ever work"
+    assert store.verify_password_reset_otp(second) is True
+
+
+def test_reset_otp_expires(mem):
+    now = [1_000_000.0]
+    store = AuthStore(memory=mem, clock=lambda: now[0])
+    code = store.request_password_reset_otp()
+    now[0] += 601   # past the 10-minute TTL
+    assert store.verify_password_reset_otp(code) is False
+
+
+def test_reset_otp_lockout_uses_its_own_kind_not_passwords(mem):
+    now = 1_000_000.0
+    store = AuthStore(memory=mem, clock=lambda: now)
+    for _ in range(5):
+        store.record_attempt("password_reset_otp", False, ip="")
+    assert store.lockout_status("password_reset_otp", "")[0] is True
+    assert store.lockout_status("password", "")[0] is False
+
+
+# ================================================================= revoke_all_sessions
+def test_revoke_all_sessions_keeps_devices_by_default(store, mem):
+    browser = store.create_session(user_agent="chrome")
+    device = store.issue_device_credential("Kelvin Laptop")
+
+    revoked = store.revoke_all_sessions()
+
+    assert revoked == 1
+    assert store.validate_session(browser) is None
+    assert store.validate_session(device) is not None
+
+
+def test_revoke_all_sessions_can_include_devices_too(store):
+    browser = store.create_session(user_agent="chrome")
+    device = store.issue_device_credential("Kelvin Laptop")
+
+    revoked = store.revoke_all_sessions(keep_devices=False)
+
+    assert revoked == 2
+    assert store.validate_session(browser) is None
+    assert store.validate_session(device) is None
+
+
+def test_revoke_all_sessions_is_a_safe_no_op_with_nothing_active(store):
+    assert store.revoke_all_sessions() == 0
+
+
 def test_checking_lockout_status_never_itself_counts_as_an_attempt(mem):
     """Otherwise polling while locked out would extend the lockout indefinitely -- the
     opposite of "auto-clears"."""

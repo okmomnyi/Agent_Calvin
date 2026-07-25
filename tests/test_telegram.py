@@ -360,3 +360,173 @@ def test_email_confirmations_are_not_one_shot(mem, monkeypatch):
     mem.kv_set(_SEND_KEY, json.dumps({"to": "x@y.com", "created_at": time.time()}))
     out = core.route_text("confirm send")
     assert "Session closed" not in out
+
+
+# ------------------------------------------------------------------ password reset (Phase 36)
+class _FakeMailer:
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    def send_email(self, *, to, subject, body, attachments=None):
+        self.sent.append({"to": to, "subject": subject, "body": body})
+        return {"id": "fake"}
+
+
+class _SettingsWithResetEmail:
+    def __init__(self, chat_id="42", email="okmomanyi@gmail.com"):
+        self.telegram_chat_id = chat_id
+        self.telegram_bot_token = "x"
+        self._email = email
+
+    def get(self, *keys, default=None):
+        if keys == ("auth", "password_reset_email"):
+            return self._email
+        return default
+
+
+def _core_with_mailer(mem, chat_id="42", email="okmomanyi@gmail.com"):
+    mailer = _FakeMailer()
+    core = BotCore(registry=_FakeRegistry(), memory=mem, mailer=mailer)
+    core.settings = _SettingsWithResetEmail(chat_id=chat_id, email=email)
+    return core, mailer
+
+
+def _extract_code(body: str) -> str:
+    import re as _re
+
+    return _re.search(r"code is (\d{6})", body).group(1)
+
+
+def _extract_password(reply: str) -> str:
+    import re as _re
+
+    return _re.search(r"New password:\n\n(\S+)\n\n", reply).group(1)
+
+
+def test_reset_password_without_a_configured_email_fails_closed(mem):
+    core = _core(mem)   # the bare _core() helper's settings has no .get() -> unconfigured
+    reply = core.start_password_reset()
+    assert "No password-reset email is configured" in reply
+    assert core.awaiting_password_reset_code() is False
+
+
+def test_reset_password_emails_a_code_to_the_configured_address(mem):
+    core, mailer = _core_with_mailer(mem)
+    reply = core.start_password_reset()
+    assert "Sent a verification code" in reply
+    assert len(mailer.sent) == 1
+    assert mailer.sent[0]["to"] == "okmomanyi@gmail.com"
+    assert core.awaiting_password_reset_code() is True
+
+
+def test_reset_password_never_sends_the_code_over_telegram(mem):
+    """The email IS the second factor -- Telegram only ever gets a confirmation that it was sent."""
+    core, mailer = _core_with_mailer(mem)
+    reply = core.start_password_reset()
+    code = _extract_code(mailer.sent[0]["body"])
+    assert code not in reply
+
+
+def test_wrong_code_does_not_end_the_session(mem):
+    core, mailer = _core_with_mailer(mem)
+    core.start_password_reset()
+    reply, self_destruct = core.continue_password_reset("000000")
+    assert self_destruct is False
+    assert "didn't match" in reply
+    assert core.awaiting_password_reset_code() is True
+
+
+def test_cancel_ends_the_session_without_touching_the_password(mem):
+    from core.auth import get_store
+
+    core, mailer = _core_with_mailer(mem)
+    core.start_password_reset()
+    reply, self_destruct = core.continue_password_reset("cancel")
+    assert self_destruct is False
+    assert "Cancelled" in reply
+    assert core.awaiting_password_reset_code() is False
+    assert get_store(mem).has_password() is False
+
+
+def test_correct_code_resets_the_password_and_flags_self_destruct(mem):
+    from core.auth import get_store
+
+    core, mailer = _core_with_mailer(mem)
+    core.start_password_reset()
+    code = _extract_code(mailer.sent[0]["body"])
+
+    reply, self_destruct = core.continue_password_reset(code)
+
+    assert self_destruct is True
+    assert core.awaiting_password_reset_code() is False
+    new_password = _extract_password(reply)
+    assert get_store(mem).verify_password(new_password) is True
+
+
+def test_the_code_never_appears_in_the_success_reply(mem):
+    core, mailer = _core_with_mailer(mem)
+    core.start_password_reset()
+    code = _extract_code(mailer.sent[0]["body"])
+    reply, _ = core.continue_password_reset(code)
+    assert code not in reply
+
+
+def test_a_used_code_cannot_be_replayed(mem):
+    core, mailer = _core_with_mailer(mem)
+    core.start_password_reset()
+    code = _extract_code(mailer.sent[0]["body"])
+    core.continue_password_reset(code)
+
+    # Start a fresh session (as if /resetpassword were run again) and try the OLD code.
+    core.start_password_reset()
+    reply, self_destruct = core.continue_password_reset(code)
+    assert self_destruct is False
+    assert "didn't match" in reply
+
+
+def test_repeated_wrong_codes_eventually_lock_out_and_end_the_session(mem, monkeypatch):
+    from core.auth import AuthStore
+
+    now = [1_000_000.0]
+    monkeypatch.setattr("core.auth.get_store",
+                        lambda memory=None: AuthStore(memory=mem, clock=lambda: now[0]))
+    core, mailer = _core_with_mailer(mem)
+    core.start_password_reset()
+
+    for _ in range(5):   # password_reset_otp's threshold
+        now[0] += 20   # clears each step's backoff so failures actually accumulate
+        reply, self_destruct = core.continue_password_reset("000000")
+        assert self_destruct is False
+        assert "didn't match" in reply
+
+    now[0] += 20
+    reply, self_destruct = core.continue_password_reset("000000")
+    assert self_destruct is False
+    assert "locked" in reply.lower()
+    assert core.awaiting_password_reset_code() is False
+
+
+def test_a_stale_session_stops_intercepting_replies(mem, monkeypatch):
+    """Mirrors the existing 45-min-TTL session tests: a forgotten reset code prompt must not
+    swallow tomorrow's unrelated message."""
+    core, mailer = _core_with_mailer(mem)
+    core.start_password_reset()
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + 601)   # past the 10-minute TTL
+    assert core.awaiting_password_reset_code() is False
+
+
+def test_password_reset_revokes_other_sessions_but_not_devices(mem):
+    from core.auth import get_store
+
+    store = get_store(mem)
+    store.create_session(user_agent="chrome")
+    device = store.issue_device_credential("Kelvin Laptop")
+
+    core, mailer = _core_with_mailer(mem)
+    core.start_password_reset()
+    code = _extract_code(mailer.sent[0]["body"])
+    reply, _ = core.continue_password_reset(code)
+
+    assert "other signed-in session" in reply
+    assert store.validate_session(device) is not None
