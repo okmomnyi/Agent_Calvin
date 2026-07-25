@@ -224,6 +224,29 @@ def test_approve_email_job_sends_once_with_application_recorded(fake_settings, m
     assert "Acme" in mem.applied_company_names()
 
 
+def test_approve_reports_a_failed_send_instead_of_silently_dropping_it(fake_settings, mem):
+    """Regression: a raised send_application used to make _send_application return a bare
+    False, and approve() dropped the job id from EVERY bucket (applied/manual/missing) on a
+    False -- no error, no trace it was even attempted. "I still don't get emails to show I
+    applied" was that: a failure with zero visible outcome."""
+    llm = _HuntLLM({"DevOps Engineer": (85, "cloud_devops")})
+    mailer = MagicMock()
+    mailer.send_application.side_effect = RuntimeError("Gmail token expired")
+    skill = _skill([_FakeSource("remoteok", [_email_job()])], llm, mem, mailer)
+    skill.hunt(notify=False)
+    job_id = mem.get_job_by_ref("remoteok", "e1")["id"]
+
+    result = skill.approve(selection=[job_id])
+
+    assert result.ok is False
+    assert job_id in result.data["failed"]
+    assert job_id not in result.data["applied"]
+    assert "Gmail token expired" in result.text
+    assert str(job_id) in result.text or f"[{job_id}]" in result.text
+    # never falsely marked applied -- a retry (re-running approve on the same id) must work
+    assert mem.get_job(job_id)["status"] != "applied"
+
+
 def test_approve_portal_job_tracks_without_sending(fake_settings, mem):
     llm = _HuntLLM({"Cloud Support": (75, "cloud_devops")})
     mailer = MagicMock()

@@ -416,7 +416,7 @@ class JobHunterSkill(BaseSkill):
         if not ids:
             return CommandResult(text="Nothing to approve — give me job numbers (e.g. approve 1,3).",
                                  ok=False)
-        applied, manual, missing, tailored_notes, manual_packets = [], [], [], [], []
+        applied, manual, missing, failed, tailored_notes, manual_packets = [], [], [], [], [], []
         for job_id in ids:
             job = self.mem.get_job(int(job_id))
             if job is None:
@@ -438,9 +438,13 @@ class JobHunterSkill(BaseSkill):
                 "tailored_note": tailored_note,
             }
             if job["apply_kind"] == "email" and job["apply_target"]:
-                if self._send_application(keeper):
+                ok, detail = self._send_application(keeper)
+                if ok:
                     applied.append(job_id)
                     tailored_notes.append(f"[{job_id}] {tailored_note}")
+                else:
+                    failed.append(job_id)
+                    tailored_notes.append(f"[{job_id}] {tailored_note} (SEND FAILED: {detail})")
             else:  # portal / notify_only — Calvin applies via the link; we just track it
                 self.mem.record_application(
                     job_id=job["id"], company=job["company"], source=job["source"],
@@ -473,6 +477,13 @@ class JobHunterSkill(BaseSkill):
             parts.append(f"✅ Sent {len(applied)} application(s) by email: {applied}.")
         if manual:
             parts.append(f"📌 Tracked {len(manual)} portal/notify job(s) — apply via the link: {manual}.")
+        if failed:
+            # This branch used to not exist -- a failed send just vanished from every bucket
+            # here, with nothing in the reply to say it was even attempted (§0: never let a
+            # real outcome go unreported). The job stays in its current status (never marked
+            # applied), so re-running approve() on the same id will retry it.
+            parts.append(f"❌ Failed to send {len(failed)} application(s): {failed} — see the "
+                         "detail in the CV line below, or check the server logs.")
         if tailored_notes:
             parts.append("CV: " + "; ".join(tailored_notes) + ".")
         if missing:
@@ -486,8 +497,9 @@ class JobHunterSkill(BaseSkill):
         # via CommandResult below. Calling _notify() too was a real double-send in the log:
         # "Tracked 1 portal/notify job(s)..." arrived once bare (the reply) and once wrapped
         # in "📨 Application update:" (this call), a moment apart.
-        return CommandResult(text=summary,
-                             data={"applied": applied, "manual": manual, "missing": missing})
+        return CommandResult(text=summary, ok=not failed,
+                             data={"applied": applied, "manual": manual, "missing": missing,
+                                   "failed": failed})
 
     def _auto_tailor(self, job: dict[str, Any]) -> str:
         """Tailor the CV to this job on approval. Returns a short note for the confirmation.
@@ -510,7 +522,12 @@ class JobHunterSkill(BaseSkill):
             log.exception("auto-tailor failed for job %s", job.get("id"))
         return "used your master CV (tailoring unavailable)"
 
-    def _send_application(self, keeper: dict[str, Any]) -> bool:
+    def _send_application(self, keeper: dict[str, Any]) -> tuple[bool, str]:
+        """Returns (ok, detail) -- a failure here used to just return False, and approve()
+        silently dropped the job id from every summary bucket on a False: no error, no
+        record it was even attempted, nothing. "I still don't get emails to show I applied"
+        was exactly that -- a send failing (Gmail auth, quota, a bad address) with the only
+        trace being a log line nobody was looking at."""
         subject = f"Application: {keeper['title']}"
         attachments = []
         cv = keeper.get("cv_variant") or find_master_cv()
@@ -521,15 +538,15 @@ class JobHunterSkill(BaseSkill):
                 to=keeper["apply_target"], subject=subject, body=keeper["cover"],
                 attachments=attachments,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.exception("Failed to send application for job %s", keeper.get("id"))
-            return False
+            return False, str(exc)
         self.mem.record_application(
             job_id=keeper["id"], company=keeper.get("company"), source=keeper.get("source"),
             category=keeper.get("category"), cv_variant=keeper.get("cv_variant"),
             notes=f"emailed {keeper['apply_target']}" + ("" if cv else " (no CV attached — none on file)"),
         )
-        return True
+        return True, ""
 
     # ------------------------------------------------------------- status / report
     def status(self, **_: Any) -> CommandResult:

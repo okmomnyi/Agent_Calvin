@@ -95,9 +95,13 @@ class DuckDuckGoSearcher:
 class ResearchSkill(BaseSkill):
     name = "research"
 
-    def __init__(self, llm: LLMClient | None = None, searcher: Any | None = None) -> None:
+    def __init__(self, llm: LLMClient | None = None, searcher: Any | None = None,
+                 notify: Callable[[str], bool] | None = None) -> None:
         self._llm = llm
         self._searcher = searcher
+        # Injectable, same as DuckDuckGoSearcher's own notify -- a test must be able to
+        # replace anything that can reach Calvin's phone, or the suite texts him.
+        self._notify = notify or send_telegram
 
     @property
     def llm(self) -> LLMClient:
