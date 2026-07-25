@@ -35,6 +35,13 @@ HTMLCanvasElement.prototype.getContext = vi.fn(() => fakeContext()) as unknown a
 // false) so the ordinary animation path runs in tests by default; individual tests override
 // this with vi.stubGlobal("matchMedia", ...) when they specifically need the reduced-motion
 // branch, same pattern as ReactorRing.test.tsx.
+// jsdom doesn't implement scrollTo on elements either -- ChatPanel's autoscroll is the only
+// caller today, but stubbing it at the Element level (like matchMedia above) means any future
+// scrolling component gets it for free too.
+if (!Element.prototype.scrollTo) {
+  Element.prototype.scrollTo = vi.fn();
+}
+
 if (!window.matchMedia) {
   window.matchMedia = vi.fn().mockImplementation((query: string) => ({
     matches: false,

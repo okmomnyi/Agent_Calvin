@@ -8,35 +8,36 @@ helpers from voice_client.py, and the same barge-in recorder (audio_io.py, share
 agent_window.py). Only the render target changes: frontend/ (Part A's one HUD codebase)
 in a frameless always-on-top pywebview window, instead of a tkinter widget tree.
 
-Two things worth knowing before touching this file:
+One thing worth knowing before touching this file:
 
-1. Frontend files are served over a local loopback HTTP server, not opened via `file://`.
-   pywebview's Windows backend is Chromium (WebView2), and Chromium blocks relative
-   `<script type="module">` imports and same-origin `fetch()` assumptions under `file://` --
-   frontend/src's ES modules and transport.js's same-origin API calls would silently break.
-   A server bound to 127.0.0.1 on an ephemeral port keeps this genuinely LOCAL (every byte
-   comes off this disk, nothing round-trips to the internet to fetch it) while giving the
-   page the real http:// origin it needs, exactly like any other framework's dev server.
+The window navigates straight to the REAL deployed dashboard (SERVER_BASE + /dashboard/),
+not a local `frontend/` build served over a loopback port. An earlier version served the
+static files locally to dodge `file://`'s ES-module/CORS restrictions -- that part worked,
+but it created a worse problem: the session cookie core/auth.py issues is SameSite=Strict,
+which a real browser (pywebview's Windows backend is Chromium/WebView2) never attaches to a
+request from a different origin, even with credentials:'include'. A page served from
+http://127.0.0.1:<port> is a different origin than https://<domain>, so every fetch() to
+/api/* would have silently gone out cookie-less and login would never stick. Loading the
+actual https://<domain>/dashboard/ page sidesteps this entirely -- same origin as the API it
+calls, identical auth story to the browser dashboard. `?shell=desktop` still tells
+capabilities.ts to await this window's pywebview bridge for the LOCAL-only capabilities
+(mic, apps, adb); nothing about the API/auth path changes based on that flag.
 
-2. The bridge is a one-way trust boundary, same shape as Phase 23's desktop-app-control
-   design: the page can ASK this process to do something (capabilities, resize), but every
-   Bridge method validates its own inputs and returns {ok, error} -- it never raises into
-   the page, and (starting Slice 4) it re-checks every request against this laptop's own
-   allowlist rather than trusting the droplet.
+The bridge itself is a one-way trust boundary, same shape as Phase 23's desktop-app-control
+design: the page can ASK this process to do something (capabilities, resize), but every
+Bridge method validates its own inputs and returns {ok, error} -- it never raises into
+the page, and (starting Slice 4) it re-checks every request against this laptop's own
+allowlist rather than trusting the droplet.
 """
 
 from __future__ import annotations
 
-import functools
-import http.server
 import json
 import os
 import queue
-import socketserver
 import sys
 import threading
 from pathlib import Path
-from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -48,8 +49,6 @@ try:
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 except ImportError:  # the autostart scripts may provide variables directly
     pass
-
-FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 AGENT_WS_URL = os.getenv(
     "AGENT_WS_URL", f"ws://127.0.0.1:{os.getenv('AGENTOS_PORT', '8000')}/ws/voice")
@@ -76,16 +75,6 @@ def _http_base_from_ws(ws_url: str) -> str:
 
 
 SERVER_BASE = _http_base_from_ws(AGENT_WS_URL)
-
-
-def _serve_frontend() -> int:
-    """Bind an ephemeral loopback port serving frontend/ and return it. See module docstring
-    point 1 for why this exists instead of a bare `file://` URL."""
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(FRONTEND_DIR))
-    httpd = socketserver.TCPServer(("127.0.0.1", 0), handler)
-    port = httpd.server_address[1]
-    threading.Thread(target=httpd.serve_forever, daemon=True, name="agentos-hud-static").start()
-    return port
 
 
 class Bridge:
@@ -153,9 +142,7 @@ class HudWindow:
         import webview  # heavy optional dep; imported lazily like voice_client's audio libs
 
         self._webview = webview
-        port = _serve_frontend()
-        url = (f"http://127.0.0.1:{port}/index.html"
-               f"?shell=desktop&server={quote(SERVER_BASE, safe='')}")
+        url = f"{SERVER_BASE}/dashboard/?shell=desktop"
 
         self._compact = start_compact
         self._visible = True

@@ -1,11 +1,18 @@
+import { api } from "@/core/transport";
 import { useAppStore } from "@/core/store";
 import { cn } from "@/lib/utils";
 
-// Header strip: brand, shell/connection status, and (from Slice 0c/0d, wired in later
-// slices) the login controls. Static/no-op here in S1 -- S2 wires it to real /api/session
-// polling and S3 to the desktop shell's own status.
+// Header strip: brand, live WS connection dot, and a logout control once authenticated
+// (S2). `connected` reflects the voice socket's actual state (core/ws.ts's VoiceSocket),
+// not a static placeholder.
 export function StatusBar({ shell = "web" }: { shell?: "web" | "desktop" }) {
   const connected = useAppStore((s) => s.connected);
+  const authState = useAppStore((s) => s.authState);
+  const setAuthState = useAppStore((s) => s.setAuthState);
+
+  const logout = () => {
+    void api.logout().finally(() => setAuthState("anonymous"));
+  };
 
   return (
     <header className="flex h-11 shrink-0 items-center justify-between border-b border-line px-4">
@@ -21,8 +28,19 @@ export function StatusBar({ shell = "web" }: { shell?: "web" | "desktop" }) {
           AGENTOS
         </span>
       </div>
-      <div className="font-mono text-[10px] uppercase tracking-widest text-text-dim">
-        {shell} shell
+      <div className="flex items-center gap-3">
+        <span className="font-mono text-[10px] uppercase tracking-widest text-text-dim">
+          {shell} shell
+        </span>
+        {authState === "authenticated" && (
+          <button
+            type="button"
+            onClick={logout}
+            className="font-mono text-[10px] uppercase tracking-widest text-text-mute hover:text-text-dim"
+          >
+            Log out
+          </button>
+        )}
       </div>
     </header>
   );
