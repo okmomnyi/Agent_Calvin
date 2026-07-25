@@ -532,6 +532,29 @@ async def api_session(
     return s
 
 
+@app.get("/api/jobs")
+async def api_jobs(
+    auth_session: dict[str, Any] = Depends(require_session),
+) -> dict[str, Any]:
+    """Job listings for the dashboard's browse panel -- the same drafted/notified set
+    skills/telegram_bot.py's jobs_payload() shows, just with room for more than 10 rows
+    since this is a dedicated scrollable card rather than a chat message."""
+    mem = get_memory()
+    rows = mem.jobs_by_status("notified", limit=40) + mem.jobs_by_status("drafted", limit=40)
+    rows = sorted(rows, key=lambda r: r["score"] or 0, reverse=True)[:40]
+    jobs = [
+        {"id": r["id"], "title": r["title"], "company": r["company"], "score": r["score"],
+         "category": r["category"], "status": r["status"], "apply_kind": r["apply_kind"],
+         "apply_target": r["apply_target"]}
+        for r in rows
+    ]
+    try:
+        total = sum(mem.count_jobs_by_status(s) for s in ("notified", "drafted"))
+    except Exception:  # noqa: BLE001 - a count must never break the listing
+        total = len(jobs)
+    return {"jobs": jobs, "total": total}
+
+
 def _current_voice() -> dict[str, Any]:
     """Look up the active pre-built voice/rate from the voice skill (safe default if absent)."""
     skill = registry.get("voice")

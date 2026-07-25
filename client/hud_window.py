@@ -59,7 +59,10 @@ WAKE_WORD = os.getenv("AGENT_WAKE_WORD", "hey_jarvis")
 # this window instead of running voice_client.py's standalone loop.
 WAKE_WORD_ENABLED = os.getenv("AGENT_CLIENT_MODE", "window") == "voice"
 
-FULL_SIZE = (420, 640)
+# Widened for the card/grid layout (reactor card + chat in the main column, a job-listings
+# card on the right) -- that grid only switches on above Tailwind's `md` breakpoint (768px),
+# so this has margin above it. Compact mode (corner-widget, tray-triggered) is unchanged.
+FULL_SIZE = (960, 680)
 COMPACT_SIZE = (110, 110)
 SCREEN_MARGIN = 24
 
@@ -177,6 +180,7 @@ class HudWindow:
         self._visible = True
         self._window = webview.create_window(
             "AgentOS", url, width=FULL_SIZE[0], height=FULL_SIZE[1],
+            min_size=(360, 480), resizable=True,
             frameless=True, easy_drag=True, on_top=True, transparent=True,
             js_api=Bridge(self),
         )

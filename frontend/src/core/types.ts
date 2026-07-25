@@ -37,3 +37,15 @@ export interface PendingApproval {
   what: string;
   action: string;
 }
+
+// Mirrors GET /api/jobs's row shape exactly (kernel/app.py's api_jobs).
+export interface JobListing {
+  id: number;
+  title: string;
+  company: string;
+  score: number | null;
+  category: string | null;
+  status: string;
+  apply_kind: string | null;
+  apply_target: string | null;
+}

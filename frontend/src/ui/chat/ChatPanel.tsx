@@ -24,8 +24,8 @@ export function ChatPanel({ onSend, sending }: { onSend: (text: string) => void;
   };
 
   return (
-    <section className="flex h-64 shrink-0 flex-col border-t border-line">
-      <div ref={listRef} className="flex-1 space-y-3 overflow-x-hidden overflow-y-auto px-4 py-3">
+    <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[var(--radius-card)] border border-line bg-surface-hi">
+      <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto px-4 py-3">
         {turns.length === 0 && (
           <p className="font-mono text-[11px] text-text-mute">No turns yet — say something below.</p>
         )}

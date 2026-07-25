@@ -19,6 +19,14 @@ describe("transport", () => {
     expect(result).toEqual({ ok: true });
   });
 
+  it("fetches job listings from /api/jobs", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ jobs: [], total: 0 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await api.jobs();
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/jobs");
+    expect(result).toEqual({ jobs: [], total: 0 });
+  });
+
   it("sends credentials same-origin and JSON body on POST", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
     vi.stubGlobal("fetch", fetchMock);

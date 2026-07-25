@@ -34,7 +34,7 @@ export function ApprovalsList() {
   if (approvals.length === 0) return null;
 
   return (
-    <section className="shrink-0 space-y-2 border-t border-line px-4 py-3">
+    <section className="shrink-0 space-y-2 rounded-[var(--radius-card)] border border-line bg-surface-hi px-4 py-3">
       <p className="font-mono text-[10px] uppercase tracking-widest text-attention">
         Needs your call ({approvals.length})
       </p>

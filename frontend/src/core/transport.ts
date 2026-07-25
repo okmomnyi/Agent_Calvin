@@ -1,4 +1,4 @@
-import type { PendingApproval, Turn } from "./types";
+import type { JobListing, PendingApproval, Turn } from "./types";
 
 // Every call is relative + same-origin: the web dashboard is served from the same kernel
 // it talks to (https://<domain>/dashboard/ -> https://<domain>/api/...), so the session
@@ -65,6 +65,8 @@ export interface CommandResult {
 
 export const api = {
   session: () => get<SessionState>("/api/session"),
+
+  jobs: () => get<{ jobs: JobListing[]; total: number }>("/api/jobs"),
 
   command: (text: string, opts: { channel?: string; useLlm?: boolean; spoken?: boolean } = {}) =>
     post<CommandResult>("/api/command", {

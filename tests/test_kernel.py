@@ -213,6 +213,41 @@ def _logged_in_client(mem, monkeypatch, app_module):
     return client
 
 
+# ================================================================= job listings (Phase 36)
+def test_jobs_requires_a_session(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    client = TestClient(app_module.app, base_url="https://testserver")
+
+    assert client.get("/api/jobs").status_code == 401
+
+
+def test_jobs_lists_drafted_and_notified_sorted_by_score(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("kernel.app.get_memory", lambda: mem)
+    client = _logged_in_client(mem, monkeypatch, app_module)
+
+    mem.upsert_job("remoteok", "low", title="Low notified", company="Acme")
+    low_id = mem.get_job_by_ref("remoteok", "low")["id"]
+    mem.score_job(low_id, 60, category="cloud_devops")
+    mem.set_job_status(low_id, "notified")
+
+    mem.upsert_job("remoteok", "high", title="High drafted", company="Acme")
+    high_id = mem.get_job_by_ref("remoteok", "high")["id"]
+    mem.score_job(high_id, 85, category="cloud_devops")
+    mem.set_job_status(high_id, "drafted")
+
+    mem.upsert_job("remoteok", "skipped", title="Skipped one", company="Acme")
+    skipped_id = mem.get_job_by_ref("remoteok", "skipped")["id"]
+    mem.set_job_status(skipped_id, "skipped")
+
+    response = client.get("/api/jobs")
+    assert response.status_code == 200
+    body = response.json()
+    assert [j["id"] for j in body["jobs"]] == [high_id, low_id]
+    assert body["total"] == 2
+
+
 def test_ws_ticket_requires_a_session_cookie(mem, monkeypatch):
     app_module = importlib.import_module("kernel.app")
     monkeypatch.setattr("core.auth.get_memory", lambda: mem)
