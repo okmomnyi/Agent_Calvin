@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AppFrame } from "@/ui/shell/AppFrame";
 import { HudStatesDevRoute } from "@/dev/HudStates";
 import { detectCapabilities, type Capabilities } from "@/core/capabilities";
+import { wireDesktopBridge } from "@/core/desktopBridge";
 import { api, ApiError } from "@/core/transport";
 import { VoiceSocket, type VoiceMessage } from "@/core/ws";
 import { useAppStore } from "@/core/store";
@@ -41,6 +42,10 @@ function Live({ shell }: { shell: "web" | "desktop" }) {
 
   const socketRef = useRef<VoiceSocket | null>(null);
   const lastSentRef = useRef<string>("");
+
+  useEffect(() => {
+    if (shell === "desktop") wireDesktopBridge();
+  }, [shell]);
 
   const bootstrap = useCallback(async () => {
     try {

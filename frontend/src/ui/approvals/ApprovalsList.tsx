@@ -1,90 +1,66 @@
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { api, ApiError } from "@/core/transport";
-import { authenticateWithPasskey } from "@/core/webauthnBrowser";
 import { useAppStore } from "@/core/store";
+import type { PendingApprovalKind } from "@/core/types";
 
 // Everything waiting on Calvin, across every skill (core/session.py's pending_approvals()) --
-// approve/deny reach the SAME ApprovalStore.resolve() Telegram's text-reply parser calls
-// (kernel/app.py's own docstring on /api/approvals/{id}/resolve: "NOT a second approval
-// mechanism"). A high-tier approve may come back 401 step_up_required; that's not a failure,
-// it's the gate working -- get a fresh passkey assertion and retry once.
+// jobs, resale-listing purchase gates, flashcard candidates, deadlines, and proposed
+// standing rules, each already reduced to one flat {kind, id, what, action} shape server
+// side. Read-only: each kind is resolved by ITS OWN skill (job_hunter/spaced_rep/
+// semester_planner/adaptive), which today only Telegram's inline buttons actually reach
+// (skills/telegram_bot.py's handle_callback) -- there is no unified REST action for these
+// yet, and POST /api/approvals/{id}/resolve is a DIFFERENT mechanism entirely (core/
+// approvals.py's tiered proposal queue, its own id space). Wiring real per-kind actions here
+// is real work, not a quick add; until then this panel tells the truth about what's pending
+// and where to act on it instead of showing buttons that would silently 404.
+const KIND_LABEL: Record<PendingApprovalKind, string> = {
+  job: "Job",
+  flip: "Resale",
+  flashcard: "Flashcard",
+  deadline: "Deadline",
+  rule: "Rule",
+};
+
+// "flip" (resale purchase-gate) has no Telegram command yet -- left blank rather than
+// guessing one, per the same rule that keeps this panel honest about what it can't do.
+const KIND_TELEGRAM_HINT: Partial<Record<PendingApprovalKind, string>> = {
+  job: "/jobs",
+  flashcard: "/cards",
+  deadline: "/deadlines",
+  rule: "/rules",
+};
+
 export function ApprovalsList() {
   const approvals = useAppStore((s) => s.pendingApprovals);
-  const removePendingApproval = useAppStore((s) => s.removePendingApproval);
-  const [busyId, setBusyId] = useState<number | null>(null);
-  const [errors, setErrors] = useState<Record<number, string>>({});
-
-  async function resolve(id: number, approve: boolean): Promise<void> {
-    setBusyId(id);
-    setErrors((e) => ({ ...e, [id]: "" }));
-    try {
-      await api.resolveApproval(id, approve);
-      removePendingApproval(id);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401 && err.message === "step_up_required") {
-        try {
-          const options = await api.webauthnLoginOptions();
-          const credential = await authenticateWithPasskey(options);
-          await api.resolveApproval(id, approve, credential);
-          removePendingApproval(id);
-          return;
-        } catch (stepUpErr) {
-          setErrors((e) => ({ ...e, [id]: describeError(stepUpErr) }));
-          return;
-        }
-      }
-      setErrors((e) => ({ ...e, [id]: describeError(err) }));
-    } finally {
-      setBusyId(null);
-    }
-  }
 
   if (approvals.length === 0) return null;
 
   return (
     <section className="shrink-0 space-y-2 border-t border-line px-4 py-3">
       <p className="font-mono text-[10px] uppercase tracking-widest text-attention">
-        Needs your approval ({approvals.length})
+        Needs your call ({approvals.length})
       </p>
-      {approvals.map((a) => (
-        <div
-          key={a.id}
-          className="flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-line bg-surface px-3 py-2"
-        >
-          <div className="min-w-0">
-            <p className="truncate text-sm text-text">{a.title ?? `Action #${a.id}`}</p>
-            {a.company != null && (
-              <p className="truncate text-xs text-text-dim">{String(a.company)}</p>
+      <div className="max-h-40 space-y-1.5 overflow-y-auto">
+        {approvals.map((a) => (
+          <div
+            key={`${a.kind}-${a.id}`}
+            className="flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-line bg-surface px-3 py-1.5"
+          >
+            <div className="min-w-0">
+              <span className="mr-2 font-mono text-[10px] uppercase tracking-widest text-text-mute">
+                {KIND_LABEL[a.kind] ?? a.kind}
+              </span>
+              <span className="truncate text-sm text-text">{a.what}</span>
+            </div>
+            {KIND_TELEGRAM_HINT[a.kind] && (
+              <span className="shrink-0 font-mono text-[10px] uppercase tracking-widest text-text-mute">
+                {KIND_TELEGRAM_HINT[a.kind]}
+              </span>
             )}
-            {errors[a.id] && <p className="text-xs text-bad">{errors[a.id]}</p>}
           </div>
-          <div className="flex shrink-0 gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busyId === a.id}
-              onClick={() => void resolve(a.id, false)}
-            >
-              Deny
-            </Button>
-            <Button
-              size="sm"
-              variant="attention"
-              disabled={busyId === a.id}
-              onClick={() => void resolve(a.id, true)}
-            >
-              Approve
-            </Button>
-          </div>
-        </div>
-      ))}
+        ))}
+      </div>
+      <p className="font-mono text-[10px] text-text-mute">
+        Act on these from Telegram for now — quick actions here are coming.
+      </p>
     </section>
   );
-}
-
-function describeError(err: unknown): string {
-  if (err instanceof ApiError) return err.message || "Failed.";
-  if (err instanceof Error) return err.message;
-  return "Failed.";
 }

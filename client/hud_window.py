@@ -114,6 +114,25 @@ class Bridge:
         except Exception as exc:  # noqa: BLE001 - must never throw into the page
             return {"ok": False, "error": str(exc)}
 
+    def hide(self) -> dict:
+        """Frameless + always-on-top means the window has no native minimize box -- this is
+        the page's only way to get itself out from over other windows. show()/toggle() come
+        back via the tray icon or the global hotkey (HOTKEY), same as before."""
+        try:
+            self._hud.hide()
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001 - must never throw into the page
+            return {"ok": False, "error": str(exc)}
+
+    def toggle_mic(self) -> dict:
+        """The consent boundary (AssistantCore.toggle_mic docstring) -- the OS audio stream
+        only opens because the page asked, on Calvin's click, never automatically."""
+        try:
+            mic_on = self._hud.core.toggle_mic()
+            return {"ok": True, "mic_on": mic_on}
+        except Exception as exc:  # noqa: BLE001 - must never throw into the page
+            return {"ok": False, "error": str(exc)}
+
     # ------------------------------------------------------------- phone (Slice 4)
     # Each method re-validates independently of whatever the server sent — this is the
     # laptop's own policy boundary, not a rubber stamp on the droplet's request.

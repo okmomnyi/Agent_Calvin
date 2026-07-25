@@ -15,6 +15,10 @@ interface AppState {
   socketStatus: SocketStatus;
   turns: Turn[];
   pendingApprovals: PendingApproval[];
+  // Desktop shell only -- true while AssistantCore's OS mic stream is actually open (the
+  // "consent boundary", client/assistant_core.py). Always false on the web shell, which has
+  // no local mic access at all.
+  micOn: boolean;
   setHudState: (s: HudState) => void;
   setMicLevel: (l: number) => void;
   setConnected: (c: boolean) => void;
@@ -24,6 +28,7 @@ interface AppState {
   addTurn: (t: Turn) => void;
   setPendingApprovals: (a: PendingApproval[]) => void;
   removePendingApproval: (id: number) => void;
+  setMicOn: (on: boolean) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -34,6 +39,7 @@ export const useAppStore = create<AppState>((set) => ({
   socketStatus: "closed",
   turns: [],
   pendingApprovals: [],
+  micOn: false,
   setHudState: (hudState) => set({ hudState }),
   setMicLevel: (micLevel) => set({ micLevel }),
   setConnected: (connected) => set({ connected }),
@@ -44,4 +50,5 @@ export const useAppStore = create<AppState>((set) => ({
   setPendingApprovals: (pendingApprovals) => set({ pendingApprovals }),
   removePendingApproval: (id) =>
     set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id) })),
+  setMicOn: (micOn) => set({ micOn }),
 }));

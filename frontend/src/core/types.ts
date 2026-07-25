@@ -21,12 +21,19 @@ export interface Turn {
   skill: string | null;
 }
 
-// Mirrors core/session.py's pending_approvals() rows (jobs today; the shape is deliberately
-// loose -- title/company only ever come from job rows, other skills may add their own kind
-// later, and the panel must degrade rather than break on a row it doesn't recognize).
+// Mirrors core/session.py's pending_approvals() rows EXACTLY -- a cross-skill "what's
+// waiting on Calvin" view spanning jobs/listings/flashcards/deadlines/rules, each already
+// reduced to one flat shape server-side. NOT the same id space as core/approvals.py's
+// ApprovalStore (POST /api/approvals/{id}/resolve) -- that's a separate, tiered
+// proposal-queue mechanism with its own ids; resolving one of THESE rows means acting
+// through the owning skill (job_hunter, spaced_rep, semester_planner, ...), which today only
+// Telegram's inline buttons do (skills/telegram_bot.py's handle_callback). This panel is
+// read-only until a matching REST action exists.
+export type PendingApprovalKind = "job" | "flip" | "flashcard" | "deadline" | "rule";
+
 export interface PendingApproval {
+  kind: PendingApprovalKind;
   id: number;
-  title?: string;
-  company?: string;
-  [key: string]: unknown;
+  what: string;
+  action: string;
 }
