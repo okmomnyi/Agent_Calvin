@@ -890,9 +890,8 @@ world & conflicts, AI/tech, sports, business, Kenya — reachable on demand (`/n
 `/whatsup`, voice, dashboard chat) or pushed automatically every morning. Nine free RSS wires
 (no API key, §0 free-first), same never-invent-a-source discipline `research.py` already
 enforces: every line traces to an actual fetched headline, and an empty category says so
-rather than being padded out. Explicitly **not** market prediction or trading advice —
-`skills/markets.py` (a later, separate piece) will do real price data correlated with news,
-never a forecast.
+rather than being padded out. Explicitly **not** market prediction or trading advice — see
+Phase 38 below for real price data correlated with news, never a forecast.
 
 Built in five ordered sub-phases (37b), each depending on the last:
 
@@ -953,6 +952,53 @@ Built in five ordered sub-phases (37b), each depending on the last:
 feed published specifically to be polled, the same reasoning `research.py`'s
 `DuckDuckGoSearcher` already uses for a search endpoint. It does not extend to fetching an
 article's full body — a future "read more" would need to consult robots there.
+
+### Phase 38 — Markets snapshot (`skills/markets.py`)
+The deferred half of Calvin's original "world awareness" ask ("...train it on all market
+moves... predict markets... probability of dumping on gold/oil due to wars"). Pushed back
+on explicitly before building anything: no model reliably predicts markets, and presenting
+a confident forecast would itself be a fabrication (§0 P5). Scope confirmed via
+`AskUserQuestion` — **"data + news correlation only"**: `/markets` (and an automatic daily
+push, `markets.briefing_hour`/`briefing_minute`) shows real prices and % moves for crypto,
+forex, gold/oil, and major stock indices, plus a news-correlation line for any notable
+mover — never a prediction, forecast, or buy/sell/hold call, under any framing. Every
+rendered snapshot ends with an explicit "Data only — not financial advice" line; the
+constraint is visible in the product, not only enforced upstream of it.
+
+Data sources (free, keyless, each verified live via `curl` before being wired in):
+- **CoinGecko `/simple/price`** — one batched call for every configured crypto id
+  (Bitcoin/Ethereum/Solana by default), 24h % change included in the response.
+- **Yahoo Finance's `/v8/finance/chart/{symbol}`** — forex pairs (`KES=X`, `EURUSD=X`,
+  `GBPUSD=X`), commodities (`GC=F` gold, `CL=F` crude oil/WTI), and stock indices
+  (`^GSPC`, `^IXIC`). One request per symbol: Yahoo's batched `/v7/finance/quote` endpoint
+  now returns `Unauthorized` without a session cookie/crumb the chart endpoint doesn't
+  need. % change isn't in the chart response, so it's computed from
+  `regularMarketPrice` vs `previousClose`/`chartPreviousClose`.
+- **Stooq was tried first and dropped** — its public CSV quote endpoint (`stooq.com/q/l/`)
+  currently returns a "page has moved" HTML response across every URL/domain/User-Agent
+  variant tried, not CSV data.
+
+`respect_robots=False` here is a materially different call from Phase 37's RSS exception,
+and was surfaced and confirmed explicitly rather than assumed by precedent: CoinGecko's
+`robots.txt` explicitly disallows `/api/v3` (the exact endpoint used), and Yahoo's
+finance-quote host disallows everything — both explicit path-level `Disallow` entries, not
+merely absent ones. Confirmed as an intentional exception: both are documented/de-facto
+public JSON quote APIs meant to be polled by tools (CoinGecko publishes this exact
+endpoint as its API; Yahoo's chart endpoint is the one every finance library uses), not
+article/content pages — scoped only to these two price endpoints, never to an
+article-body or HTML page fetch.
+
+News correlation reuses `WorldNewsSkill.recent_headlines()` (business + world categories)
+rather than duplicating RSS-parsing logic — one set of feeds, one place that owns "what's
+in the news right now." Only quotes moving at least `markets.notable_move_pct` (default
+2%) trigger the single LLM call that writes the correlation commentary, and only when at
+least one headline was actually fetched — a flat market or an empty news pull renders the
+raw numbers with no commentary section, never an invented one. The prompt mirrors
+`world_news._synthesize`'s discipline (cite only headlines actually fetched, hedge
+causation language) plus its own hard line: no prediction in any timeframe, no buy/sell/
+hold advice under any framing, even hedged. Instruments are config-driven from the start
+(`config.yaml`'s `markets.instruments`, falling back to `DEFAULT_INSTRUMENTS`) — Phase 37
+only reached that pattern in a later slice (S6); no reason to relearn the lesson here.
 
 ---
 

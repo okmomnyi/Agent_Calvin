@@ -1,7 +1,8 @@
 """Telegram bot — full remote control of AgentOS (Phase 8).
 
 Single authorized chat id. Commands (/status /jobs /approve /ask /find /form /prep /mock
-/draft /facts /events /cv /summarize /remember /forget /instructions /voiceoff /voiceon),
+/draft /facts /events /cv /summarize /remember /forget /instructions /voiceoff /voiceon
+/news /markets),
 inline Apply/Skip/Details buttons on the job digest, free text routed through the SAME
 intent engine as voice, and voice notes transcribed on the droplet (faster-whisper) and
 routed identically — the reliable "call it from my phone" path (Phase 7 phone access).
@@ -58,6 +59,7 @@ COMMAND_MAP: dict[str, tuple[str, str, str | None]] = {
     "contracts": ("adaptive", "contracts", None),
     "news": ("world_news", "whats_up", "categories"),
     "whatsup": ("world_news", "whats_up", "categories"),
+    "markets": ("markets", "snapshot", None),
 }
 
 HELP = (
@@ -82,6 +84,8 @@ HELP = (
     "/news [world,tech_ai,sports,business,kenya] [full] · /whatsup — today's world briefing, "
     "only what's new since you last asked unless you add \"full\" (also runs automatically "
     "each morning)\n"
+    "/markets — crypto/forex/gold-oil/stock-index prices with news context. Data only — "
+    "no predictions, no buy/sell calls (also runs automatically each morning)\n"
     "/summarize <thing> · /voiceoff · /voiceon\n"
     "/resetpassword — reset your break-glass password (emails a code first; reply with it)\n"
     "Send a voice note or just type — it routes like everything else."

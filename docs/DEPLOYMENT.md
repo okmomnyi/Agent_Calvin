@@ -168,6 +168,27 @@ Reuters and AP were tried first and dropped: neither has a working free public R
 new candidate feed actually returns valid RSS (`curl -s <url> | head -c 300`) before adding
 it — a dead feed degrades gracefully per-source, but there's no reason to ship one known dead.
 
+### Markets instruments (Phase 38)
+
+`skills/markets.py`'s tracked instruments live in `config.yaml`'s `markets.instruments` —
+add, remove, or re-symbol one there, no code change needed:
+
+| Category | Instruments | Source |
+|---|---|---|
+| crypto | Bitcoin, Ethereum, Solana | CoinGecko `/simple/price` (batched, 1 request) |
+| forex | USD/KES, USD/EUR, USD/GBP | Yahoo `/v8/finance/chart/{symbol}` (1 request each) |
+| commodities | Gold (`GC=F`), Crude Oil WTI (`CL=F`) | Yahoo chart API |
+| stocks | S&P 500 (`^GSPC`), Nasdaq Composite (`^IXIC`) | Yahoo chart API |
+
+Both endpoints are polled with `respect_robots=False` despite explicit `robots.txt`
+disallows on both hosts — confirmed intentionally (see `docs/ARCHITECTURE.md` Phase 38)
+as a documented/de-facto public JSON quote API exception, never extended to any
+article/HTML page fetch. Stooq (`stooq.com/q/l/`) was tried first and dropped: its public
+CSV quote endpoint currently returns a "page has moved" HTML response, not CSV, across
+every URL/domain/User-Agent variant tried. Verify any new candidate symbol actually
+returns real quote data (`curl -sL -A "Mozilla/5.0" "https://query1.finance.yahoo.com/v8/finance/chart/<symbol>"`
+for Yahoo, or the CoinGecko id directly against `/simple/price`) before adding it.
+
 ### Things worth knowing
 
 - **`DATABASE_URL` in `.env` is ignored by the containers**, and must be. It holds a *host*

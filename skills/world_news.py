@@ -48,8 +48,9 @@ world_news.sources -- _feeds() reads it live every call (same convention as ever
 tunable in this skill), falling back to DEFAULT_FEEDS if that section is missing or
 malformed. Adding, removing, or re-grouping a source is now a config edit, not a code change.
 
-Deliberately NOT market prediction or financial advice — see skills/markets.py (a later,
-separate piece) for real price data correlated with news; nothing here forecasts or advises.
+Deliberately NOT market prediction or financial advice — see skills/markets.py (Phase 38)
+for real price data correlated with news (via recent_headlines() below); nothing here
+forecasts or advises, and neither does that skill.
 """
 
 from __future__ import annotations
@@ -375,6 +376,12 @@ class WorldNewsSkill(BaseSkill):
             ScheduledJob(id="world_news.breaking_check", func=self.check_breaking,
                         trigger="interval", kwargs={"minutes": poll_minutes}),
         ]
+
+    def recent_headlines(self, category: str) -> list[Headline]:
+        """Public accessor so other skills (skills/markets.py's news-correlation step) can
+        reuse this skill's own feeds/freshness-window logic instead of duplicating RSS
+        fetching -- one place owns "what's in the news right now"."""
+        return self._fetch_category(category)
 
     # ------------------------------------------------------------- fetch
     def _fetch_category(self, category: str) -> list[Headline]:

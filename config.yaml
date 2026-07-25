@@ -271,6 +271,35 @@ world_news:
       - {name: "The Standard", url: "https://www.standardmedia.co.ke/rss/headlines.php", group: standard_group}
       - {name: "AllAfrica", url: "https://allafrica.com/tools/headlines/rdf/latest/headlines.rdf", group: allafrica}
 
+# --- Markets snapshot (Phase 38) — free/keyless price data + news correlation, NEVER a
+# prediction or trading recommendation (confirmed scope, see skills/markets.py) ---
+markets:
+  briefing_hour: 8            # 30 min after world_news's daily push, not a hard requirement
+  briefing_minute: 0
+  # Absolute % move (24h for crypto, vs previous close for everything else) a quote must
+  # clear before it gets news-correlation commentary — a flat market doesn't need the model
+  # reaching for a headline to explain nothing.
+  notable_move_pct: 2.0
+  # Instruments to track, by category. `source` is "coingecko" (crypto, batched, has % change
+  # built in) or "yahoo" (forex/commodities/stocks, one request per symbol via the chart API
+  # — see skills/markets.py's module docstring for why, including the robots.txt exception).
+  # Add/remove/re-symbol an instrument here, no code change needed.
+  instruments:
+    crypto:
+      - {name: "Bitcoin", symbol: bitcoin, source: coingecko}
+      - {name: "Ethereum", symbol: ethereum, source: coingecko}
+      - {name: "Solana", symbol: solana, source: coingecko}
+    forex:
+      - {name: "USD/KES", symbol: "KES=X", source: yahoo}
+      - {name: "USD/EUR", symbol: "EURUSD=X", source: yahoo}
+      - {name: "USD/GBP", symbol: "GBPUSD=X", source: yahoo}
+    commodities:
+      - {name: "Gold", symbol: "GC=F", source: yahoo}
+      - {name: "Crude Oil (WTI)", symbol: "CL=F", source: yahoo}
+    stocks:
+      - {name: "S&P 500", symbol: "^GSPC", source: yahoo}
+      - {name: "Nasdaq Composite", symbol: "^IXIC", source: yahoo}
+
 # --- Self-audit / infra recon (Phase 21) — REPORT ONLY, enrolled targets only ---
 infra:
   tls_warn_days: 21           # warn this far ahead of certificate expiry
