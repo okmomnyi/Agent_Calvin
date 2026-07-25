@@ -327,12 +327,11 @@ def test_whats_up_never_calls_notify_when_notify_is_false(fake_llm, mem):
     assert notified == []
 
 
-def test_scheduled_jobs_registers_a_daily_cron():
+def test_scheduled_jobs_registers_the_daily_digest_and_the_breaking_poll():
     skill = WorldNewsSkill()
-    jobs = skill.scheduled_jobs()
-    assert len(jobs) == 1
-    assert jobs[0].id == "world_news.briefing"
-    assert jobs[0].trigger == "cron"
+    jobs = {j.id: j for j in skill.scheduled_jobs()}
+    assert jobs["world_news.briefing"].trigger == "cron"
+    assert jobs["world_news.breaking_check"].trigger == "interval"
 
 
 # ------------------------------------------------------------------ "since last asked" (S2)
@@ -621,3 +620,174 @@ def test_whats_up_has_no_front_page_for_a_single_category(fake_llm, mem):
 
     assert result.data["front_page"] is False
     assert "TOP STORIES" not in result.text
+
+
+# ------------------------------------------------------------------ breaking news (S5)
+def _world_fetcher_with_sources(now: float, source_indices: list[int],
+                                title: str = "Major event unfolds") -> _FakeFetcher:
+    """The same story, reported by the given world-category sources (by index into
+    FEEDS["world"]) at distinct URLs but an identical title, so the real (test-pinned
+    hashing) embedder reliably clusters them together."""
+    urls = FEEDS["world"]
+    by_url = {}
+    for i in source_indices:
+        by_url[urls[i][1]] = _FakeResponse(200, _rss([(title, f"https://x.test/world/{i}", _rfc822(now))]))
+    return _FakeFetcher(by_url)
+
+
+def test_breaking_candidates_requires_the_corroboration_bar(mem):
+    skill = WorldNewsSkill(memory=mem)
+    below_bar = _cluster("world", n_members=2, n_groups=2)   # corroboration=2, default bar=3
+    at_bar = _cluster("world", n_members=3, n_groups=3)
+
+    candidates = skill._breaking_candidates([below_bar, at_bar])
+
+    assert below_bar not in candidates
+    assert at_bar in candidates
+
+
+def test_breaking_candidates_excludes_coverage_spread_too_far_apart_in_time(mem):
+    skill = WorldNewsSkill(memory=mem)
+    now = 2_000_000.0
+
+    tight = Cluster(category="world", members=[
+        _headline("A", "Story", group="g1"), _headline("B", "Story", group="g2"),
+        _headline("C", "Story", group="g3")])
+    for h, t in zip(tight.members, [now, now + 1800, now + 3000]):  # within ~50 minutes
+        h.published_at = t
+
+    spread = Cluster(category="world", members=[
+        _headline("A", "Story", group="g1"), _headline("B", "Story", group="g2"),
+        _headline("C", "Story", group="g3")])
+    for h, t in zip(spread.members, [now, now + 10 * 3600, now + 20 * 3600]):  # 20h spread
+        h.published_at = t
+
+    candidates = skill._breaking_candidates([tight, spread])
+
+    assert tight in candidates
+    assert spread not in candidates
+
+
+def test_check_breaking_does_not_fire_on_a_single_source(fake_llm, mem):
+    """The exact case named in the spec: one source on a novel cluster must not fire,
+    however loud the coverage."""
+    now = 2_000_000.0
+    fetcher = _world_fetcher_with_sources(now, [0])  # BBC World only
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda t: True)
+
+    result = skill.check_breaking()
+
+    assert result.data["fired"] is False
+
+
+def test_check_breaking_fires_with_three_independent_groups(fake_llm, mem):
+    now = 2_000_000.0
+    notified: list[str] = []
+    fetcher = _world_fetcher_with_sources(now, [0, 1, 2])  # BBC, Al Jazeera, Guardian
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda text: notified.append(text) or True)
+
+    result = skill.check_breaking()
+
+    assert result.data["fired"] is True
+    assert result.data["corroboration"] == 3
+    assert result.data["category"] == "world"
+    assert len(notified) == 1
+    assert "BREAKING" in notified[0]
+
+
+def test_check_breaking_never_fires_twice_for_the_same_story(fake_llm, mem):
+    """Isolates the PER-CLUSTER suppression from the global cooldown: the clock is advanced
+    past the cooldown before the second call, so if only the cooldown were doing the work,
+    this would incorrectly fire again."""
+    now = [2_000_000.0]
+    fetcher = _world_fetcher_with_sources(now[0], [0, 1, 2])
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now[0],
+                           notify=lambda t: True)
+
+    first = skill.check_breaking()
+    assert first.data["fired"] is True
+
+    now[0] += 61 * 60  # past the 60-minute cooldown
+    second = skill.check_breaking()
+
+    assert second.data["fired"] is False
+
+
+def test_check_breaking_ignores_alarming_words_from_a_single_source(fake_llm, mem):
+    """No keyword path exists anywhere in this feature -- an alarming title from ONE source
+    is treated identically to a mundane one."""
+    now = 2_000_000.0
+    urls = FEEDS["world"]
+    fetcher = _FakeFetcher({
+        urls[0][1]: _FakeResponse(200, _rss([
+            ("BREAKING URGENT WAR ALERT CRISIS", "https://x.test/w", _rfc822(now))])),
+    })
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda t: True)
+
+    result = skill.check_breaking()
+
+    assert result.data["fired"] is False
+
+
+def test_check_breaking_cooldown_blocks_a_different_story_shortly_after(fake_llm, mem):
+    now = [2_000_000.0]
+    fetcher = _world_fetcher_with_sources(now[0], [0, 1, 2], title="First big story")
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now[0],
+                           notify=lambda t: True)
+    first = skill.check_breaking()
+    assert first.data["fired"] is True
+
+    # a genuinely DIFFERENT, independently-qualifying story only 5 minutes later -- well
+    # inside the default 60-minute cooldown
+    now[0] += 5 * 60
+    fetcher._by_url = _world_fetcher_with_sources(now[0], [0, 1, 2], title="Second big story")._by_url
+    second = skill.check_breaking()
+
+    assert second.data["fired"] is False
+    assert second.data["reason"] == "cooldown"
+
+
+def test_check_breaking_fires_at_most_once_even_if_two_categories_qualify(fake_llm, mem):
+    now = 2_000_000.0
+    world_urls = _world_fetcher_with_sources(now, [0, 1, 2])._by_url
+    kenya_urls = FEEDS["kenya"]
+    kenya_by_url = {
+        kenya_urls[i][1]: _FakeResponse(200, _rss([("Kenya event", f"https://x.test/kenya/{i}", _rfc822(now))]))
+        for i in range(4)   # all 4 Kenya sources -> corroboration 3 (NMG counted once)
+    }
+    fetcher = _FakeFetcher({**world_urls, **kenya_by_url})
+    notified: list[str] = []
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda text: notified.append(text) or True)
+
+    result = skill.check_breaking()
+
+    assert result.data["fired"] is True
+    assert len(notified) == 1   # exactly one push, never both
+
+
+def test_check_breaking_fails_closed_when_the_cooldown_clock_is_unreadable(fake_llm):
+    """A DB outage must never be interpreted as "cooldown definitely elapsed" -- that would
+    be the one failure mode that could actually cause a flood."""
+    now = 2_000_000.0
+    fetcher = _world_fetcher_with_sources(now, [0, 1, 2])
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=_BrokenMem(), clock=lambda: now,
+                           notify=lambda t: True)
+
+    result = skill.check_breaking()
+
+    assert result.data["fired"] is False
+
+
+def test_retire_stale_breaking_pushed_excludes_old_rows(mem):
+    now = [1_000_000.0]
+    skill = WorldNewsSkill(memory=mem, clock=lambda: now[0])
+    skill._record_breaking_pushed("world", ["https://x.test/old"])
+
+    now[0] += 8 * 86400  # past the 7-day default retention
+    skill._retire_stale_breaking_pushed()
+
+    assert skill._already_breaking_pushed("world") == set()

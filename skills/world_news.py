@@ -34,6 +34,15 @@ whatever the score already chose; ranking never varies run-to-run for the same c
 Only shown when spanning more than one category -- "/news kenya" alone doesn't need a front
 page on top of itself.
 
+Phase 37b/S5: a lightweight, more-frequent poll (check_breaking, separate from the daily
+digest) fires AT MOST ONE push, and only when a story clears every bar: high independent
+corroboration (S3's groups, not raw headline count), tightly time-clustered coverage, never
+already pushed before for this story-lineage, and a GLOBAL cooldown has elapsed. There is no
+keyword path anywhere in this -- a headline containing "breaking"/"war"/"urgent" from a
+single source never fires. This is a rare, high-bar exception to pull-only delivery, not a
+second firehose (AGENTOS_BUG_LIST.md #17's own lesson: an ungated stream drowns the person
+it's meant to help).
+
 Deliberately NOT market prediction or financial advice — see skills/markets.py (a later,
 separate piece) for real price data correlated with news; nothing here forecasts or advises.
 """
@@ -138,6 +147,16 @@ _DELIVERED_RETENTION_DAYS_DEFAULT = 3
 _INTEREST_ORDER_DEFAULT = ["world", "tech_ai", "business", "kenya", "sports"]
 _FRONT_PAGE_SIZE = 3
 
+# Breaking news (Phase 37b/S5) -- deliberately conservative defaults. This is a RARE, high-bar
+# exception to pull-only delivery, not a second firehose (AGENTOS_BUG_LIST.md #17's own lesson:
+# an unbounded stream drowns the person it's meant to help). Corroboration-gated, never
+# keyword-gated -- a headline containing "breaking"/"war"/"urgent" from ONE source never fires.
+_BREAKING_CORROBORATION_BAR_DEFAULT = 3    # distinct independent GROUPS, not raw headlines
+_BREAKING_WINDOW_HOURS_DEFAULT = 6         # how tightly-clustered in TIME the coverage must be
+_BREAKING_COOLDOWN_MINUTES_DEFAULT = 60    # GLOBAL, system-wide -- not per category
+_BREAKING_POLL_MINUTES_DEFAULT = 20        # more frequent than the daily digest, still modest
+_BREAKING_RETENTION_DAYS_DEFAULT = 7
+
 
 @dataclass
 class Headline:
@@ -180,6 +199,17 @@ class Cluster:
             if h.source not in seen:
                 seen.append(h.source)
         return seen
+
+    @property
+    def publish_span_hours(self) -> float:
+        """How tightly-clustered in TIME this story's coverage is (Phase 37b/S5) -- 3
+        independent sources publishing within the same hour reads very differently from 3
+        sources publishing across 20 hours, even though corroboration is identical. Undated
+        or single-dated-point clusters return 0.0 (never penalized for missing dates)."""
+        dated = [h.published_at for h in self.members if h.published_at is not None]
+        if len(dated) < 2:
+            return 0.0
+        return (max(dated) - min(dated)) / 3600
 
 
 def _cluster_headlines(headlines: list[Headline], embedder: Any, threshold: float) -> list[Cluster]:
@@ -302,8 +332,17 @@ class WorldNewsSkill(BaseSkill):
     def scheduled_jobs(self) -> list[ScheduledJob]:
         hour = int(get_settings().get("world_news", "briefing_hour", default=7))
         minute = int(get_settings().get("world_news", "briefing_minute", default=30))
-        return [ScheduledJob(id="world_news.briefing", func=self.whats_up, trigger="cron",
-                             kwargs={"hour": hour, "minute": minute})]
+        poll_minutes = int(get_settings().get(
+            "world_news", "breaking_poll_minutes", default=_BREAKING_POLL_MINUTES_DEFAULT))
+        return [
+            ScheduledJob(id="world_news.briefing", func=self.whats_up, trigger="cron",
+                        kwargs={"hour": hour, "minute": minute}),
+            # Separate from the daily digest on purpose -- more frequent, but still gated hard
+            # by check_breaking() itself (corroboration bar + global cooldown), not by how
+            # often this timer fires. See the "breaking news (S5)" section above.
+            ScheduledJob(id="world_news.breaking_check", func=self.check_breaking,
+                        trigger="interval", kwargs={"minutes": poll_minutes}),
+        ]
 
     # ------------------------------------------------------------- fetch
     def _fetch_category(self, category: str) -> list[Headline]:
@@ -396,6 +435,114 @@ class WorldNewsSkill(BaseSkill):
             "world_news", "interest_order", default=_INTEREST_ORDER_DEFAULT)
         ranked = sorted(clusters, key=lambda c: self._score(c, interest_order), reverse=True)
         return ranked[:_FRONT_PAGE_SIZE]
+
+    # ------------------------------------------------------------- breaking news (S5)
+    # Corroboration-gated, NEVER keyword-gated (AGENTOS_BUG_LIST.md #17's own lesson applies
+    # here too: an unbounded/ungated stream is how a feature meant to help drowns the person
+    # it's for). A story only qualifies if independent wires -- not raw headlines, not one
+    # loud source -- report it inside a tight time window. Even then it fires at most once
+    # per story-lineage, and the cooldown is GLOBAL, not per-category, so a day with several
+    # genuinely big stories still can't machine-gun.
+    def _breaking_candidates(self, clusters: list[Cluster]) -> list[Cluster]:
+        bar = int(get_settings().get(
+            "world_news", "breaking_corroboration_bar", default=_BREAKING_CORROBORATION_BAR_DEFAULT))
+        window_hours = float(get_settings().get(
+            "world_news", "breaking_window_hours", default=_BREAKING_WINDOW_HOURS_DEFAULT))
+        return [c for c in clusters
+                if c.corroboration >= bar and c.publish_span_hours <= window_hours]
+
+    def _already_breaking_pushed(self, category: str) -> set[str]:
+        rows = self.mem.execute(
+            "SELECT url FROM world_news_breaking_pushed WHERE category=%s AND retired_at IS NULL",
+            (category,)).fetchall()
+        return {r["url"] for r in rows}
+
+    def _last_breaking_push_at(self) -> float | None:
+        row = self.mem.execute(
+            "SELECT MAX(pushed_at) AS m FROM world_news_breaking_pushed "
+            "WHERE retired_at IS NULL").fetchone()
+        return row["m"] if row and row["m"] is not None else None
+
+    def _record_breaking_pushed(self, category: str, urls: list[str]) -> None:
+        if not urls:
+            return
+        now = self._now()
+        with self.mem.tx() as conn:
+            for url in urls:
+                conn.execute(
+                    "INSERT INTO world_news_breaking_pushed(category, url, pushed_at) "
+                    "VALUES(%s,%s,%s) ON CONFLICT (category, url) "
+                    "DO UPDATE SET pushed_at=EXCLUDED.pushed_at, retired_at=NULL",
+                    (category, url, now))
+
+    def _retire_stale_breaking_pushed(self) -> None:
+        retention_days = float(get_settings().get(
+            "world_news", "breaking_retention_days", default=_BREAKING_RETENTION_DAYS_DEFAULT))
+        cutoff = self._now() - retention_days * 86400
+        with self.mem.tx() as conn:
+            conn.execute(
+                "UPDATE world_news_breaking_pushed SET retired_at=%s "
+                "WHERE retired_at IS NULL AND pushed_at < %s",
+                (self._now(), cutoff))
+
+    def _breaking_text(self, category: str, cluster: Cluster) -> str:
+        prose = self._synthesize([cluster])
+        return (f"🚨 BREAKING — {CATEGORY_LABEL.get(category, category)}\n"
+                f"Corroborated by {cluster.corroboration} independent source(s): "
+                f"{', '.join(cluster.sources)}\n\n{prose}")
+
+    def check_breaking(self, **_: Any) -> CommandResult:
+        """The lightweight poll (more frequent than the daily digest, still modest --
+        world_news.breaking_poll_minutes). Fires AT MOST ONE push, and only when a story
+        clears every bar: high independent corroboration, tightly time-clustered coverage,
+        never already pushed before, and the global cooldown has elapsed. Any single failed
+        check (DB read, one category's fetch) degrades that one thing, never the whole poll.
+        """
+        try:
+            self._retire_stale_breaking_pushed()
+        except Exception:  # noqa: BLE001 - housekeeping must never block the poll
+            log.warning("world_news: retiring stale breaking-pushed rows failed", exc_info=True)
+
+        cooldown_minutes = float(get_settings().get(
+            "world_news", "breaking_cooldown_minutes", default=_BREAKING_COOLDOWN_MINUTES_DEFAULT))
+        try:
+            last_push = self._last_breaking_push_at()
+        except Exception:  # noqa: BLE001 - an unreadable cooldown clock must not force a fire
+            log.warning("world_news: reading the breaking cooldown clock failed", exc_info=True)
+            last_push = self._now()   # fail CLOSED: assume "just fired" rather than risk a flood
+        if last_push is not None and (self._now() - last_push) < cooldown_minutes * 60:
+            return CommandResult(text="", ok=True, data={"fired": False, "reason": "cooldown"})
+
+        candidates: list[tuple[str, Cluster]] = []
+        for cat in FEEDS:
+            try:
+                headlines = self._fetch_category(cat)
+                clusters = self._cluster(headlines)
+                qualifying = self._breaking_candidates(clusters)
+                if not qualifying:
+                    continue
+                already = self._already_breaking_pushed(cat)
+            except Exception:  # noqa: BLE001 - one category's failure must not block the rest
+                log.warning("world_news: breaking check failed for %s", cat, exc_info=True)
+                continue
+            novel = [c for c in qualifying if all(h.url not in already for h in c.members)]
+            candidates.extend((cat, c) for c in novel)
+
+        if not candidates:
+            return CommandResult(text="", ok=True, data={"fired": False})
+
+        # Exactly one push, even if several categories qualify at once -- the cooldown covers
+        # the rest; this is the "rate-limit hard" half of the rule.
+        category, top = max(candidates, key=lambda pair: (pair[1].corroboration, len(pair[1].members)))
+        text = self._breaking_text(category, top)
+        self._notify(text)
+        try:
+            self._record_breaking_pushed(category, [h.url for h in top.members])
+        except Exception:  # noqa: BLE001 - the push already happened; recording failure must not raise
+            log.warning("world_news: recording the breaking push failed", exc_info=True)
+        return CommandResult(text=text, ok=True,
+                             data={"fired": True, "category": category,
+                                   "corroboration": top.corroboration})
 
     # ------------------------------------------------------------- synthesis
     def _synthesize(self, clusters: list[Cluster]) -> str:

@@ -642,6 +642,23 @@ CREATE TABLE IF NOT EXISTS world_news_delivered (
 );
 CREATE INDEX IF NOT EXISTS idx_world_news_delivered_active
     ON world_news_delivered(category, retired_at);
+
+-- World news (Phase 37b/S5): which headline URLs have already triggered a breaking-news
+-- push, per category -- a story-lineage fires AT MOST ONCE regardless of how many more
+-- sources join it later. MAX(pushed_at) across this whole table (not scoped to one
+-- category) is the global cooldown clock: breaking news is a rare, high-bar exception, not
+-- a second firehose, so the cooldown applies system-wide, not per category. Retired past
+-- the retention window, never deleted (§0 P4).
+CREATE TABLE IF NOT EXISTS world_news_breaking_pushed (
+    id         SERIAL PRIMARY KEY,
+    category   TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    pushed_at  DOUBLE PRECISION NOT NULL,
+    retired_at DOUBLE PRECISION,
+    UNIQUE(category, url)
+);
+CREATE INDEX IF NOT EXISTS idx_world_news_breaking_pushed_active
+    ON world_news_breaking_pushed(retired_at, pushed_at);
 """
 
 
