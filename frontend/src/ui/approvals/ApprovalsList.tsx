@@ -38,18 +38,20 @@ export function ApprovalsList() {
       <p className="font-mono text-[10px] uppercase tracking-widest text-attention">
         Needs your call ({approvals.length})
       </p>
-      <div className="max-h-40 space-y-1.5 overflow-y-auto">
+      <div className="max-h-40 space-y-1.5 overflow-y-auto overflow-x-hidden">
         {approvals.map((a) => (
           <div
             key={`${a.kind}-${a.id}`}
-            className="flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-line bg-surface px-3 py-1.5"
+            className="flex items-center gap-2 rounded-[var(--radius-control)] border border-line bg-surface px-3 py-1.5"
           >
-            <div className="min-w-0">
-              <span className="mr-2 font-mono text-[10px] uppercase tracking-widest text-text-mute">
-                {KIND_LABEL[a.kind] ?? a.kind}
-              </span>
-              <span className="truncate text-sm text-text">{a.what}</span>
-            </div>
+            {/* Both children are flex items -- a <span> blockifies as one, so min-w-0 +
+               truncate actually clip here instead of pushing the row wider than the window
+               (which is how a 20-item, 420px-wide panel ends up with a horizontal
+               scrollbar instead of a clean ellipsis). */}
+            <span className="shrink-0 font-mono text-[10px] uppercase tracking-widest text-text-mute">
+              {KIND_LABEL[a.kind] ?? a.kind}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-sm text-text">{a.what}</span>
             {KIND_TELEGRAM_HINT[a.kind] && (
               <span className="shrink-0 font-mono text-[10px] uppercase tracking-widest text-text-mute">
                 {KIND_TELEGRAM_HINT[a.kind]}

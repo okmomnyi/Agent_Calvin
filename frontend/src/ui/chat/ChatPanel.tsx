@@ -25,19 +25,22 @@ export function ChatPanel({ onSend, sending }: { onSend: (text: string) => void;
 
   return (
     <section className="flex h-64 shrink-0 flex-col border-t border-line">
-      <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+      <div ref={listRef} className="flex-1 space-y-3 overflow-x-hidden overflow-y-auto px-4 py-3">
         {turns.length === 0 && (
           <p className="font-mono text-[11px] text-text-mute">No turns yet — say something below.</p>
         )}
         {turns.map((t, i) => (
           <div key={`${t.at}-${i}`} className="space-y-1">
             <div className="flex justify-end">
-              <p className="max-w-[85%] rounded-[var(--radius-control)] bg-surface-hi px-3 py-1.5 text-sm text-text">
+              {/* break-words: a reply/command can carry a bare URL with no spaces (job
+                 links, apply targets) -- without it that single unbroken token forces the
+                 bubble past max-w and the whole panel scrolls sideways instead of wrapping. */}
+              <p className="max-w-[85%] break-words rounded-[var(--radius-control)] bg-surface-hi px-3 py-1.5 text-sm text-text">
                 {t.text}
               </p>
             </div>
-            <div className="flex items-baseline gap-2">
-              <p className="max-w-[85%] rounded-[var(--radius-control)] bg-surface px-3 py-1.5 text-sm text-text-dim">
+            <div className="flex min-w-0 items-baseline gap-2">
+              <p className="max-w-[85%] min-w-0 break-words rounded-[var(--radius-control)] bg-surface px-3 py-1.5 text-sm text-text-dim">
                 {t.reply}
               </p>
               {t.skill && (

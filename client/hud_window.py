@@ -124,6 +124,16 @@ class Bridge:
         except Exception as exc:  # noqa: BLE001 - must never throw into the page
             return {"ok": False, "error": str(exc)}
 
+    def quit(self) -> dict:
+        """No native close box either -- this is the page's equivalent of the tray menu's
+        own Quit item (_build_tray below), and triggers the SAME window.events.closed ->
+        _on_closed cleanup (mic stream, hotkey listener, tray icon) as a real OS close."""
+        try:
+            self._hud._window.destroy()
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001 - must never throw into the page
+            return {"ok": False, "error": str(exc)}
+
     def toggle_mic(self) -> dict:
         """The consent boundary (AssistantCore.toggle_mic docstring) -- the OS audio stream
         only opens because the page asked, on Calvin's click, never automatically."""

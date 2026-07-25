@@ -47,4 +47,13 @@ describe("ChatPanel", () => {
     render(<ChatPanel onSend={vi.fn()} sending={true} />);
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
   });
+
+  it("wraps a bare URL instead of forcing the panel to scroll sideways", () => {
+    const url = "https://himalayas.app/companies/peek/jobs/senior-dev-ops-engineer-with-a-very-long-slug";
+    useAppStore.setState({
+      turns: [{ text: "apply link", reply: url, channel: "dashboard", at: 1, skill: null }],
+    });
+    render(<ChatPanel onSend={vi.fn()} sending={false} />);
+    expect(screen.getByText(url)).toHaveClass("break-words");
+  });
 });

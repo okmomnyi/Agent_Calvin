@@ -4,9 +4,10 @@ import { useAppStore } from "@/core/store";
 import { cn } from "@/lib/utils";
 
 // Header strip: brand, live WS connection dot, a logout control once authenticated (S2),
-// and -- desktop shell only -- a mic toggle and a minimize button. The window is frameless
-// and always-on-top (client/hud_window.py) so it has no native title bar at all; without
-// these two controls there is no way to start a voice turn or get the window out of the way.
+// and -- desktop shell only -- a mic toggle plus a minimize/close pair. The window is
+// frameless and always-on-top (client/hud_window.py) so it has NO native title bar at all;
+// without these controls there is no way to start a voice turn, get the window out of the
+// way, or quit it short of Task Manager.
 export function StatusBar({ shell = "web" }: { shell?: "web" | "desktop" }) {
   const connected = useAppStore((s) => s.connected);
   const authState = useAppStore((s) => s.authState);
@@ -26,6 +27,10 @@ export function StatusBar({ shell = "web" }: { shell?: "web" | "desktop" }) {
 
   const minimize = () => {
     void callBridge("hide");
+  };
+
+  const quit = () => {
+    void callBridge("quit");
   };
 
   return (
@@ -72,14 +77,24 @@ export function StatusBar({ shell = "web" }: { shell?: "web" | "desktop" }) {
           </button>
         )}
         {shell === "desktop" && (
-          <button
-            type="button"
-            onClick={minimize}
-            aria-label="Minimize"
-            className="font-mono text-sm leading-none text-text-mute hover:text-text-dim"
-          >
-            —
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={minimize}
+              aria-label="Minimize"
+              className="flex h-6 w-6 items-center justify-center rounded-[var(--radius-control)] font-mono text-sm leading-none text-text-mute hover:bg-surface-hi hover:text-text-dim"
+            >
+              —
+            </button>
+            <button
+              type="button"
+              onClick={quit}
+              aria-label="Close"
+              className="flex h-6 w-6 items-center justify-center rounded-[var(--radius-control)] font-mono text-sm leading-none text-text-mute hover:bg-bad/20 hover:text-bad"
+            >
+              ×
+            </button>
+          </div>
         )}
       </div>
     </header>

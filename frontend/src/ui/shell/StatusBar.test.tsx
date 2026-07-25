@@ -11,16 +11,18 @@ describe("StatusBar", () => {
     useAppStore.setState({ connected: false, authState: "unknown", micOn: false });
   });
 
-  it("shows no mic or minimize control on the web shell", () => {
+  it("shows no mic, minimize, or close control on the web shell", () => {
     render(<StatusBar shell="web" />);
     expect(screen.queryByLabelText(/microphone/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Minimize")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Close")).not.toBeInTheDocument();
   });
 
-  it("shows a mic toggle and a minimize control on the desktop shell", () => {
+  it("shows a mic toggle, minimize, and close on the desktop shell", () => {
     render(<StatusBar shell="desktop" />);
     expect(screen.getByLabelText("Turn microphone on")).toBeInTheDocument();
     expect(screen.getByLabelText("Minimize")).toBeInTheDocument();
+    expect(screen.getByLabelText("Close")).toBeInTheDocument();
   });
 
   it("reflects micOn in the button's label and pressed state", () => {
@@ -43,5 +45,12 @@ describe("StatusBar", () => {
     render(<StatusBar shell="desktop" />);
     await userEvent.click(screen.getByLabelText("Minimize"));
     expect(callBridge).toHaveBeenCalledWith("hide");
+  });
+
+  it("clicking close calls the bridge's quit", async () => {
+    const { callBridge } = await import("@/core/desktopBridge");
+    render(<StatusBar shell="desktop" />);
+    await userEvent.click(screen.getByLabelText("Close"));
+    expect(callBridge).toHaveBeenCalledWith("quit");
   });
 });

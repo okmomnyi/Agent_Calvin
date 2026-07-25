@@ -50,4 +50,15 @@ describe("ApprovalsList", () => {
     render(<ApprovalsList />);
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
+
+  it("truncates a long title instead of overflowing the row (min-w-0 + truncate on a flex item)", () => {
+    const long = "Senior Software Engineer, Cloud Architecture & Distributed Systems Platform Team";
+    useAppStore.setState({
+      pendingApprovals: [{ kind: "job", id: 7, what: long, action: "apply/skip" }],
+    });
+    render(<ApprovalsList />);
+    const el = screen.getByText(long);
+    expect(el).toHaveClass("truncate");
+    expect(el).toHaveClass("min-w-0");
+  });
 });
