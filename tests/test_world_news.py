@@ -524,3 +524,100 @@ def test_a_same_publisher_cluster_does_not_inflate_corroboration():
         _headline("Business Daily Africa", "Budget story C", group="nation_media_group"),
     ])
     assert cluster.corroboration == 1, "3 headlines, ONE publisher -- must not read as 3 independent sources"
+
+
+# ------------------------------------------------------------------ front page (S4)
+_DEFAULT_ORDER = ["world", "tech_ai", "business", "kenya", "sports"]
+
+
+def _cluster(category: str, n_members: int, n_groups: int) -> Cluster:
+    """A cluster with `n_members` headlines spread across `n_groups` independence groups."""
+    members = [_headline(f"src{i}", f"story {i}", category=category, group=f"group{i % n_groups}")
+              for i in range(n_members)]
+    return Cluster(category=category, members=members)
+
+
+def test_score_multiplies_magnitude_corroboration_and_relevance(mem):
+    skill = WorldNewsSkill(memory=mem)
+    cluster = _cluster("world", n_members=3, n_groups=3)  # magnitude=3, corroboration=3
+    # relevance for "world" (index 0 of a 5-long order) = 5 - 0 = 5
+    assert skill._score(cluster, _DEFAULT_ORDER) == 3 * 3 * 5
+
+
+def test_score_gives_an_unranked_category_a_low_but_nonzero_relevance(mem):
+    skill = WorldNewsSkill(memory=mem)
+    cluster = _cluster("some_future_category", n_members=2, n_groups=1)
+    assert skill._score(cluster, _DEFAULT_ORDER) == 2 * 1 * 0.5
+
+
+def test_front_page_ranks_a_highly_corroborated_conflict_above_a_single_source_sports_transfer(mem):
+    skill = WorldNewsSkill(memory=mem)
+    conflict = _cluster("world", n_members=4, n_groups=3)   # big, well-corroborated
+    transfer = _cluster("sports", n_members=1, n_groups=1)  # single source, low volume
+
+    front_page = skill._front_page([transfer, conflict])   # deliberately given out of order
+
+    assert front_page[0] is conflict
+
+
+def test_front_page_caps_at_three_stories(mem):
+    skill = WorldNewsSkill(memory=mem)
+    clusters = [_cluster("world", n_members=1, n_groups=1) for _ in range(5)]
+    assert len(skill._front_page(clusters)) == 3
+
+
+def test_front_page_is_empty_with_no_clusters(mem):
+    skill = WorldNewsSkill(memory=mem)
+    assert skill._front_page([]) == []
+
+
+def test_changing_the_configured_interest_order_reorders_the_front_page(mem, monkeypatch):
+    skill = WorldNewsSkill(memory=mem)
+    # equal magnitude/corroboration -- ONLY the interest order can decide between these two
+    sport = _cluster("sports", n_members=2, n_groups=2)
+    kenya = _cluster("kenya", n_members=2, n_groups=2)
+
+    default_first = skill._front_page([sport, kenya])[0]
+    assert default_first is kenya  # kenya outranks sports in the default order
+
+    class _FakeSettings:
+        def get(self, *keys, default=None):
+            if keys == ("world_news", "interest_order"):
+                return ["sports", "kenya", "world", "tech_ai", "business"]  # sports now first
+            return default
+
+    monkeypatch.setattr("skills.world_news.get_settings", lambda: _FakeSettings())
+    reordered_first = skill._front_page([sport, kenya])[0]
+    assert reordered_first is sport
+
+
+def test_whats_up_shows_a_front_page_when_spanning_multiple_categories(fake_llm, mem):
+    now = 2_000_000.0
+    kenya_urls = FEEDS["kenya"]
+    world_urls = FEEDS["world"]
+    fetcher = _FakeFetcher({
+        kenya_urls[0][1]: _FakeResponse(200, _rss([("Kenya story", "https://x.test/k", _rfc822(now))])),
+        world_urls[0][1]: _FakeResponse(200, _rss([("World story", "https://x.test/w", _rfc822(now))])),
+    })
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda t: True)
+
+    result = skill.whats_up(categories="kenya,world")
+
+    assert result.data["front_page"] is True
+    assert "TOP STORIES" in result.text
+
+
+def test_whats_up_has_no_front_page_for_a_single_category(fake_llm, mem):
+    now = 2_000_000.0
+    urls = FEEDS["kenya"]
+    fetcher = _FakeFetcher({
+        urls[0][1]: _FakeResponse(200, _rss([("Kenya story", "https://x.test/k", _rfc822(now))])),
+    })
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda t: True)
+
+    result = skill.whats_up(categories="kenya")
+
+    assert result.data["front_page"] is False
+    assert "TOP STORIES" not in result.text

@@ -27,6 +27,13 @@ against. Sources were widened beyond BBC/Al Jazeera (The Guardian, UN News, AllA
 cs.AI, OpenAI's blog) — Reuters and AP were tried first but neither has a working free RSS
 feed left, so they're not in the list.
 
+Phase 37b/S4: a cross-category "front page" leads the brief -- the top 3 stories across ALL
+requested categories, picked by a fully deterministic score (magnitude x corroboration x
+configured interest relevance), not by the model. The model only writes the prose for
+whatever the score already chose; ranking never varies run-to-run for the same clusters.
+Only shown when spanning more than one category -- "/news kenya" alone doesn't need a front
+page on top of itself.
+
 Deliberately NOT market prediction or financial advice — see skills/markets.py (a later,
 separate piece) for real price data correlated with news; nothing here forecasts or advises.
 """
@@ -124,6 +131,12 @@ _DEDUP_THRESHOLD_DEFAULT = 0.80
 # retired (soft — never deleted, §0 P4). Generous relative to the 24h freshness window: a
 # slow-developing story shouldn't reappear as "new" just because it's been a few days.
 _DELIVERED_RETENTION_DAYS_DEFAULT = 3
+# Ranked interest order for the front page (Phase 37b/S4), highest first. Maps the original
+# ask (world/conflict > AI > markets > Kenya > sport) onto this skill's actual category keys
+# -- "markets" isn't its own category yet (skills/markets.py is a separate, later piece), so
+# "business" stands in for it. Config-overridable (world_news.interest_order).
+_INTEREST_ORDER_DEFAULT = ["world", "tech_ai", "business", "kenya", "sports"]
+_FRONT_PAGE_SIZE = 3
 
 
 @dataclass
@@ -360,6 +373,30 @@ class WorldNewsSkill(BaseSkill):
                     "DO UPDATE SET delivered_at=EXCLUDED.delivered_at, retired_at=NULL",
                     (category, url, now))
 
+    # ------------------------------------------------------------- front page (S4)
+    # Ranking is entirely deterministic given its three inputs -- the model never picks the
+    # order, only writes the prose for whatever _front_page() already chose. That keeps two
+    # runs over the same clusters from ever disagreeing about what leads.
+    def _score(self, cluster: Cluster, interest_order: list[str]) -> float:
+        magnitude = len(cluster.members)        # raw volume of coverage feeding this story
+        corroboration = cluster.corroboration    # DISTINCT independent sources (S3)
+        try:
+            relevance = len(interest_order) - interest_order.index(cluster.category)
+        except ValueError:
+            relevance = 0.5   # a category outside the configured order still shows, just last
+        return magnitude * corroboration * relevance
+
+    def _front_page(self, clusters: list[Cluster]) -> list[Cluster]:
+        """Top stories across ALL categories, regardless of which one they came from --
+        the "what's the single most important thing" answer. Only meaningful when spanning
+        more than one category; a single-category ask doesn't need a front page on itself."""
+        if not clusters:
+            return []
+        interest_order = get_settings().get(
+            "world_news", "interest_order", default=_INTEREST_ORDER_DEFAULT)
+        ranked = sorted(clusters, key=lambda c: self._score(c, interest_order), reverse=True)
+        return ranked[:_FRONT_PAGE_SIZE]
+
     # ------------------------------------------------------------- synthesis
     def _synthesize(self, clusters: list[Cluster]) -> str:
         if not clusters:
@@ -414,6 +451,9 @@ class WorldNewsSkill(BaseSkill):
         except Exception:  # noqa: BLE001 - housekeeping must never block the briefing
             log.warning("world_news: retiring stale delivered rows failed", exc_info=True)
 
+        pooled_new: list[Cluster] = []  # across ALL categories, for the front page
+        sections: list[tuple[str, list[Cluster], list[Cluster]]] = []  # (cat, clusters, to_show)
+
         for cat in wanted:
             headlines = self._fetch_category(cat)
             total_headlines += len(headlines)
@@ -430,16 +470,28 @@ class WorldNewsSkill(BaseSkill):
                 to_show = [c for c in clusters if any(h.url not in delivered for h in c.members)]
 
             new_story_count += len(to_show)
-            lines.append(f"\n{CATEGORY_LABEL.get(cat, cat)}")
-            if not to_show and clusters:
-                lines.append("Nothing new since your last check — already covered.")
-            else:
-                lines.append(self._synthesize(to_show))
+            pooled_new.extend(to_show)
+            sections.append((cat, clusters, to_show))
 
             try:
                 self._record_delivered(cat, [h.url for c in to_show for h in c.members])
             except Exception:  # noqa: BLE001 - recording must never block delivery
                 log.warning("world_news: recording delivered state failed for %s", cat, exc_info=True)
+
+        # A front page only means something when it's picking a winner ACROSS categories --
+        # a single-category ask ("/news kenya") would just be repeating its own top story.
+        front_page = self._front_page(pooled_new) if len(wanted) > 1 else []
+        if front_page:
+            lines.append("📰 TOP STORIES")
+            lines.append(self._synthesize(front_page))
+            lines.append("")
+
+        for cat, clusters, to_show in sections:
+            lines.append(f"\n{CATEGORY_LABEL.get(cat, cat)}")
+            if not to_show and clusters:
+                lines.append("Nothing new since your last check — already covered.")
+            else:
+                lines.append(self._synthesize(to_show))
 
         if total_headlines == 0:
             lines.append("\n(Couldn't reach any news sources just now — try again shortly.)")
@@ -449,7 +501,8 @@ class WorldNewsSkill(BaseSkill):
             self._notify(text)
         return CommandResult(text=text, ok=total_headlines > 0,
                              data={"categories": wanted, "headline_count": total_headlines,
-                                   "new_story_count": new_story_count, "full": full})
+                                   "new_story_count": new_story_count, "full": full,
+                                   "front_page": bool(front_page)})
 
 
 SKILL = WorldNewsSkill()

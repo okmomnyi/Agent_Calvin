@@ -218,6 +218,11 @@ world_news:
   # How long a delivered-story record blocks a URL from counting as "new" before it's
   # retired (soft -- never row-deleted). Generous relative to the 24h freshness window.
   delivered_retention_days: 3
+  # Ranked interest order for the front page ("TOP STORIES" -- the top 3 stories across ALL
+  # categories, led with regardless of which category they came from). Highest first.
+  # "markets" isn't its own category yet (skills/markets.py is a separate, later piece), so
+  # "business" stands in. Editing this list re-orders the front page with no code change.
+  interest_order: [world, tech_ai, business, kenya, sports]
 
 # --- Self-audit / infra recon (Phase 21) — REPORT ONLY, enrolled targets only ---
 infra:
