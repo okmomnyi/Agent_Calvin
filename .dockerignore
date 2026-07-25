@@ -18,7 +18,14 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.test-tmp/
 .test-tmp-*/
+
+# --- frontend/: node_modules is huge and reinstalled fresh via `npm ci` in the
+# frontend-builder stage anyway; dist/ is that stage's own output, never something to ship
+# in from the host (see Dockerfile's frontend-builder stage). ---
+frontend/node_modules/
+frontend/dist/
 
 # --- VCS / tooling ---
 .git/

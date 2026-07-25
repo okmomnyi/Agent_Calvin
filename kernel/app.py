@@ -32,10 +32,12 @@ log = get_logger("kernel.app")
 registry = SkillRegistry()
 scheduler = AsyncIOScheduler(timezone=get_settings().tz)
 
-# Phase 36: the JARVIS-style HUD. One source tree (frontend/) renders both the web shell
-# (served here) and the desktop shell (pywebview loads the same index.html off disk) — see
-# frontend/index.html's header comment for why every asset path in it is relative.
-FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+# Phase 36 (rebuilt on React/Vite): one source tree (frontend/) renders both the web shell
+# (served here) and the desktop shell (pywebview loads the same built index.html off disk).
+# `frontend/` is now Vite SOURCE (TypeScript, unbuilt) -- what gets served is the `vite
+# build` output, `frontend/dist/`, whose every asset path is relative (vite.config.ts's
+# `base: './'`) so it works identically served from here or loaded off local disk.
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 def _enqueue_scheduled(job_id: str, skill: str, action: str):
@@ -87,6 +89,10 @@ async def lifespan(app: FastAPI):
             log.warning("unfilled config: %s", warning)
     except Exception:  # noqa: BLE001 - a startup check must never block the kernel coming up
         log.debug("could not check for seed/placeholder config", exc_info=True)
+    if get_settings().get("auth", "dev_insecure", default=False):
+        log.warning("auth.dev_insecure is ON — session cookies are being issued WITHOUT the "
+                    "Secure flag. This must never be true in production; it exists only so a "
+                    "local Vite dev server on plain HTTP can carry the session cookie.")
     log.info("AgentOS kernel ready.")
     yield
     if scheduler.running:
@@ -153,6 +159,20 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+def _cookie_secure() -> bool:
+    """False only when auth.dev_insecure is explicitly on (local Vite dev over plain HTTP,
+    which cannot carry a Secure cookie at all). Loud by construction: lifespan() logs a
+    warning on every startup while this is set, so it can't linger unnoticed into a real
+    deploy. Fails toward Secure (never toward insecure) if Settings can't even answer the
+    question — some tests use a minimal fake Settings with no `.get()` at all, and the safe
+    default here is the opposite of seed_data_warnings' own try/except elsewhere in this file.
+    """
+    try:
+        return not get_settings().get("auth", "dev_insecure", default=False)
+    except AttributeError:
+        return True
+
+
 def require_session(request: Request) -> dict[str, Any]:
     """FastAPI dependency guarding every /api/* route except /api/auth/* and /api/health.
 
@@ -202,7 +222,7 @@ async def auth_password_login(
         raise HTTPException(status_code=401, detail="Incorrect password.")
     token = store.create_session(user_agent=request.headers.get("user-agent", ""), ip=ip)
     response.set_cookie(
-        SESSION_COOKIE_NAME, token, httponly=True, secure=True, samesite="strict",
+        SESSION_COOKIE_NAME, token, httponly=True, secure=_cookie_secure(), samesite="strict",
         max_age=SESSION_MAX_LIFETIME, path="/",
     )
     return {"ok": True}
@@ -229,7 +249,7 @@ async def auth_recovery_login(
         raise HTTPException(status_code=401, detail="Invalid or already-used recovery code.")
     token = store.create_session(user_agent=request.headers.get("user-agent", ""), ip=ip)
     response.set_cookie(
-        SESSION_COOKIE_NAME, token, httponly=True, secure=True, samesite="strict",
+        SESSION_COOKIE_NAME, token, httponly=True, secure=_cookie_secure(), samesite="strict",
         max_age=SESSION_MAX_LIFETIME, path="/",
     )
     return {
@@ -342,7 +362,7 @@ async def webauthn_register_verify(
         token = store.create_session(user_agent=request.headers.get("user-agent", ""),
                                      ip=_client_ip(request))
         response.set_cookie(
-            SESSION_COOKIE_NAME, token, httponly=True, secure=True, samesite="strict",
+            SESSION_COOKIE_NAME, token, httponly=True, secure=_cookie_secure(), samesite="strict",
             max_age=SESSION_MAX_LIFETIME, path="/")
     return {"ok": True}
 
@@ -389,7 +409,7 @@ async def webauthn_login_verify(
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     store.record_attempt("passkey", True, ip=ip)
     response.set_cookie(
-        SESSION_COOKIE_NAME, token, httponly=True, secure=True, samesite="strict",
+        SESSION_COOKIE_NAME, token, httponly=True, secure=_cookie_secure(), samesite="strict",
         max_age=SESSION_MAX_LIFETIME, path="/")
     return {"ok": True}
 
@@ -718,8 +738,18 @@ async def ws_voice(websocket: WebSocket) -> None:
 
 # ------------------------------------------------------------------ dashboard (Phase 36)
 # The 4th channel: a browser UI on the same kernel API — no client install anywhere.
-# `html=True` serves frontend/index.html at /dashboard/ and every module/stylesheet under
-# it at its own relative path (e.g. /dashboard/src/ui/boot.js). The page itself is static;
-# every action it takes is session-authed against /api/* exactly like any other client.
-# Mounted last so it never shadows an /api/* or /ws/voice route defined above.
-app.mount("/dashboard", StaticFiles(directory=FRONTEND_DIR, html=True), name="dashboard")
+# `html=True` serves frontend/dist/index.html at /dashboard/ and every built asset under it
+# at its own relative path. The page itself is static; every action it takes is
+# session-authed against /api/* exactly like any other client. Mounted last so it never
+# shadows an /api/* or /ws/voice route defined above.
+#
+# StaticFiles raises at construction if FRONTEND_DIR is missing -- which would otherwise
+# crash the WHOLE kernel (every skill, /api/health, everything) just because someone forgot
+# `npm run build` in frontend/. The API staying up without a dashboard is a far smaller
+# problem than the API not staying up at all, so this degrades instead of dying.
+if FRONTEND_DIR.is_dir():
+    app.mount("/dashboard", StaticFiles(directory=FRONTEND_DIR, html=True), name="dashboard")
+else:
+    log.warning(
+        "frontend/dist not found — /dashboard will 404 until `npm run build` runs in "
+        "frontend/. Every other route (skills, /api/*, /ws/voice) is unaffected.")

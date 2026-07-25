@@ -4,6 +4,19 @@
 # different commands, exactly as they are two PM2 processes on a bare droplet: if one dies the
 # other keeps working. Building them separately would let their dependencies drift apart.
 
+# ============================================================== frontend builder
+# frontend/ is Vite/React/TypeScript SOURCE — kernel/app.py serves frontend/dist, the built
+# output, which is gitignored and doesn't exist until something runs `npm run build`. That
+# has to happen in the image (the droplet has no Node.js otherwise), not on the host.
+FROM node:22-slim AS frontend-builder
+WORKDIR /app/frontend
+# package.json + lockfile copied alone so this layer caches until dependencies actually
+# change — editing a component must not trigger a full npm ci.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 # ============================================================== builder
 # Wheels are built here and only the resulting venv is copied into the runtime stage, so the
 # compilers never ship.
@@ -67,6 +80,11 @@ RUN useradd --create-home --uid 1000 agentos
 WORKDIR /app
 
 COPY --chown=agentos:agentos . .
+# Built AFTER the bulk copy above so it wins — `. .` copies frontend/ SOURCE (the built
+# dist/ is gitignored, never in the repo). kernel/app.py mounts /dashboard from exactly this
+# path and degrades (logs a warning, skips the mount) rather than crashing the kernel if
+# it's ever missing — belt and braces, this line is the actual fix.
+COPY --from=frontend-builder --chown=agentos:agentos /app/frontend/dist ./frontend/dist
 
 # Created here so the directories exist and are owned correctly even before any volume is
 # mounted over them (an empty bind mount would otherwise land root-owned).

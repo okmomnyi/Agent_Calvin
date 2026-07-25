@@ -131,6 +131,42 @@ def test_session_cookie_is_httponly_secure_samesite_strict(mem, monkeypatch):
     assert "samesite=strict" in set_cookie.lower()
 
 
+def test_dev_insecure_flag_drops_the_secure_cookie_attribute(mem, monkeypatch):
+    """A local Vite dev server on plain HTTP can't carry a Secure cookie at all -- this is
+    the one, explicit, loudly-logged escape hatch, and it must never affect httpOnly or
+    SameSite, only Secure."""
+    app_module = importlib.import_module("kernel.app")
+    settings = type("Settings", (), {
+        "get": lambda self, *keys, default=None: True if keys == ("auth", "dev_insecure") else default,
+    })()
+    monkeypatch.setattr(app_module, "get_settings", lambda: settings)
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+    response = client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "secure" not in set_cookie.lower()
+    assert "httponly" in set_cookie.lower()
+    assert "samesite=strict" in set_cookie.lower()
+
+
+def test_dev_insecure_defaults_off_with_a_bare_settings_object(mem, monkeypatch):
+    """A Settings object with no `auth` key configured at all (config.yaml stripped down,
+    or a minimal test double) must default to secure, never silently permissive."""
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+    response = client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+
+    assert "secure" in response.headers.get("set-cookie", "").lower()
+
+
 def test_logout_revokes_the_session(mem, monkeypatch):
     app_module = importlib.import_module("kernel.app")
     monkeypatch.setattr("core.auth.get_memory", lambda: mem)
@@ -582,20 +618,24 @@ def test_health_dsn_masker_hides_keyword_passwords():
 
 
 def test_dashboard_never_assigns_innerhtml_from_server_derived_data():
-    """Phase 36's HUD (frontend/, served at /dashboard) renders session/turn/approval text via
-    `textContent`, never `innerHTML` string interpolation — so there is no escaping discipline
-    to maintain (and none to forget) for fields like session.last_channel, a turn's text/reply,
-    or an approval's kind/what/action, all of which round-trip through Calvin's own input.
-    `.innerHTML =` never appearing under frontend/src is the structural guarantee; the old
-    dashboard's per-field `esc(...)` wrapping is superseded, not replicated.
+    """The HUD (frontend/, served at /dashboard) renders session/turn/approval text as plain
+    React children, never raw HTML — so there is no escaping discipline to maintain (and none
+    to forget) for fields like session.last_channel, a turn's text/reply, or an approval's
+    kind/what/action, all of which round-trip through Calvin's own input.
+
+    Rebuilt on React (superseding the old vanilla-JS dashboard, which enforced this via
+    `textContent` never `innerHTML`): the equivalent risk in JSX is `dangerouslySetInnerHTML`,
+    React's own escape hatch back to raw HTML. Neither that nor a raw DOM `.innerHTML =`
+    assignment (a component could still reach for the DOM directly) may appear anywhere
+    under frontend/src.
     """
     frontend_src = Path(__file__).parents[1] / "frontend" / "src"
-    offenders = [
-        str(path.relative_to(frontend_src))
-        for path in frontend_src.rglob("*.js")
-        if "innerHTML" in path.read_text(encoding="utf-8")
-    ]
-    assert not offenders, f"innerHTML assignment found in: {offenders}"
+    offenders = []
+    for path in list(frontend_src.rglob("*.ts")) + list(frontend_src.rglob("*.tsx")):
+        text = path.read_text(encoding="utf-8")
+        if "dangerouslySetInnerHTML" in text or ".innerHTML" in text:
+            offenders.append(str(path.relative_to(frontend_src)))
+    assert not offenders, f"raw-HTML rendering found in: {offenders}"
 
 
 def test_health_gives_liveness_publicly_but_detail_only_to_a_session(mem, monkeypatch):

@@ -10,6 +10,13 @@ auth:
   # falls back to the ordinary confirmation so this can never lock Calvin out of his own
   # gate. See core/approvals.py's TIER_HIGH and kernel/app.py's /api/approvals/*/resolve.
   step_up_on_high: true
+  # OFF by default, and must stay that way in production. A session cookie's `Secure` flag
+  # means the browser refuses to send it over plain HTTP — correct behind Caddy, but it also
+  # means a local Vite dev server (http://localhost:5173, no TLS) could never carry the
+  # cookie at all, which would make local frontend dev against a real backend impossible.
+  # Flip this on ONLY for local dev; kernel/app.py logs a loud warning at startup while it's
+  # set, and the WS ticket flow and every other guardrail stay exactly as strict.
+  dev_insecure: false
 
 llm:
   base_url: "https://integrate.api.nvidia.com/v1"   # default NIM endpoint
