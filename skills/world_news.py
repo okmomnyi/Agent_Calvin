@@ -1,0 +1,210 @@
+"""World-news awareness skill (Phase 37).
+
+A daily "what's up today" briefing across world & conflicts, AI/tech, sports, business, and
+Kenya-specific news, plus the same content on demand ("what's up today", /news). Free RSS
+feeds only (no API key — §0 free-first), synthesized with the same discipline research.py
+already enforces: every line in the digest traces back to an actual fetched headline, and a
+category with nothing fresh in the window says so plainly rather than being padded out.
+
+Deliberately NOT market prediction or financial advice — see skills/markets.py (a later,
+separate piece) for real price data correlated with news; nothing here forecasts or advises.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
+from typing import Any, Callable
+from xml.etree import ElementTree as ET
+
+from core.config import get_settings
+from core.llm import LLMClient, LLMError, get_client
+from core.logging_setup import get_logger
+from core.notify import send_telegram
+from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
+
+log = get_logger("skills.world_news")
+
+# category -> [(source name, RSS url), ...]. All free, no API key, verified live (a dead feed
+# degrades to "nothing fresh from this source" for that one run, never fails the briefing).
+FEEDS: dict[str, list[tuple[str, str]]] = {
+    "world": [
+        ("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml"),
+        ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+    ],
+    "tech_ai": [
+        ("TechCrunch", "https://techcrunch.com/feed/"),
+        ("BBC Technology", "http://feeds.bbci.co.uk/news/technology/rss.xml"),
+    ],
+    "sports": [
+        ("BBC Sport", "http://feeds.bbci.co.uk/sport/rss.xml"),
+        ("ESPN", "https://www.espn.com/espn/rss/news"),
+    ],
+    "business": [
+        ("BBC Business", "http://feeds.bbci.co.uk/news/business/rss.xml"),
+    ],
+    "kenya": [
+        ("Nation Africa", "https://nation.africa/kenya/rss.xml"),
+        ("The Standard", "https://www.standardmedia.co.ke/rss/headlines.php"),
+        ("Business Daily Africa", "https://www.businessdailyafrica.com/bd/rss.xml"),
+    ],
+}
+
+CATEGORY_LABEL = {
+    "world": "🌍 World & Conflicts",
+    "tech_ai": "🤖 AI & Tech",
+    "sports": "🏆 Sports",
+    "business": "💼 Business",
+    "kenya": "🇰🇪 Kenya",
+}
+
+_WINDOW_SECONDS = 24 * 3600  # only items from roughly the last day count as "today"
+_MAX_HEADLINES_TO_MODEL = 15  # a feed can return 40+ items; the newest handful is plenty
+
+
+@dataclass
+class Headline:
+    category: str
+    source: str
+    title: str
+    url: str
+    published_at: float | None = None
+
+
+def _parse_rss(xml_text: str, source: str, category: str) -> list[Headline]:
+    """RSS 2.0 <item> parsing via stdlib ElementTree — no new dependency for something this
+    simple. Malformed XML degrades to an empty list rather than raising."""
+    out: list[Headline] = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        log.warning("world_news: %s (%s) returned unparseable XML", source, category)
+        return out
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        if not title or not link:
+            continue
+        published_at = None
+        pub_raw = item.findtext("pubDate") or ""
+        if pub_raw:
+            try:
+                published_at = parsedate_to_datetime(pub_raw).timestamp()
+            except (ValueError, TypeError):
+                published_at = None
+        out.append(Headline(category=category, source=source, title=title, url=link,
+                            published_at=published_at))
+    return out
+
+
+class WorldNewsSkill(BaseSkill):
+    name = "world_news"
+
+    def __init__(self, llm: LLMClient | None = None, fetcher: Any | None = None,
+                 notify: Callable[[str], bool] | None = None,
+                 clock: Callable[[], float] = time.time) -> None:
+        self._llm = llm
+        self._fetcher = fetcher
+        # Injectable, same as every other skill that can reach Calvin's phone — a test must
+        # be able to replace this, or the suite texts him.
+        self._notify = notify or send_telegram
+        self._now = clock
+
+    @property
+    def llm(self) -> LLMClient:
+        if self._llm is None:
+            self._llm = get_client()
+        return self._llm
+
+    @property
+    def fetcher(self):
+        if self._fetcher is None:
+            from skills.job_hunter.fetcher import Fetcher
+
+            # RSS feeds are published specifically to be polled — respect_robots stays off
+            # the same way research.py's DuckDuckGoSearcher treats a search endpoint.
+            self._fetcher = Fetcher(respect_robots=False)
+        return self._fetcher
+
+    def contract(self) -> SkillContract:
+        """Reads only tone/general — how the digest is written, never what it may report.
+        `never_invents_a_source` is non-negotiable: a line in the briefing traces to an
+        actually-fetched headline, or the category says nothing fresh came in."""
+        return SkillContract(reads_categories=["tone", "general"],
+                             hard_invariants=["never_invents_a_source"])
+
+    def commands(self) -> dict[str, Callable[..., CommandResult]]:
+        return {"whats_up": self.whats_up, "news": self.whats_up}
+
+    def scheduled_jobs(self) -> list[ScheduledJob]:
+        hour = int(get_settings().get("world_news", "briefing_hour", default=7))
+        minute = int(get_settings().get("world_news", "briefing_minute", default=30))
+        return [ScheduledJob(id="world_news.briefing", func=self.whats_up, trigger="cron",
+                             kwargs={"hour": hour, "minute": minute})]
+
+    # ------------------------------------------------------------- fetch
+    def _fetch_category(self, category: str) -> list[Headline]:
+        cutoff = self._now() - _WINDOW_SECONDS
+        out: list[Headline] = []
+        for source, url in FEEDS.get(category, []):
+            resp = self.fetcher.get(url, accept="application/rss+xml, text/xml")
+            if resp is None or resp.status_code != 200:
+                log.warning("world_news: %s (%s) unreachable, skipping this run", source, category)
+                continue
+            items = _parse_rss(resp.text, source, category)
+            # Undated items (a feed with no pubDate) are kept — there's no basis to exclude
+            # them; dated items outside the window are dropped rather than shown as "today".
+            out.extend(h for h in items if h.published_at is None or h.published_at >= cutoff)
+        return out
+
+    # ------------------------------------------------------------- synthesis
+    def _synthesize(self, headlines: list[Headline]) -> str:
+        if not headlines:
+            return "Nothing fresh in the last day from this category's sources."
+        capped = headlines[:_MAX_HEADLINES_TO_MODEL]
+        context = "\n".join(f"- [{h.source}] {h.title} ({h.url})" for h in capped)
+        try:
+            answer = self.llm.chat(
+                "research",
+                [{"role": "system", "content":
+                    "You are writing one short section of a daily news briefing. From the "
+                    "headlines given, pick the 3-6 most significant, write one line each "
+                    "(what happened, why it matters) and cite the source name in "
+                    "parentheses. Do not invent any fact, event, or number that is not "
+                    "present in the headlines below. If the headlines are minor or "
+                    "repetitive, say that briefly instead of padding it out."},
+                 {"role": "user", "content": f"HEADLINES:\n{context}"}],
+                max_tokens=400,
+            )
+        except LLMError:
+            log.warning("world_news: synthesis failed, falling back to raw headlines")
+            answer = "\n".join(f"• {h.title} ({h.source})" for h in capped[:6])
+        return answer.strip()
+
+    def whats_up(self, categories: str = "", notify: bool = True, **_: Any) -> CommandResult:
+        """On-demand ("what's up today") or the scheduled morning push — identical content
+        either way. `categories` (comma-separated: world,tech_ai,sports,business,kenya)
+        narrows it; blank means everything."""
+        wanted = [c.strip() for c in categories.split(",") if c.strip()]
+        wanted = [c for c in wanted if c in FEEDS] or list(FEEDS.keys())
+
+        lines = [f"🗞 WHAT'S UP TODAY · {time.strftime('%A %d %b', time.localtime(self._now()))}"]
+        total_headlines = 0
+        for cat in wanted:
+            headlines = self._fetch_category(cat)
+            total_headlines += len(headlines)
+            lines.append(f"\n{CATEGORY_LABEL.get(cat, cat)}")
+            lines.append(self._synthesize(headlines))
+
+        if total_headlines == 0:
+            lines.append("\n(Couldn't reach any news sources just now — try again shortly.)")
+
+        text = "\n".join(lines)
+        if notify:
+            self._notify(text)
+        return CommandResult(text=text, ok=total_headlines > 0,
+                             data={"categories": wanted, "headline_count": total_headlines})
+
+
+SKILL = WorldNewsSkill()

@@ -56,6 +56,8 @@ COMMAND_MAP: dict[str, tuple[str, str, str | None]] = {
     "rules": ("adaptive", "candidates", None),
     "retro": ("adaptive", "retro", "answer"),
     "contracts": ("adaptive", "contracts", None),
+    "news": ("world_news", "whats_up", "categories"),
+    "whatsup": ("world_news", "whats_up", "categories"),
 }
 
 HELP = (
@@ -77,6 +79,8 @@ HELP = (
     "/events [tag] · /tags add|remove <tag> — free events matching your interests\n"
     "/cv [update|tailor <JD>|facts] — CV tailoring & ATS optimization\n"
     "/rules · /retro · /contracts — patterns I've noticed & what each skill may read\n"
+    "/news [world,tech_ai,sports,business,kenya] · /whatsup — today's world briefing "
+    "(also runs automatically each morning)\n"
     "/summarize <thing> · /voiceoff · /voiceon\n"
     "/resetpassword — reset your break-glass password (emails a code first; reply with it)\n"
     "Send a voice note or just type — it routes like everything else."

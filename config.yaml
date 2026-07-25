@@ -206,6 +206,11 @@ planner:
   # core/config.py now flags this pattern at startup so it can't happen silently again.)
   commitments: []
 
+# --- World news briefing (Phase 37) — free RSS only, no API key ---
+world_news:
+  briefing_hour: 7          # local hour for the daily "what's up today" push
+  briefing_minute: 30       # staggered 30 min after the academic briefing, not a hard requirement
+
 # --- Self-audit / infra recon (Phase 21) — REPORT ONLY, enrolled targets only ---
 infra:
   tls_warn_days: 21           # warn this far ahead of certificate expiry
