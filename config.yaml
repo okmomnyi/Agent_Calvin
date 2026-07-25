@@ -215,6 +215,9 @@ world_news:
   # worse failure than leaving two duplicates unmerged. Worth tuning once real production
   # clustering output has been eyeballed against a few real mornings.
   dedup_threshold: 0.80
+  # How long a delivered-story record blocks a URL from counting as "new" before it's
+  # retired (soft -- never row-deleted). Generous relative to the 24h freshness window.
+  delivered_retention_days: 3
 
 # --- Self-audit / infra recon (Phase 21) — REPORT ONLY, enrolled targets only ---
 infra:

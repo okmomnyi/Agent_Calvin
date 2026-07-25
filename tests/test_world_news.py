@@ -279,14 +279,14 @@ def _empty_fetcher() -> _FakeFetcher:
     return _FakeFetcher({})
 
 
-def test_whats_up_pushes_the_digest_and_returns_ok_when_something_came_in(fake_llm):
+def test_whats_up_pushes_the_digest_and_returns_ok_when_something_came_in(fake_llm, mem):
     now = 2_000_000.0
     urls = FEEDS["kenya"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([("Budget announced", "https://x.test/1", _rfc822(now))])),
     })
     notified: list[str] = []
-    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, clock=lambda: now,
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
                            notify=lambda text: notified.append(text) or True)
 
     result = skill.whats_up(categories="kenya")
@@ -298,15 +298,15 @@ def test_whats_up_pushes_the_digest_and_returns_ok_when_something_came_in(fake_l
     assert "Kenya" in notified[0]
 
 
-def test_whats_up_with_an_unknown_category_falls_back_to_everything(fake_llm):
-    skill = WorldNewsSkill(llm=fake_llm, fetcher=_empty_fetcher(), notify=lambda t: True)
+def test_whats_up_with_an_unknown_category_falls_back_to_everything(fake_llm, mem):
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=_empty_fetcher(), memory=mem, notify=lambda t: True)
     result = skill.whats_up(categories="not_a_real_category")
     assert set(result.data["categories"]) == set(FEEDS.keys())
 
 
-def test_whats_up_reports_ok_false_when_every_source_is_unreachable(fake_llm):
+def test_whats_up_reports_ok_false_when_every_source_is_unreachable(fake_llm, mem):
     notified: list[str] = []
-    skill = WorldNewsSkill(llm=fake_llm, fetcher=_empty_fetcher(),
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=_empty_fetcher(), memory=mem,
                            notify=lambda text: notified.append(text) or True)
 
     result = skill.whats_up()
@@ -316,9 +316,9 @@ def test_whats_up_reports_ok_false_when_every_source_is_unreachable(fake_llm):
     assert "couldn't reach" in notified[0].lower()
 
 
-def test_whats_up_never_calls_notify_when_notify_is_false(fake_llm):
+def test_whats_up_never_calls_notify_when_notify_is_false(fake_llm, mem):
     notified: list[str] = []
-    skill = WorldNewsSkill(llm=fake_llm, fetcher=_empty_fetcher(),
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=_empty_fetcher(), memory=mem,
                            notify=lambda text: notified.append(text) or True)
 
     skill.whats_up(notify=False)
@@ -332,3 +332,136 @@ def test_scheduled_jobs_registers_a_daily_cron():
     assert len(jobs) == 1
     assert jobs[0].id == "world_news.briefing"
     assert jobs[0].trigger == "cron"
+
+
+# ------------------------------------------------------------------ "since last asked" (S2)
+class _BrokenMem:
+    """Simulates a DB outage -- every call raises, proving whats_up() degrades to showing
+    everything rather than crashing or going silent."""
+
+    def execute(self, *a, **k):
+        raise RuntimeError("db down")
+
+    def tx(self):
+        raise RuntimeError("db down")
+
+
+def test_watermark_is_none_with_nothing_delivered_yet(mem):
+    skill = WorldNewsSkill(memory=mem)
+    assert skill._watermark("kenya") is None
+
+
+def test_watermark_reflects_the_latest_delivery(mem):
+    skill = WorldNewsSkill(memory=mem, clock=lambda: 5_000_000.0)
+    skill._record_delivered("kenya", ["https://x.test/1"])
+    assert skill._watermark("kenya") == 5_000_000.0
+
+
+def test_record_delivered_upserts_rather_than_duplicating(mem):
+    skill = WorldNewsSkill(memory=mem, clock=lambda: 1_000_000.0)
+    skill._record_delivered("kenya", ["https://x.test/1"])
+    skill._record_delivered("kenya", ["https://x.test/1"])
+
+    row = mem.execute("SELECT COUNT(*) c FROM world_news_delivered WHERE category=%s AND url=%s",
+                      ("kenya", "https://x.test/1")).fetchone()
+    assert row["c"] == 1
+
+
+def test_retire_stale_delivered_excludes_old_rows_from_the_delivered_set(mem):
+    now = [1_000_000.0]
+    skill = WorldNewsSkill(memory=mem, clock=lambda: now[0])
+    skill._record_delivered("kenya", ["https://x.test/old"])
+
+    now[0] += 4 * 86400  # past the 3-day default retention
+    skill._retire_stale_delivered()
+
+    assert skill._delivered_urls("kenya") == set()
+
+
+def test_second_call_within_the_window_shows_only_new_clusters(fake_llm, mem):
+    now = 2_000_000.0
+    urls = FEEDS["kenya"]
+    fetcher = _FakeFetcher({
+        urls[0][1]: _FakeResponse(200, _rss([("Budget passed", "https://x.test/budget", _rfc822(now))])),
+    })
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda t: True)
+
+    first = skill.whats_up(categories="kenya")
+    assert first.data["new_story_count"] == 1
+
+    second = skill.whats_up(categories="kenya")
+    assert second.data["new_story_count"] == 0
+    assert "Nothing new since your last check" in second.text
+
+    # a genuinely new, lexically distinct story appears alongside the old one
+    fetcher._by_url[urls[0][1]] = _FakeResponse(200, _rss([
+        ("Budget passed", "https://x.test/budget", _rfc822(now)),
+        ("Opposition leader arrested overnight", "https://x.test/arrest", _rfc822(now)),
+    ]))
+    third = skill.whats_up(categories="kenya")
+    assert third.data["new_story_count"] == 1
+
+
+def test_scheduled_push_and_on_demand_share_one_watermark_across_instances(fake_llm, mem):
+    """Two separate WorldNewsSkill instances (as the cron-triggered call and a later
+    on-demand request would be) must read/advance the SAME state -- proving there is one
+    source of truth, not two independent watermarks that could drift."""
+    now = 2_000_000.0
+    urls = FEEDS["kenya"]
+    fetcher = _FakeFetcher({
+        urls[0][1]: _FakeResponse(200, _rss([("Story", "https://x.test/1", _rfc822(now))])),
+    })
+
+    push_skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                                notify=lambda t: True)
+    push_result = push_skill.whats_up()  # simulates the cron firing with no explicit args
+
+    ondemand_skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                                    notify=lambda t: True)
+    ondemand_result = ondemand_skill.whats_up(categories="kenya")
+
+    assert push_result.data["new_story_count"] == 1
+    assert ondemand_result.data["new_story_count"] == 0
+    assert push_skill._watermark("kenya") == ondemand_skill._watermark("kenya") == now
+
+
+def test_full_flag_bypasses_the_delivered_filter(fake_llm, mem):
+    now = 2_000_000.0
+    urls = FEEDS["kenya"]
+    fetcher = _FakeFetcher({
+        urls[0][1]: _FakeResponse(200, _rss([("Story", "https://x.test/1", _rfc822(now))])),
+    })
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda t: True)
+
+    skill.whats_up(categories="kenya")
+    result = skill.whats_up(categories="kenya", full=True)
+
+    assert result.data["new_story_count"] == 1
+    assert result.data["full"] is True
+    assert "full 24h window" in result.text
+
+
+def test_full_keyword_in_categories_text_triggers_full_mode(fake_llm, mem):
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=_empty_fetcher(), memory=mem, notify=lambda t: True)
+
+    result = skill.whats_up(categories="kenya full")
+
+    assert result.data["full"] is True
+    assert result.data["categories"] == ["kenya"]
+
+
+def test_whats_up_degrades_to_showing_everything_when_delivered_state_is_unreadable(fake_llm):
+    now = 2_000_000.0
+    urls = FEEDS["kenya"]
+    fetcher = _FakeFetcher({
+        urls[0][1]: _FakeResponse(200, _rss([("Story", "https://x.test/1", _rfc822(now))])),
+    })
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=_BrokenMem(), clock=lambda: now,
+                           notify=lambda t: True)
+
+    result = skill.whats_up(categories="kenya")
+
+    assert result.ok is True
+    assert result.data["new_story_count"] == 1  # degraded to "show everything", not a crash/silent drop

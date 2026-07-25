@@ -6,11 +6,17 @@ feeds only (no API key — §0 free-first), synthesized with the same discipline
 already enforces: every line in the digest traces back to an actual fetched headline, and a
 category with nothing fresh in the window says so plainly rather than being padded out.
 
-Phase 37b: headlines are clustered into stories by embedding similarity (core.embeddings,
+Phase 37b/S1: headlines are clustered into stories by embedding similarity (core.embeddings,
 the same NIM-hosted embedder helper semantic.py uses for persona/CV recall) before synthesis, so two wires
 covering one event collapse into one cited line instead of two separate ones. Clustering is
 in-memory and per-run — nothing here writes to semantic_index, which is a closed namespace
 for durable facts/notes/docs, not a day's transient headlines.
+
+Phase 37b/S2: a persisted "delivered" set (world_news_delivered, per category) means asking
+again mid-morning only surfaces genuinely new stories instead of replaying the whole 24h
+window — the scheduled 07:30 push and the on-demand path read and advance the SAME state, so
+they can never drift onto two different ideas of "since last time". Pass full=True (or the
+word "full" in the categories text, e.g. "/news full") to force the whole window regardless.
 
 Deliberately NOT market prediction or financial advice — see skills/markets.py (a later,
 separate piece) for real price data correlated with news; nothing here forecasts or advises.
@@ -28,6 +34,7 @@ from core.config import get_settings
 from core.embeddings import cosine
 from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
+from core.memory import Memory, get_memory
 from core.notify import send_telegram
 from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
 
@@ -74,6 +81,10 @@ _MAX_STORIES_TO_MODEL = 15  # a category can return 40+ headlines; the newest ha
 # would let one source's framing stand in for another's). Config-overridable since the right
 # value benefits from tuning against real production output, not guessed once and frozen.
 _DEDUP_THRESHOLD_DEFAULT = 0.80
+# How long a "delivered" record blocks a URL from being shown again as "new" before it's
+# retired (soft — never deleted, §0 P4). Generous relative to the 24h freshness window: a
+# slow-developing story shouldn't reappear as "new" just because it's been a few days.
+_DELIVERED_RETENTION_DAYS_DEFAULT = 3
 
 
 @dataclass
@@ -160,12 +171,13 @@ class WorldNewsSkill(BaseSkill):
     name = "world_news"
 
     def __init__(self, llm: LLMClient | None = None, fetcher: Any | None = None,
-                 embedder: Any | None = None,
+                 embedder: Any | None = None, memory: Memory | None = None,
                  notify: Callable[[str], bool] | None = None,
                  clock: Callable[[], float] = time.time) -> None:
         self._llm = llm
         self._fetcher = fetcher
         self._embedder = embedder
+        self._mem = memory
         # Injectable, same as every other skill that can reach Calvin's phone — a test must
         # be able to replace this, or the suite texts him.
         self._notify = notify or send_telegram
@@ -176,6 +188,12 @@ class WorldNewsSkill(BaseSkill):
         if self._llm is None:
             self._llm = get_client()
         return self._llm
+
+    @property
+    def mem(self) -> Memory:
+        if self._mem is None:
+            self._mem = get_memory()
+        return self._mem
 
     @property
     def fetcher(self):
@@ -244,6 +262,47 @@ class WorldNewsSkill(BaseSkill):
             log.warning("world_news: clustering failed, falling back to one story per headline")
             return [Cluster(category=h.category, members=[h]) for h in headlines]
 
+    # ------------------------------------------------------------- "since last asked" (S2)
+    # Novelty is tracked by URL membership, not a bare timestamp cutoff -- a story a slow
+    # feed reports late must not be mistaken for something already seen just because it's
+    # "older" than some watermark. The watermark itself (used only for the reply's own
+    # wording, e.g. "since 07:30") is derived from this same table via _watermark(), so the
+    # scheduled push and the on-demand path can never drift onto two different ideas of
+    # "last time" -- there is exactly one source of truth.
+    def _retire_stale_delivered(self) -> None:
+        retention_days = float(get_settings().get(
+            "world_news", "delivered_retention_days", default=_DELIVERED_RETENTION_DAYS_DEFAULT))
+        cutoff = self._now() - retention_days * 86400
+        with self.mem.tx() as conn:
+            conn.execute(
+                "UPDATE world_news_delivered SET retired_at=%s "
+                "WHERE retired_at IS NULL AND delivered_at < %s",
+                (self._now(), cutoff))
+
+    def _delivered_urls(self, category: str) -> set[str]:
+        rows = self.mem.execute(
+            "SELECT url FROM world_news_delivered WHERE category=%s AND retired_at IS NULL",
+            (category,)).fetchall()
+        return {r["url"] for r in rows}
+
+    def _watermark(self, category: str) -> float | None:
+        row = self.mem.execute(
+            "SELECT MAX(delivered_at) AS m FROM world_news_delivered "
+            "WHERE category=%s AND retired_at IS NULL", (category,)).fetchone()
+        return row["m"] if row and row["m"] is not None else None
+
+    def _record_delivered(self, category: str, urls: list[str]) -> None:
+        if not urls:
+            return
+        now = self._now()
+        with self.mem.tx() as conn:
+            for url in urls:
+                conn.execute(
+                    "INSERT INTO world_news_delivered(category, url, delivered_at) "
+                    "VALUES(%s,%s,%s) ON CONFLICT (category, url) "
+                    "DO UPDATE SET delivered_at=EXCLUDED.delivered_at, retired_at=NULL",
+                    (category, url, now))
+
     # ------------------------------------------------------------- synthesis
     def _synthesize(self, clusters: list[Cluster]) -> str:
         if not clusters:
@@ -275,21 +334,55 @@ class WorldNewsSkill(BaseSkill):
                 f"• {c.members[0].title} ({', '.join(c.sources)})" for c in capped[:6])
         return answer.strip()
 
-    def whats_up(self, categories: str = "", notify: bool = True, **_: Any) -> CommandResult:
+    def whats_up(self, categories: str = "", notify: bool = True, full: bool = False,
+                 **_: Any) -> CommandResult:
         """On-demand ("what's up today") or the scheduled morning push — identical content
-        either way. `categories` (comma-separated: world,tech_ai,sports,business,kenya)
-        narrows it; blank means everything."""
-        wanted = [c.strip() for c in categories.split(",") if c.strip()]
-        wanted = [c for c in wanted if c in FEEDS] or list(FEEDS.keys())
+        either way. `categories` (comma/space-separated: world,tech_ai,sports,business,kenya)
+        narrows it; blank means everything. Include the word "full" (e.g. "/news full" or
+        "/news kenya full") to force the whole 24h window instead of only what's new since
+        the last ask.
+        """
+        tokens = [c.strip().lower() for c in categories.replace(",", " ").split() if c.strip()]
+        if "full" in tokens:
+            full = True
+            tokens = [t for t in tokens if t != "full"]
+        wanted = [c for c in tokens if c in FEEDS] or list(FEEDS.keys())
 
-        lines = [f"🗞 WHAT'S UP TODAY · {time.strftime('%A %d %b', time.localtime(self._now()))}"]
+        mode_note = " (full 24h window)" if full else ""
+        lines = [f"🗞 WHAT'S UP TODAY{mode_note} · {time.strftime('%A %d %b', time.localtime(self._now()))}"]
         total_headlines = 0
+        new_story_count = 0
+        try:
+            self._retire_stale_delivered()
+        except Exception:  # noqa: BLE001 - housekeeping must never block the briefing
+            log.warning("world_news: retiring stale delivered rows failed", exc_info=True)
+
         for cat in wanted:
             headlines = self._fetch_category(cat)
             total_headlines += len(headlines)
             clusters = self._cluster(headlines)
+
+            if full:
+                to_show = clusters
+            else:
+                try:
+                    delivered = self._delivered_urls(cat)
+                except Exception:  # noqa: BLE001 - DB hiccup degrades to "show everything"
+                    log.warning("world_news: reading delivered state failed for %s", cat, exc_info=True)
+                    delivered = set()
+                to_show = [c for c in clusters if any(h.url not in delivered for h in c.members)]
+
+            new_story_count += len(to_show)
             lines.append(f"\n{CATEGORY_LABEL.get(cat, cat)}")
-            lines.append(self._synthesize(clusters))
+            if not to_show and clusters:
+                lines.append("Nothing new since your last check — already covered.")
+            else:
+                lines.append(self._synthesize(to_show))
+
+            try:
+                self._record_delivered(cat, [h.url for c in to_show for h in c.members])
+            except Exception:  # noqa: BLE001 - recording must never block delivery
+                log.warning("world_news: recording delivered state failed for %s", cat, exc_info=True)
 
         if total_headlines == 0:
             lines.append("\n(Couldn't reach any news sources just now — try again shortly.)")
@@ -298,7 +391,8 @@ class WorldNewsSkill(BaseSkill):
         if notify:
             self._notify(text)
         return CommandResult(text=text, ok=total_headlines > 0,
-                             data={"categories": wanted, "headline_count": total_headlines})
+                             data={"categories": wanted, "headline_count": total_headlines,
+                                   "new_story_count": new_story_count, "full": full})
 
 
 SKILL = WorldNewsSkill()

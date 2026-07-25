@@ -624,6 +624,24 @@ CREATE TABLE IF NOT EXISTS password_reset_otp (
     expires_at DOUBLE PRECISION NOT NULL,    -- ~10 min: minted, emailed, must be used by then
     used_at    DOUBLE PRECISION              -- set once verified, or superseded by a newer code
 );
+
+-- World news (Phase 37b/S2): which headline URLs have already been shown, per category, so
+-- "what's up today" only surfaces genuinely new stories on a second ask instead of replaying
+-- the whole 24h window. The watermark ("since when") is MAX(delivered_at) derived from this
+-- SAME table rather than tracked separately, so the scheduled push and the on-demand path can
+-- never drift apart -- there is exactly one place this state lives. Novelty is checked by URL
+-- membership, not a bare timestamp cutoff, so a late-arriving feed can't be mistaken for
+-- something already seen. Rows are RETIRED past the retention window, never deleted (§0 P4).
+CREATE TABLE IF NOT EXISTS world_news_delivered (
+    id           SERIAL PRIMARY KEY,
+    category     TEXT NOT NULL,
+    url          TEXT NOT NULL,
+    delivered_at DOUBLE PRECISION NOT NULL,
+    retired_at   DOUBLE PRECISION,
+    UNIQUE(category, url)
+);
+CREATE INDEX IF NOT EXISTS idx_world_news_delivered_active
+    ON world_news_delivered(category, retired_at);
 """
 
 
