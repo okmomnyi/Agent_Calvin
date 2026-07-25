@@ -1,10 +1,16 @@
-"""World-news awareness skill (Phase 37).
+"""World-news awareness skill (Phase 37, dedup added in 37b).
 
 A daily "what's up today" briefing across world & conflicts, AI/tech, sports, business, and
 Kenya-specific news, plus the same content on demand ("what's up today", /news). Free RSS
 feeds only (no API key — §0 free-first), synthesized with the same discipline research.py
 already enforces: every line in the digest traces back to an actual fetched headline, and a
 category with nothing fresh in the window says so plainly rather than being padded out.
+
+Phase 37b: headlines are clustered into stories by embedding similarity (core.embeddings,
+the same bge-m3 helper semantic.py uses for persona/CV recall) before synthesis, so two wires
+covering one event collapse into one cited line instead of two separate ones. Clustering is
+in-memory and per-run — nothing here writes to semantic_index, which is a closed namespace
+for durable facts/notes/docs, not a day's transient headlines.
 
 Deliberately NOT market prediction or financial advice — see skills/markets.py (a later,
 separate piece) for real price data correlated with news; nothing here forecasts or advises.
@@ -19,6 +25,7 @@ from typing import Any, Callable
 from xml.etree import ElementTree as ET
 
 from core.config import get_settings
+from core.embeddings import cosine
 from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.notify import send_telegram
@@ -60,7 +67,13 @@ CATEGORY_LABEL = {
 }
 
 _WINDOW_SECONDS = 24 * 3600  # only items from roughly the last day count as "today"
-_MAX_HEADLINES_TO_MODEL = 15  # a feed can return 40+ items; the newest handful is plenty
+_MAX_STORIES_TO_MODEL = 15  # a category can return 40+ headlines; the newest handful of STORIES is plenty
+# Cosine threshold above which two headlines are treated as the same story. bge-m3 output is
+# normalized, so this sits in the "same event, different wording" band rather than "same
+# topic" -- deliberately conservative (merging two distinct stories is the worse failure: it
+# would let one source's framing stand in for another's). Config-overridable since the right
+# value benefits from tuning against real production output, not guessed once and frozen.
+_DEDUP_THRESHOLD_DEFAULT = 0.80
 
 
 @dataclass
@@ -70,6 +83,51 @@ class Headline:
     title: str
     url: str
     published_at: float | None = None
+
+
+@dataclass
+class Cluster:
+    """One story. `members` holds every (source, title, link) reporting it -- synthesis
+    cites all of them; nothing here merges their TEXT, only the fact that they co-occur."""
+    category: str
+    members: list[Headline]
+
+    @property
+    def sources(self) -> list[str]:
+        seen: list[str] = []
+        for h in self.members:
+            if h.source not in seen:
+                seen.append(h.source)
+        return seen
+
+
+def _cluster_headlines(headlines: list[Headline], embedder: Any, threshold: float) -> list[Cluster]:
+    """Greedy single-pass clustering against a running centroid per cluster -- O(n * clusters),
+    fine at the scale of a few dozen headlines per category. Embeddings over title-string
+    matching on purpose (per the project's own semantic.py precedent): it catches the same
+    event worded differently ("PM announces reforms" / "Prime minister unveils economic
+    plan") and, just as importantly, does NOT merge two different stories that merely share
+    a word ("factory fire" / "factory strike").
+    """
+    if not headlines:
+        return []
+    vectors = embedder.embed_batch([h.title for h in headlines])
+    clusters: list[Cluster] = []
+    centroids: list[list[float]] = []
+    for headline, vec in zip(headlines, vectors):
+        best_idx, best_score = None, 0.0
+        for i, centroid in enumerate(centroids):
+            score = cosine(vec, centroid)
+            if score > best_score:
+                best_score, best_idx = score, i
+        if best_idx is not None and best_score >= threshold:
+            clusters[best_idx].members.append(headline)
+            n = len(clusters[best_idx].members)
+            centroids[best_idx] = [(c * (n - 1) + v) / n for c, v in zip(centroids[best_idx], vec)]
+        else:
+            clusters.append(Cluster(category=headline.category, members=[headline]))
+            centroids.append(vec)
+    return clusters
 
 
 def _parse_rss(xml_text: str, source: str, category: str) -> list[Headline]:
@@ -102,10 +160,12 @@ class WorldNewsSkill(BaseSkill):
     name = "world_news"
 
     def __init__(self, llm: LLMClient | None = None, fetcher: Any | None = None,
+                 embedder: Any | None = None,
                  notify: Callable[[str], bool] | None = None,
                  clock: Callable[[], float] = time.time) -> None:
         self._llm = llm
         self._fetcher = fetcher
+        self._embedder = embedder
         # Injectable, same as every other skill that can reach Calvin's phone — a test must
         # be able to replace this, or the suite texts him.
         self._notify = notify or send_telegram
@@ -123,9 +183,23 @@ class WorldNewsSkill(BaseSkill):
             from skills.job_hunter.fetcher import Fetcher
 
             # RSS feeds are published specifically to be polled — respect_robots stays off
-            # the same way research.py's DuckDuckGoSearcher treats a search endpoint.
+            # the same way research.py's DuckDuckGoSearcher treats a search endpoint. This
+            # exception is scoped to RSS-feed URLs only: if this skill ever fetches an
+            # ARTICLE page (a future "read more"), that fetch must consult robots normally.
             self._fetcher = Fetcher(respect_robots=False)
         return self._fetcher
+
+    @property
+    def embedder(self):
+        if self._embedder is None:
+            from core.embeddings import get_embedder
+
+            # Same helper semantic.py uses for persona/CV recall (NIM bge-m3 -> sentence-
+            # transformers -> hashing). Used here purely in-memory for same-run headline
+            # clustering -- not persisted to semantic_index, which is a closed namespace
+            # (fact/note/doc) for durable recall, not a day's transient headlines.
+            self._embedder = get_embedder("auto")
+        return self._embedder
 
     def contract(self) -> SkillContract:
         """Reads only tone/general — how the digest is written, never what it may report.
@@ -158,28 +232,47 @@ class WorldNewsSkill(BaseSkill):
             out.extend(h for h in items if h.published_at is None or h.published_at >= cutoff)
         return out
 
-    # ------------------------------------------------------------- synthesis
-    def _synthesize(self, headlines: list[Headline]) -> str:
+    # ------------------------------------------------------------- dedup
+    def _cluster(self, headlines: list[Headline]) -> list[Cluster]:
         if not headlines:
+            return []
+        threshold = float(get_settings().get("world_news", "dedup_threshold",
+                                             default=_DEDUP_THRESHOLD_DEFAULT))
+        try:
+            return _cluster_headlines(headlines, self.embedder, threshold)
+        except Exception:  # noqa: BLE001 - clustering must never take the briefing down
+            log.warning("world_news: clustering failed, falling back to one story per headline")
+            return [Cluster(category=h.category, members=[h]) for h in headlines]
+
+    # ------------------------------------------------------------- synthesis
+    def _synthesize(self, clusters: list[Cluster]) -> str:
+        if not clusters:
             return "Nothing fresh in the last day from this category's sources."
-        capped = headlines[:_MAX_HEADLINES_TO_MODEL]
-        context = "\n".join(f"- [{h.source}] {h.title} ({h.url})" for h in capped)
+        capped = clusters[:_MAX_STORIES_TO_MODEL]
+        blocks = []
+        for c in capped:
+            lines = "\n".join(f"  - [{h.source}] {h.title} ({h.url})" for h in c.members)
+            blocks.append(f"STORY (sources: {', '.join(c.sources)}):\n{lines}")
+        context = "\n\n".join(blocks)
         try:
             answer = self.llm.chat(
                 "research",
                 [{"role": "system", "content":
-                    "You are writing one short section of a daily news briefing. From the "
-                    "headlines given, pick the 3-6 most significant, write one line each "
-                    "(what happened, why it matters) and cite the source name in "
-                    "parentheses. Do not invent any fact, event, or number that is not "
-                    "present in the headlines below. If the headlines are minor or "
-                    "repetitive, say that briefly instead of padding it out."},
-                 {"role": "user", "content": f"HEADLINES:\n{context}"}],
+                    "You are writing one short section of a daily news briefing. Each STORY "
+                    "below may list the same event reported by multiple sources — write ONE "
+                    "line per STORY (never one line per source), covering what happened and "
+                    "why it matters, and cite every source listed for that story by name, "
+                    "e.g. '(Reuters, Al Jazeera)'. Pick the 3-6 most significant stories. Do "
+                    "not invent any fact, event, or number that is not present in the "
+                    "headlines below. If the stories are minor or repetitive, say that "
+                    "briefly instead of padding it out."},
+                 {"role": "user", "content": context}],
                 max_tokens=400,
             )
         except LLMError:
-            log.warning("world_news: synthesis failed, falling back to raw headlines")
-            answer = "\n".join(f"• {h.title} ({h.source})" for h in capped[:6])
+            log.warning("world_news: synthesis failed, falling back to raw stories")
+            answer = "\n".join(
+                f"• {c.members[0].title} ({', '.join(c.sources)})" for c in capped[:6])
         return answer.strip()
 
     def whats_up(self, categories: str = "", notify: bool = True, **_: Any) -> CommandResult:
@@ -194,8 +287,9 @@ class WorldNewsSkill(BaseSkill):
         for cat in wanted:
             headlines = self._fetch_category(cat)
             total_headlines += len(headlines)
+            clusters = self._cluster(headlines)
             lines.append(f"\n{CATEGORY_LABEL.get(cat, cat)}")
-            lines.append(self._synthesize(headlines))
+            lines.append(self._synthesize(clusters))
 
         if total_headlines == 0:
             lines.append("\n(Couldn't reach any news sources just now — try again shortly.)")

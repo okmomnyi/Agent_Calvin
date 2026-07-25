@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import time
 
-from skills.world_news import FEEDS, Headline, WorldNewsSkill, _parse_rss
+from skills.world_news import FEEDS, Cluster, Headline, WorldNewsSkill, _cluster_headlines, _parse_rss
 
 _RSS_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
@@ -118,6 +118,104 @@ def test_fetch_category_degrades_on_a_non_200(monkeypatch):
     assert skill._fetch_category("kenya") == []
 
 
+# ------------------------------------------------------------------ dedup (S1)
+class _FakeEmbedder:
+    """Fixture vectors keyed by title -- full control over similarity, no real model needed
+    (per the S1 spec: "canned RSS + a fake embedder with fixture vectors")."""
+
+    def __init__(self, vectors: dict[str, list[float]]) -> None:
+        self._vectors = vectors
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [self._vectors[t] for t in texts]
+
+    def embed(self, text: str) -> list[float]:
+        return self._vectors[text]
+
+
+class _BrokenEmbedder:
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("embedding service down")
+
+
+def _headline(source: str, title: str, category: str = "world") -> Headline:
+    return Headline(category=category, source=source, title=title,
+                    url=f"https://x.test/{source}/{title[:8]}", published_at=time.time())
+
+
+def test_ten_headlines_about_one_event_collapse_into_one_cluster():
+    titles = [
+        "Ceasefire announced after weeks of talks",
+        "Truce declared in long-running conflict",
+        "Peace deal reached, officials confirm",
+        "Warring sides agree to halt hostilities",
+        "Ceasefire takes effect at midnight",
+        "Officials confirm ceasefire agreement",
+        "Fighting stops as truce begins",
+        "Both sides sign ceasefire accord",
+        "Conflict paused under new truce",
+        "Ceasefire holds on first day",
+    ]
+    sources = ["BBC World", "Al Jazeera", "Reuters", "AP"]
+    headlines = [_headline(sources[i % len(sources)], t) for i, t in enumerate(titles)]
+    # Same event -> identical fixture vector for every title (full control; no real model).
+    embedder = _FakeEmbedder({t: [1.0, 0.0] for t in titles})
+
+    clusters = _cluster_headlines(headlines, embedder, threshold=0.80)
+
+    assert len(clusters) == 1
+    assert len(clusters[0].members) == 10
+    assert set(clusters[0].sources) == set(sources)
+
+
+def test_two_different_stories_sharing_a_word_do_not_merge():
+    headlines = [
+        _headline("BBC World", "Fire breaks out at downtown factory"),
+        _headline("Al Jazeera", "Factory workers strike over pay dispute"),
+    ]
+    embedder = _FakeEmbedder({
+        "Fire breaks out at downtown factory": [1.0, 0.0],
+        "Factory workers strike over pay dispute": [0.0, 1.0],  # orthogonal: unrelated
+    })
+
+    clusters = _cluster_headlines(headlines, embedder, threshold=0.80)
+
+    assert len(clusters) == 2
+
+
+def test_cluster_headlines_with_no_input_returns_no_clusters():
+    assert _cluster_headlines([], _FakeEmbedder({}), threshold=0.80) == []
+
+
+def test_skill_cluster_falls_back_to_one_story_per_headline_when_the_embedder_fails():
+    """The embedder-down path: never go silent, degrade to today's un-deduped behaviour."""
+    skill = WorldNewsSkill(embedder=_BrokenEmbedder())
+    headlines = [_headline("BBC World", "Something happened"),
+                _headline("Al Jazeera", "Something else entirely")]
+
+    clusters = skill._cluster(headlines)
+
+    assert len(clusters) == 2
+    assert clusters[0].members == [headlines[0]]
+    assert clusters[1].members == [headlines[1]]
+
+
+def test_skill_cluster_reads_the_configured_dedup_threshold(monkeypatch):
+    calls: list[tuple] = []
+
+    class _FakeSettings:
+        def get(self, *keys, default=None):
+            calls.append(keys)
+            return default
+
+    monkeypatch.setattr("skills.world_news.get_settings", lambda: _FakeSettings())
+    skill = WorldNewsSkill(embedder=_FakeEmbedder({"A": [1.0, 0.0]}))
+
+    skill._cluster([_headline("BBC World", "A")])
+
+    assert ("world_news", "dedup_threshold") in calls
+
+
 # ------------------------------------------------------------------ synthesis
 def test_synthesize_with_no_headlines_says_so_without_calling_the_llm(fake_llm):
     skill = WorldNewsSkill(llm=fake_llm)
@@ -129,17 +227,36 @@ def test_synthesize_with_no_headlines_says_so_without_calling_the_llm(fake_llm):
 def test_synthesize_calls_the_llm_with_the_headlines_as_context(fake_llm):
     fake_llm.post_result = "AgentOS 5 launched today. (TechCrunch)"
     skill = WorldNewsSkill(llm=fake_llm)
-    headlines = [Headline(category="tech_ai", source="TechCrunch", title="AgentOS 5 launched",
-                          url="https://x.test/1", published_at=time.time())]
+    cluster = Cluster(category="tech_ai", members=[
+        Headline(category="tech_ai", source="TechCrunch", title="AgentOS 5 launched",
+                url="https://x.test/1", published_at=time.time())])
 
-    text = skill._synthesize(headlines)
+    text = skill._synthesize([cluster])
 
     assert text == "AgentOS 5 launched today. (TechCrunch)"
     assert len(fake_llm.calls) == 1
     assert "AgentOS 5 launched" in fake_llm.calls[0]["messages"][-1]["content"]
 
 
-def test_synthesize_falls_back_to_raw_headlines_when_the_llm_fails(fake_llm, monkeypatch):
+def test_synthesize_cites_every_source_in_a_merged_cluster(fake_llm):
+    fake_llm.post_result = "A ceasefire was announced. (BBC World, Al Jazeera)"
+    skill = WorldNewsSkill(llm=fake_llm)
+    cluster = Cluster(category="world", members=[
+        Headline(category="world", source="BBC World", title="Ceasefire announced",
+                url="https://x.test/1", published_at=time.time()),
+        Headline(category="world", source="Al Jazeera", title="Truce declared",
+                url="https://x.test/2", published_at=time.time()),
+    ])
+
+    prompt = skill._synthesize([cluster])
+    sent_context = fake_llm.calls[0]["messages"][-1]["content"]
+
+    assert "BBC World" in sent_context and "Al Jazeera" in sent_context
+    assert "sources: BBC World, Al Jazeera" in sent_context
+    assert "BBC World" in prompt and "Al Jazeera" in prompt
+
+
+def test_synthesize_falls_back_to_raw_stories_when_the_llm_fails(fake_llm, monkeypatch):
     from core.llm import LLMError
 
     def _raise(*a, **k):
@@ -147,10 +264,11 @@ def test_synthesize_falls_back_to_raw_headlines_when_the_llm_fails(fake_llm, mon
 
     monkeypatch.setattr(fake_llm, "_post", _raise)
     skill = WorldNewsSkill(llm=fake_llm)
-    headlines = [Headline(category="world", source="BBC", title="Something happened",
-                          url="https://x.test/1", published_at=time.time())]
+    cluster = Cluster(category="world", members=[
+        Headline(category="world", source="BBC", title="Something happened",
+                url="https://x.test/1", published_at=time.time())])
 
-    text = skill._synthesize(headlines)
+    text = skill._synthesize([cluster])
 
     assert "Something happened" in text
     assert "BBC" in text
