@@ -123,6 +123,13 @@ $HealthUrl = ($WsUrl -replace '^wss://', 'https://' -replace '^ws://', 'http://'
 $modeName = if ($Mode) { $Mode } else { "wake-word" }
 Log "starting - server $WsUrl, mode '$modeName'"
 
+# A client that dies within seconds of launching (a WebView2 profile race, a bad network
+# blip right as Wi-Fi reconnects) used to get relaunched every flat 5s, which reads as "the
+# window keeps popping up and stealing focus" rather than as a backoff. Doubles up to 60s on
+# a fast exit, resets to 5s the moment a launch survives a real session.
+$RestartDelay = 5
+$MinHealthyRunSeconds = 20
+
 # ---- client supervisor (foreground) ------------------------------------------
 try {
     while ($true) {
@@ -149,13 +156,22 @@ try {
         # -u because a redirected python block-buffers and you get nothing until it dies.
         # Add-Content -Encoding utf8 rather than Tee-Object: Tee writes UTF-16 in PS 5.1, and
         # mixing that into a UTF-8 log makes the file half NUL bytes ("binary file matches").
+        $launchedAt = Get-Date
         if ($Mode -eq "window") { $out = & $Python -u hud_window.py --tray 2>&1 }
         elseif ($Mode -eq "voice") { $out = & $Python -u voice_client.py 2>&1 }  # opt-in wake word
         else { $out = & $Python -u voice_client.py $Mode 2>&1 }                  # --text / --ptt
         $out | ForEach-Object { Add-Content -Path $LogFile -Value ("    " + $_) -Encoding utf8 }
         Pop-Location
-        Log "client exited (see output above), restarting in 5s"
-        Start-Sleep -Seconds 5
+
+        $ranForSeconds = ((Get-Date) - $launchedAt).TotalSeconds
+        if ($ranForSeconds -lt $MinHealthyRunSeconds) {
+            $RestartDelay = [Math]::Min($RestartDelay * 2, 60)
+            Log ("client exited after {0:N0}s -- crash-loop backoff, waiting {1}s" -f $ranForSeconds, $RestartDelay)
+        } else {
+            $RestartDelay = 5
+            Log ("client exited after {0:N0}s, restarting in {1}s" -f $ranForSeconds, $RestartDelay)
+        }
+        Start-Sleep -Seconds $RestartDelay
     }
 } finally {
     Log "supervisor stopped"

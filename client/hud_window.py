@@ -66,6 +66,17 @@ FULL_SIZE = (960, 680)
 COMPACT_SIZE = (110, 110)
 SCREEN_MARGIN = 24
 
+# WebView2 profile dir. pywebview's default (private_mode=True) makes a FRESH temp dir per
+# launch and tries to delete the previous one on the next start -- if the prior process's own
+# WebView2 subprocess hadn't fully released its file handles yet (observed: "[WinError 32]
+# ... EdgeJourneys.db" on almost every relaunch, immediately followed by the new window
+# dying within seconds -- a visible "keeps reopening" crash loop), that delete fails and the
+# new instance inherits a stressed profile rather than a clean one. A single stable,
+# persistent profile sidesteps the create/delete race entirely: nothing to clean up, nothing
+# to race.
+WEBVIEW_STORAGE_PATH = str(
+    Path(os.getenv("LOCALAPPDATA", str(Path.home()))) / "AgentOS" / "webview_data")
+
 
 def _http_base_from_ws(ws_url: str) -> str:
     """transport.js needs an http(s) base, not a ws(s) one -- derive it from the SAME env var
@@ -181,7 +192,7 @@ class HudWindow:
         self._window = webview.create_window(
             "AgentOS", url, width=FULL_SIZE[0], height=FULL_SIZE[1],
             min_size=(360, 480), resizable=True,
-            frameless=True, easy_drag=True, on_top=True, transparent=True,
+            frameless=True, easy_drag=True, transparent=True,
             js_api=Bridge(self),
         )
         self._window.events.closed += self._on_closed
@@ -212,7 +223,8 @@ class HudWindow:
             self._wake_thread.start()
         if self._compact:
             self.set_compact(True)
-        self._webview.start()
+        Path(WEBVIEW_STORAGE_PATH).mkdir(parents=True, exist_ok=True)
+        self._webview.start(private_mode=False, storage_path=WEBVIEW_STORAGE_PATH)
 
     def _on_closed(self) -> None:
         self._wake_stop.set()
