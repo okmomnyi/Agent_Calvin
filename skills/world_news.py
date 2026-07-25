@@ -43,6 +43,11 @@ single source never fires. This is a rare, high-bar exception to pull-only deliv
 second firehose (AGENTOS_BUG_LIST.md #17's own lesson: an ungated stream drowns the person
 it's meant to help).
 
+Phase 37b/S6: categories and sources moved from a hardcoded Python dict to config.yaml's
+world_news.sources -- _feeds() reads it live every call (same convention as every other
+tunable in this skill), falling back to DEFAULT_FEEDS if that section is missing or
+malformed. Adding, removing, or re-grouping a source is now a config edit, not a code change.
+
 Deliberately NOT market prediction or financial advice — see skills/markets.py (a later,
 separate piece) for real price data correlated with news; nothing here forecasts or advises.
 """
@@ -82,7 +87,13 @@ class Source(NamedTuple):
 # longer publishes free public RSS at all (feeds.reuters.com is dead), and every AP RSS URL
 # tried returns the plain HTML site, not a feed -- neither offers a free, ToS-clean feed to
 # wire in. The Guardian and UN News substitute as editorially-independent world coverage.
-FEEDS: dict[str, list[Source]] = {
+#
+# This is the FALLBACK (Phase 37b/S6): production reads _feeds() live from config.yaml's
+# world_news.sources every call, so adding/removing/re-grouping a source is a config edit,
+# not a code change. DEFAULT_FEEDS is what a fresh/un-updated config.yaml falls back to, and
+# what tests build fixtures against directly (they don't need to exercise the config-reading
+# path itself unless that's specifically what they're testing).
+DEFAULT_FEEDS: dict[str, list[Source]] = {
     "world": [
         Source("BBC World", "http://feeds.bbci.co.uk/news/world/rss.xml", "bbc"),
         Source("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml", "aljazeera"),
@@ -119,6 +130,27 @@ FEEDS: dict[str, list[Source]] = {
         Source("AllAfrica", "https://allafrica.com/tools/headlines/rdf/latest/headlines.rdf", "allafrica"),
     ],
 }
+
+
+def _feeds() -> dict[str, list[Source]]:
+    """The live source list (Phase 37b/S6) -- read fresh from config.yaml's
+    world_news.sources on every call (same convention as dedup_threshold/interest_order/etc:
+    nothing in this skill caches a config value across calls). Falls back to DEFAULT_FEEDS
+    if that section is missing (a fresh/un-updated config.yaml) or malformed -- a typo'd
+    config must degrade to a known-good source list, not take the whole skill down.
+    """
+    raw = get_settings().get("world_news", "sources", default=None)
+    if not raw:
+        return DEFAULT_FEEDS
+    try:
+        return {
+            category: [Source(s["name"], s["url"], s["group"]) for s in sources]
+            for category, sources in raw.items()
+        }
+    except (KeyError, TypeError, AttributeError):
+        log.warning("world_news: config.yaml's world_news.sources is malformed, using defaults")
+        return DEFAULT_FEEDS
+
 
 CATEGORY_LABEL = {
     "world": "🌍 World & Conflicts",
@@ -167,7 +199,7 @@ class Headline:
     published_at: float | None = None
     # Independence group of the source that reported it (Phase 37b/S3), e.g. "bbc" or
     # "nation_media_group". Defaults to "" for any caller that doesn't set it (tests
-    # constructing a Headline directly); production always stamps a real group from FEEDS.
+    # constructing a Headline directly); production always stamps a real group from _feeds().
     group: str = ""
 
 
@@ -348,7 +380,7 @@ class WorldNewsSkill(BaseSkill):
     def _fetch_category(self, category: str) -> list[Headline]:
         cutoff = self._now() - _WINDOW_SECONDS
         out: list[Headline] = []
-        for src in FEEDS.get(category, []):
+        for src in _feeds().get(category, []):
             resp = self.fetcher.get(src.url, accept="application/rss+xml, text/xml")
             if resp is None or resp.status_code != 200:
                 log.warning("world_news: %s (%s) unreachable, skipping this run", src.name, category)
@@ -514,7 +546,7 @@ class WorldNewsSkill(BaseSkill):
             return CommandResult(text="", ok=True, data={"fired": False, "reason": "cooldown"})
 
         candidates: list[tuple[str, Cluster]] = []
-        for cat in FEEDS:
+        for cat in _feeds():
             try:
                 headlines = self._fetch_category(cat)
                 clusters = self._cluster(headlines)
@@ -583,11 +615,12 @@ class WorldNewsSkill(BaseSkill):
         "/news kenya full") to force the whole 24h window instead of only what's new since
         the last ask.
         """
+        feeds = _feeds()
         tokens = [c.strip().lower() for c in categories.replace(",", " ").split() if c.strip()]
         if "full" in tokens:
             full = True
             tokens = [t for t in tokens if t != "full"]
-        wanted = [c for c in tokens if c in FEEDS] or list(FEEDS.keys())
+        wanted = [c for c in tokens if c in feeds] or list(feeds.keys())
 
         mode_note = " (full 24h window)" if full else ""
         lines = [f"🗞 WHAT'S UP TODAY{mode_note} · {time.strftime('%A %d %b', time.localtime(self._now()))}"]

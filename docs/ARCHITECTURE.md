@@ -883,6 +883,79 @@ way that's worse than leaving it openly missing.
 
 ---
 
+### Phase 37 — World news awareness (`skills/world_news.py`)
+Calvin: *"an agent that is aware of the state of the world in all fronts... even when making
+decisions we are aware of the surrounding situation"*. A daily "what's up today" briefing —
+world & conflicts, AI/tech, sports, business, Kenya — reachable on demand (`/news`,
+`/whatsup`, voice, dashboard chat) or pushed automatically every morning. Nine free RSS wires
+(no API key, §0 free-first), same never-invent-a-source discipline `research.py` already
+enforces: every line traces to an actual fetched headline, and an empty category says so
+rather than being padded out. Explicitly **not** market prediction or trading advice —
+`skills/markets.py` (a later, separate piece) will do real price data correlated with news,
+never a forecast.
+
+Built in five ordered sub-phases (37b), each depending on the last:
+
+- **S1 — dedup by embedding.** Headlines are clustered into stories by cosine similarity over
+  the same NIM-hosted embedder `core/semantic.py` uses for persona/CV recall (`core.embeddings.
+  get_embedder("auto")` + `cosine()`), not title-string matching — it catches the same event
+  worded differently and, just as importantly, does not merge two different stories that
+  happen to share a word. Clustering is in-memory and per-run only; nothing here writes to
+  `semantic_index`, which is a closed namespace (fact/note/doc) for durable recall, not a
+  day's transient headlines. An embedder failure degrades to one story per headline rather
+  than going silent. **Bonus find while verifying this against real data:** `NimEmbedder`'s
+  original model, `baai/bge-m3`, returned a bare 500 on every call to this account's NIM
+  endpoint — meaning semantic recall (including the documented "~71% context reduction" on
+  CV tailoring) had likely been silently running on the hashing fallback since Phase 33, with
+  nothing anywhere surfacing it as broken. Switched to `nvidia/nv-embedqa-e5-v5` (same
+  1024-dim, no schema change).
+- **S2 — "since last asked" watermark.** `world_news_delivered` (category, url, delivered_at,
+  retired_at) tracks which headline URLs have already been shown; asking again mid-morning
+  surfaces only genuinely new stories instead of replaying the 24h window. The watermark
+  itself is `MAX(delivered_at)` derived from this same table rather than tracked separately,
+  so the scheduled push and the on-demand path share one source of truth and can never drift.
+  `full=True` (or the word "full" in the request text) forces the whole window regardless.
+- **S3 — source diversification + independence weighting.** Every `Source` (a `NamedTuple`:
+  name, url, group) carries an independence GROUP — shared ownership/editorial control, not
+  just a shared feed. All BBC feeds share one group; Nation Africa and Business Daily Africa
+  share one too (both Nation Media Group) — without that tag, one publisher's two outlets
+  covering a story would inflate corroboration to 2 when there's really one editorial voice
+  behind it. `Cluster.corroboration` counts distinct groups, never raw headline count.
+  Reuters and AP were tried first (per the original ask) and dropped after verification —
+  neither has a working free RSS feed left; The Guardian and UN News substitute for
+  editorially-independent world coverage, and arXiv cs.AI / OpenAI's blog give AI/tech a
+  dedicated releases source instead of leaning entirely on TechCrunch's general firehose.
+- **S4 — cross-category front page.** The brief leads with "TOP STORIES" — the 3 most
+  important stories across ALL requested categories, picked by a fully deterministic score
+  (magnitude × corroboration × configured interest relevance — `world_news.interest_order`).
+  The model only writes the prose for whatever the score already chose; ranking never varies
+  run-to-run for identical clusters. Only shown for multi-category requests — a single
+  category doesn't need a front page on top of itself.
+- **S5 — corroboration-gated breaking news.** A separate, more frequent poll
+  (`check_breaking`, `world_news.breaking_poll_minutes`) fires **at most one** push, and only
+  when a story clears every bar: corroboration ≥ `breaking_corroboration_bar` (default 3
+  independent groups), coverage published within `breaking_window_hours` of each other
+  (default 6h — tightly time-clustered, not just eventually corroborated), never already
+  pushed for this story-lineage, and a **global** cooldown (`breaking_cooldown_minutes`,
+  system-wide, not per-category) has elapsed. There is no keyword path anywhere — a
+  single-source headline titled "BREAKING URGENT WAR ALERT" is handled identically to a
+  mundane one. Deliberately conservative: this is a rare, high-bar exception to pull-only
+  delivery, not a second firehose — the exact failure mode Phase 34's own queue-drowning
+  incident (83 drafted jobs nobody could review) already taught this codebase to design
+  against. On a DB outage the cooldown check fails **closed** (assumes "just fired") rather
+  than risking a flood on uncertainty.
+- **S6 — config-driven sources.** Categories and sources moved from a hardcoded Python dict
+  to `config.yaml`'s `world_news.sources` (`_feeds()` reads it live, falling back to
+  `DEFAULT_FEEDS` if that section is missing or malformed) — adding, removing, or re-grouping
+  a source is now a config edit, not a code change.
+
+`respect_robots=False` at the RSS fetch site is scoped deliberately narrowly: valid for a
+feed published specifically to be polled, the same reasoning `research.py`'s
+`DuckDuckGoSearcher` already uses for a search endpoint. It does not extend to fetching an
+article's full body — a future "read more" would need to consult robots there.
+
+---
+
 ## 9. Conversational state machines
 
 Three flows keep session state in `kv` (JSON) so they work identically over voice, Telegram

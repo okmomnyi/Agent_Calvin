@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import time
 
-from skills.world_news import FEEDS, Cluster, Headline, WorldNewsSkill, _cluster_headlines, _parse_rss
+from skills.world_news import (DEFAULT_FEEDS, Cluster, Headline, Source, WorldNewsSkill,
+                               _cluster_headlines, _feeds, _parse_rss)
 
 _RSS_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
@@ -81,7 +82,7 @@ def test_fetch_category_drops_items_outside_the_24h_window():
     now = 2_000_000.0
     fresh_xml = _rss([("Fresh", "https://x.test/fresh", _rfc822(now - 3600))])
     stale_xml = _rss([("Stale", "https://x.test/stale", _rfc822(now - 3 * 24 * 3600))])
-    urls = FEEDS["world"]
+    urls = DEFAULT_FEEDS["world"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, fresh_xml),
         urls[1][1]: _FakeResponse(200, stale_xml),
@@ -97,7 +98,7 @@ def test_fetch_category_drops_items_outside_the_24h_window():
 
 def test_fetch_category_degrades_when_one_source_is_unreachable():
     now = 2_000_000.0
-    urls = FEEDS["world"]
+    urls = DEFAULT_FEEDS["world"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([("Alive", "https://x.test/a", _rfc822(now))])),
         # urls[1] intentionally missing -> fetcher.get() returns None
@@ -111,7 +112,7 @@ def test_fetch_category_degrades_when_one_source_is_unreachable():
 
 def test_fetch_category_degrades_on_a_non_200(monkeypatch):
     now = 2_000_000.0
-    urls = FEEDS["kenya"]
+    urls = DEFAULT_FEEDS["kenya"]
     fetcher = _FakeFetcher({urls[0][1]: _FakeResponse(503, "")})
     skill = WorldNewsSkill(fetcher=fetcher, clock=lambda: now)
 
@@ -282,7 +283,7 @@ def _empty_fetcher() -> _FakeFetcher:
 
 def test_whats_up_pushes_the_digest_and_returns_ok_when_something_came_in(fake_llm, mem):
     now = 2_000_000.0
-    urls = FEEDS["kenya"]
+    urls = DEFAULT_FEEDS["kenya"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([("Budget announced", "https://x.test/1", _rfc822(now))])),
     })
@@ -302,7 +303,7 @@ def test_whats_up_pushes_the_digest_and_returns_ok_when_something_came_in(fake_l
 def test_whats_up_with_an_unknown_category_falls_back_to_everything(fake_llm, mem):
     skill = WorldNewsSkill(llm=fake_llm, fetcher=_empty_fetcher(), memory=mem, notify=lambda t: True)
     result = skill.whats_up(categories="not_a_real_category")
-    assert set(result.data["categories"]) == set(FEEDS.keys())
+    assert set(result.data["categories"]) == set(DEFAULT_FEEDS.keys())
 
 
 def test_whats_up_reports_ok_false_when_every_source_is_unreachable(fake_llm, mem):
@@ -380,7 +381,7 @@ def test_retire_stale_delivered_excludes_old_rows_from_the_delivered_set(mem):
 
 def test_second_call_within_the_window_shows_only_new_clusters(fake_llm, mem):
     now = 2_000_000.0
-    urls = FEEDS["kenya"]
+    urls = DEFAULT_FEEDS["kenya"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([("Budget passed", "https://x.test/budget", _rfc822(now))])),
     })
@@ -408,7 +409,7 @@ def test_scheduled_push_and_on_demand_share_one_watermark_across_instances(fake_
     on-demand request would be) must read/advance the SAME state -- proving there is one
     source of truth, not two independent watermarks that could drift."""
     now = 2_000_000.0
-    urls = FEEDS["kenya"]
+    urls = DEFAULT_FEEDS["kenya"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([("Story", "https://x.test/1", _rfc822(now))])),
     })
@@ -428,7 +429,7 @@ def test_scheduled_push_and_on_demand_share_one_watermark_across_instances(fake_
 
 def test_full_flag_bypasses_the_delivered_filter(fake_llm, mem):
     now = 2_000_000.0
-    urls = FEEDS["kenya"]
+    urls = DEFAULT_FEEDS["kenya"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([("Story", "https://x.test/1", _rfc822(now))])),
     })
@@ -454,7 +455,7 @@ def test_full_keyword_in_categories_text_triggers_full_mode(fake_llm, mem):
 
 def test_whats_up_degrades_to_showing_everything_when_delivered_state_is_unreadable(fake_llm):
     now = 2_000_000.0
-    urls = FEEDS["kenya"]
+    urls = DEFAULT_FEEDS["kenya"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([("Story", "https://x.test/1", _rfc822(now))])),
     })
@@ -469,14 +470,14 @@ def test_whats_up_degrades_to_showing_everything_when_delivered_state_is_unreada
 
 # ------------------------------------------------------------------ independence groups (S3)
 def test_all_feeds_have_a_non_empty_independence_group():
-    for category, sources in FEEDS.items():
+    for category, sources in DEFAULT_FEEDS.items():
         for src in sources:
             assert src.group, f"{src.name} in {category!r} has no independence group set"
 
 
 def test_fetch_category_stamps_the_source_group_onto_headlines():
     now = 2_000_000.0
-    urls = FEEDS["world"]
+    urls = DEFAULT_FEEDS["world"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([("BBC story", "https://x.test/bbc", _rfc822(now))])),
     })
@@ -511,7 +512,7 @@ def test_cluster_spanning_three_independent_groups_has_corroboration_three():
 def test_nation_africa_and_business_daily_africa_share_one_independence_group():
     """The specific source-monoculture case S3 exists to close: two Kenyan outlets, one
     publisher (Nation Media Group)."""
-    groups = {s.name: s.group for s in FEEDS["kenya"]}
+    groups = {s.name: s.group for s in DEFAULT_FEEDS["kenya"]}
     assert groups["Nation Africa"] == groups["Business Daily Africa"]
     assert groups["Nation Africa"] != groups["The Standard"]  # a genuinely different publisher
 
@@ -592,8 +593,8 @@ def test_changing_the_configured_interest_order_reorders_the_front_page(mem, mon
 
 def test_whats_up_shows_a_front_page_when_spanning_multiple_categories(fake_llm, mem):
     now = 2_000_000.0
-    kenya_urls = FEEDS["kenya"]
-    world_urls = FEEDS["world"]
+    kenya_urls = DEFAULT_FEEDS["kenya"]
+    world_urls = DEFAULT_FEEDS["world"]
     fetcher = _FakeFetcher({
         kenya_urls[0][1]: _FakeResponse(200, _rss([("Kenya story", "https://x.test/k", _rfc822(now))])),
         world_urls[0][1]: _FakeResponse(200, _rss([("World story", "https://x.test/w", _rfc822(now))])),
@@ -609,7 +610,7 @@ def test_whats_up_shows_a_front_page_when_spanning_multiple_categories(fake_llm,
 
 def test_whats_up_has_no_front_page_for_a_single_category(fake_llm, mem):
     now = 2_000_000.0
-    urls = FEEDS["kenya"]
+    urls = DEFAULT_FEEDS["kenya"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([("Kenya story", "https://x.test/k", _rfc822(now))])),
     })
@@ -626,9 +627,9 @@ def test_whats_up_has_no_front_page_for_a_single_category(fake_llm, mem):
 def _world_fetcher_with_sources(now: float, source_indices: list[int],
                                 title: str = "Major event unfolds") -> _FakeFetcher:
     """The same story, reported by the given world-category sources (by index into
-    FEEDS["world"]) at distinct URLs but an identical title, so the real (test-pinned
+    DEFAULT_FEEDS["world"]) at distinct URLs but an identical title, so the real (test-pinned
     hashing) embedder reliably clusters them together."""
-    urls = FEEDS["world"]
+    urls = DEFAULT_FEEDS["world"]
     by_url = {}
     for i in source_indices:
         by_url[urls[i][1]] = _FakeResponse(200, _rss([(title, f"https://x.test/world/{i}", _rfc822(now))]))
@@ -719,7 +720,7 @@ def test_check_breaking_ignores_alarming_words_from_a_single_source(fake_llm, me
     """No keyword path exists anywhere in this feature -- an alarming title from ONE source
     is treated identically to a mundane one."""
     now = 2_000_000.0
-    urls = FEEDS["world"]
+    urls = DEFAULT_FEEDS["world"]
     fetcher = _FakeFetcher({
         urls[0][1]: _FakeResponse(200, _rss([
             ("BREAKING URGENT WAR ALERT CRISIS", "https://x.test/w", _rfc822(now))])),
@@ -753,7 +754,7 @@ def test_check_breaking_cooldown_blocks_a_different_story_shortly_after(fake_llm
 def test_check_breaking_fires_at_most_once_even_if_two_categories_qualify(fake_llm, mem):
     now = 2_000_000.0
     world_urls = _world_fetcher_with_sources(now, [0, 1, 2])._by_url
-    kenya_urls = FEEDS["kenya"]
+    kenya_urls = DEFAULT_FEEDS["kenya"]
     kenya_by_url = {
         kenya_urls[i][1]: _FakeResponse(200, _rss([("Kenya event", f"https://x.test/kenya/{i}", _rfc822(now))]))
         for i in range(4)   # all 4 Kenya sources -> corroboration 3 (NMG counted once)
@@ -791,3 +792,59 @@ def test_retire_stale_breaking_pushed_excludes_old_rows(mem):
     skill._retire_stale_breaking_pushed()
 
     assert skill._already_breaking_pushed("world") == set()
+
+
+# ------------------------------------------------------------------ config-driven sources (S6)
+def test_feeds_falls_back_to_default_when_config_has_no_sources_section(monkeypatch):
+    class _FakeSettings:
+        def get(self, *keys, default=None):
+            return default   # config.yaml has nothing under world_news.sources
+
+    monkeypatch.setattr("skills.world_news.get_settings", lambda: _FakeSettings())
+    assert _feeds() == DEFAULT_FEEDS
+
+
+def test_feeds_reads_a_custom_source_list_from_config(monkeypatch):
+    custom = {"world": [{"name": "Test Wire", "url": "https://x.test/rss", "group": "testgroup"}]}
+
+    class _FakeSettings:
+        def get(self, *keys, default=None):
+            return custom if keys == ("world_news", "sources") else default
+
+    monkeypatch.setattr("skills.world_news.get_settings", lambda: _FakeSettings())
+    feeds = _feeds()
+
+    assert feeds == {"world": [Source("Test Wire", "https://x.test/rss", "testgroup")]}
+
+
+def test_feeds_falls_back_to_default_when_config_is_malformed(monkeypatch):
+    malformed = {"world": [{"name": "Missing url and group"}]}   # KeyError waiting to happen
+
+    class _FakeSettings:
+        def get(self, *keys, default=None):
+            return malformed if keys == ("world_news", "sources") else default
+
+    monkeypatch.setattr("skills.world_news.get_settings", lambda: _FakeSettings())
+
+    assert _feeds() == DEFAULT_FEEDS   # degrades to the known-good list, never raises
+
+
+def test_fetch_category_uses_the_live_config_driven_source_list(monkeypatch):
+    """Proves _fetch_category actually calls _feeds(), not the frozen DEFAULT_FEEDS."""
+    now = 2_000_000.0
+    custom = {"world": [{"name": "Test Wire", "url": "https://x.test/custom-rss", "group": "testgroup"}]}
+
+    class _FakeSettings:
+        def get(self, *keys, default=None):
+            return custom if keys == ("world_news", "sources") else default
+
+    monkeypatch.setattr("skills.world_news.get_settings", lambda: _FakeSettings())
+    fetcher = _FakeFetcher({
+        "https://x.test/custom-rss": _FakeResponse(200, _rss([("Custom story", "https://x.test/1", _rfc822(now))])),
+    })
+    skill = WorldNewsSkill(fetcher=fetcher, clock=lambda: now)
+
+    headlines = skill._fetch_category("world")
+
+    assert [h.title for h in headlines] == ["Custom story"]
+    assert headlines[0].group == "testgroup"

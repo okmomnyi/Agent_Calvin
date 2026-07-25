@@ -240,6 +240,36 @@ world_news:
   # How long a breaking-pushed record blocks a story-lineage from firing again (soft --
   # never row-deleted) before it's retired.
   breaking_retention_days: 7
+  # RSS sources (Phase 37b/S6) -- add, remove, or re-group a source here, no code change
+  # needed. `group` is the INDEPENDENCE tag: sources sharing real editorial/ownership control
+  # share a group, so two feeds from one publisher never count as two independent
+  # corroborating sources (see skills/world_news.py's Cluster.corroboration). Every feed here
+  # was fetched and its XML verified live before being added -- do the same for anything new
+  # (`curl -s <url> | head -c 300`) rather than assuming a plausible-looking URL works.
+  # Reuters and AP don't appear here: neither has a working free public RSS feed left.
+  sources:
+    world:
+      - {name: "BBC World", url: "http://feeds.bbci.co.uk/news/world/rss.xml", group: bbc}
+      - {name: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml", group: aljazeera}
+      - {name: "The Guardian", url: "https://www.theguardian.com/world/rss", group: guardian}
+      - {name: "UN News", url: "https://news.un.org/feed/subscribe/en/news/all/rss.xml", group: un}
+    tech_ai:
+      - {name: "TechCrunch", url: "https://techcrunch.com/feed/", group: techcrunch}
+      - {name: "BBC Technology", url: "http://feeds.bbci.co.uk/news/technology/rss.xml", group: bbc}
+      - {name: "arXiv cs.AI", url: "http://export.arxiv.org/rss/cs.AI", group: arxiv}
+      - {name: "OpenAI News", url: "https://openai.com/news/rss.xml", group: openai}
+    sports:
+      - {name: "BBC Sport", url: "http://feeds.bbci.co.uk/sport/rss.xml", group: bbc}
+      - {name: "ESPN", url: "https://www.espn.com/espn/rss/news", group: espn}
+    business:
+      - {name: "BBC Business", url: "http://feeds.bbci.co.uk/news/business/rss.xml", group: bbc}
+    kenya:
+      # Nation Africa and Business Daily Africa are BOTH Nation Media Group -- same group,
+      # so they never inflate corroboration as if they were two independent sources.
+      - {name: "Nation Africa", url: "https://nation.africa/kenya/rss.xml", group: nation_media_group}
+      - {name: "Business Daily Africa", url: "https://www.businessdailyafrica.com/bd/rss.xml", group: nation_media_group}
+      - {name: "The Standard", url: "https://www.standardmedia.co.ke/rss/headlines.php", group: standard_group}
+      - {name: "AllAfrica", url: "https://allafrica.com/tools/headlines/rdf/latest/headlines.rdf", group: allafrica}
 
 # --- Self-audit / infra recon (Phase 21) — REPORT ONLY, enrolled targets only ---
 infra:

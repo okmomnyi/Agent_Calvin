@@ -147,6 +147,27 @@ aren't transcribed. To include them:
 WITH_ML=1 docker compose build && docker compose up -d
 ```
 
+### World news sources (Phase 37)
+
+`skills/world_news.py`'s RSS feeds live in `config.yaml`'s `world_news.sources` (Phase
+37b/S6) — add, remove, or re-group a source there, no code change or rebuild needed beyond a
+normal `docker compose up -d --build` to pick up the edited config. Every source carries an
+independence GROUP (shared ownership/editorial control), which is what the breaking-news
+corroboration bar checks against:
+
+| Category | Sources | Independence group(s) |
+|---|---|---|
+| world | BBC World, Al Jazeera, The Guardian, UN News | `bbc`, `aljazeera`, `guardian`, `un` |
+| tech_ai | TechCrunch, BBC Technology, arXiv cs.AI, OpenAI News | `techcrunch`, `bbc`, `arxiv`, `openai` |
+| sports | BBC Sport, ESPN | `bbc`, `espn` |
+| business | BBC Business | `bbc` |
+| kenya | Nation Africa, Business Daily Africa, The Standard, AllAfrica | `nation_media_group` (both Nation titles), `standard_group`, `allafrica` |
+
+Reuters and AP were tried first and dropped: neither has a working free public RSS feed
+(`feeds.reuters.com` is dead; every AP RSS URL tried returns the plain HTML site). Verify any
+new candidate feed actually returns valid RSS (`curl -s <url> | head -c 300`) before adding
+it — a dead feed degrades gracefully per-source, but there's no reason to ship one known dead.
+
 ### Things worth knowing
 
 - **`DATABASE_URL` in `.env` is ignored by the containers**, and must be. It holds a *host*
