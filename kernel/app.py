@@ -21,6 +21,7 @@ from fastapi import (Depends, FastAPI, HTTPException, Request, Response, WebSock
                      WebSocketDisconnect)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from core.config import get_settings
 from core.logging_setup import get_logger
@@ -494,8 +495,18 @@ async def api_command(
     req: CommandRequest,
     session: dict[str, Any] = Depends(require_session),
 ) -> CommandResponse:
-    """Authenticate and route a text command through the intent router and target skill."""
-    intent, result = _handle_command(req.text, use_llm=req.use_llm, channel=req.channel)
+    """Authenticate and route a text command through the intent router and target skill.
+
+    Off the event loop (run_in_threadpool): _handle_command is synchronous and can block for
+    seconds on an LLM call. Without this, that one call stalls uvicorn's single event loop
+    for its whole duration -- every OTHER request (another voice utterance's WS handshake,
+    the dashboard's session poll, a second browser tab) queues up behind it instead of
+    running concurrently. Not hypothetical: this is exactly what "the agent is back to
+    queuing my voice requests" was -- S2's own dashboard traffic (a persistent /ws/voice
+    connection plus a 15s poll) made the same long-standing gap far more likely to bite.
+    """
+    intent, result = await run_in_threadpool(
+        _handle_command, req.text, use_llm=req.use_llm, channel=req.channel)
     text = to_spoken(result.text) if req.spoken else result.text
     _record_turn(req.text, text, req.channel, intent.skill)
     return CommandResponse(
@@ -736,7 +747,11 @@ async def ws_voice(websocket: WebSocket) -> None:
                 await websocket.send_json({"ok": False, "text": "I didn't catch that."})
                 continue
 
-            intent, result = _handle_command(text, channel="voice")
+            # Off the event loop -- see api_command's docstring for why. Here it also means
+            # a slow reply on THIS socket no longer blocks every other open /ws/voice
+            # connection (a second utterance's ticket mint, another browser tab) from being
+            # served in the meantime.
+            intent, result = await run_in_threadpool(_handle_command, text, channel="voice")
             _record_turn(text, result.text, "voice", intent.skill)
             voice = _current_voice()
             await websocket.send_json(
