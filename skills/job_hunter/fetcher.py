@@ -85,21 +85,30 @@ class Fetcher:
         self._last_hit[host] = self._clock()
 
     # ------------------------------------------------------------- get
-    def get(self, url: str, *, accept: str | None = None) -> requests.Response | None:
-        """GET a URL politely. Returns the Response, or None if disallowed/failed."""
+    def get(self, url: str, *, accept: str | None = None,
+            headers: dict[str, str] | None = None) -> requests.Response | None:
+        """GET a URL politely. Returns the Response, or None if disallowed/failed.
+
+        `headers` merges in on top of (never replacing) the User-Agent/Accept this method
+        already sets — added for API keys that must ride as a header rather than a query
+        param (e.g. CoinMarketCap's `X-CMC_PRO_API_KEY`), so a caller never has to bypass
+        this shared rate-limited/robots-aware fetcher just to add one.
+        """
         if not self._allowed(url):
             log.info("robots.txt disallows %s — skipping", url)
             return None
 
         host = urlparse(url).netloc
-        headers = {"User-Agent": self.user_agent}
+        request_headers = {"User-Agent": self.user_agent}
         if accept:
-            headers["Accept"] = accept
+            request_headers["Accept"] = accept
+        if headers:
+            request_headers.update(headers)
 
         for attempt in range(self.max_retries):
             self._throttle(host)
             try:
-                resp = self.session.get(url, headers=headers, timeout=self.timeout)
+                resp = self.session.get(url, headers=request_headers, timeout=self.timeout)
             except requests.RequestException as exc:
                 log.warning("GET %s failed (attempt %d): %s", url, attempt + 1, exc)
                 self._sleep(min(2.0 * (2 ** attempt), 15.0))

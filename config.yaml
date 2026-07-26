@@ -276,6 +276,10 @@ world_news:
 markets:
   briefing_hour: 8            # 30 min after world_news's daily push, not a hard requirement
   briefing_minute: 0
+  # CoinGecko-id -> CoinMarketCap-ticker, ONLY consulted by the CoinMarketCap fallback
+  # (ALPHA_VANTAGE_API_KEY/COINMARKETCAP_API_KEY in .env) when CoinGecko itself returns
+  # nothing. Uncomment/extend if you add a crypto instrument below that needs one.
+  # coinmarketcap_symbols: {bitcoin: BTC, ethereum: ETH, solana: SOL}
   # Absolute % move (24h for crypto, vs previous close for everything else) a quote must
   # clear before it gets news-correlation commentary — a flat market doesn't need the model
   # reaching for a headline to explain nothing.

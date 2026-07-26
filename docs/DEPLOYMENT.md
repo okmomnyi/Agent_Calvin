@@ -290,6 +290,11 @@ SPOTIFY_CLIENT_SECRET=
 SPOTIFY_REFRESH_TOKEN=            # from `manage.py music connect` — env only, never the DB
 # optional — SerpAPI (Google Jobs source). Blank = that source is simply skipped.
 SERPAPI_KEY=
+# optional — markets (Phase 38) FALLBACK sources only. The free/keyless CoinGecko + Yahoo
+# paths stay primary; these are only ever called when that primary source fails. Blank =
+# that fallback is simply skipped (same degrade-to-nothing behavior as SERPAPI_KEY above).
+ALPHA_VANTAGE_API_KEY=             # forex quotes only — see skills/markets.py's docstring
+COINMARKETCAP_API_KEY=             # crypto quotes only
 # server
 AGENTOS_HOST=0.0.0.0
 AGENTOS_PORT=8000

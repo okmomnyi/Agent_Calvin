@@ -26,9 +26,11 @@ class _FakeFetcher:
     def __init__(self, by_url: dict[str, _FakeResponse]) -> None:
         self._by_url = by_url
         self.requested: list[str] = []
+        self.requested_headers: list[dict[str, str] | None] = []
 
-    def get(self, url: str, accept: str | None = None):
+    def get(self, url: str, accept: str | None = None, headers: dict[str, str] | None = None):
         self.requested.append(url)
+        self.requested_headers.append(headers)
         return self._by_url.get(url)
 
 
@@ -438,6 +440,198 @@ def test_fetch_yahoo_chart_series_does_not_re_request_a_fallback_identical_to_th
 
     assert series == [{"t": 1.0, "v": 1.0}]
     assert len(calls) == len(set(calls))  # no URL requested twice
+
+
+# ==================================================== fallback: CoinMarketCap (crypto)
+from skills.markets import (_fetch_alpha_vantage_forex,  # noqa: E402
+                            _fetch_crypto_coinmarketcap)
+
+_CMC_URL = ("https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+           "?symbol=BTC&convert=USD")
+
+
+def _cmc_payload(price: float, change_24h: float | None) -> dict:
+    quote = {"price": price}
+    if change_24h is not None:
+        quote["percent_change_24h"] = change_24h
+    return {"data": {"BTC": {"quote": {"USD": quote}}}}
+
+
+def test_coinmarketcap_fallback_parses_price_and_change():
+    fetcher = _FakeFetcher({_CMC_URL: _FakeResponse(200, _cmc_payload(65000.0, 2.5))})
+    quotes = _fetch_crypto_coinmarketcap(
+        fetcher, [Instrument("Bitcoin", "bitcoin", "coingecko")], api_key="cmc-test-key")
+
+    assert quotes == [Quote(category="crypto", name="Bitcoin", symbol="bitcoin",
+                            price=65000.0, change_pct=2.5)]
+
+
+def test_coinmarketcap_fallback_sends_the_key_as_a_header_not_a_query_param():
+    fetcher = _FakeFetcher({_CMC_URL: _FakeResponse(200, _cmc_payload(65000.0, 2.5))})
+    _fetch_crypto_coinmarketcap(fetcher, [Instrument("Bitcoin", "bitcoin", "coingecko")],
+                               api_key="cmc-test-key")
+
+    assert "cmc-test-key" not in fetcher.requested[0]  # never leaked into the URL/logs
+    assert fetcher.requested_headers[0] == {"X-CMC_PRO_API_KEY": "cmc-test-key"}
+
+
+def test_coinmarketcap_fallback_with_no_api_key_is_a_silent_noop():
+    fetcher = _FakeFetcher({_CMC_URL: _FakeResponse(200, _cmc_payload(65000.0, 2.5))})
+    quotes = _fetch_crypto_coinmarketcap(
+        fetcher, [Instrument("Bitcoin", "bitcoin", "coingecko")], api_key="")
+    assert quotes == []
+    assert fetcher.requested == []  # never even calls out with no key
+
+
+def test_coinmarketcap_fallback_with_no_instruments_is_a_noop():
+    assert _fetch_crypto_coinmarketcap(_FakeFetcher({}), [], api_key="k") == []
+
+
+def test_coinmarketcap_fallback_skips_an_instrument_with_no_known_ticker_mapping():
+    fetcher = _FakeFetcher({})
+    quotes = _fetch_crypto_coinmarketcap(
+        fetcher, [Instrument("Some New Coin", "some-new-coin", "coingecko")], api_key="k")
+    assert quotes == []
+    assert fetcher.requested == []  # no mapping -> never even calls out
+
+
+def test_coinmarketcap_fallback_degrades_to_empty_on_unreachable_endpoint():
+    assert _fetch_crypto_coinmarketcap(
+        _FakeFetcher({}), [Instrument("Bitcoin", "bitcoin", "coingecko")], api_key="k") == []
+
+
+def test_coinmarketcap_fallback_degrades_to_empty_on_malformed_payload():
+    fetcher = _FakeFetcher({_CMC_URL: _FakeResponse(200, {"data": {}})})
+    quotes = _fetch_crypto_coinmarketcap(
+        fetcher, [Instrument("Bitcoin", "bitcoin", "coingecko")], api_key="k")
+    assert quotes == []
+
+
+def test_snapshot_falls_back_to_coinmarketcap_when_coingecko_is_down(monkeypatch):
+    _force_default_instruments(monkeypatch)
+    settings = type("S", (), {
+        "get": staticmethod(lambda *a, default=None, **k: default),
+        "coinmarketcap_api_key": "cmc-test-key", "alpha_vantage_api_key": "",
+    })()
+    monkeypatch.setattr("skills.markets.get_settings", lambda: settings)
+
+    fetcher = _fetcher_for({
+        "KES=X": (129.4, 129.0), "EURUSD=X": (1.10, 1.10), "GBPUSD=X": (1.30, 1.30),
+        "GC=F": (2050.0, 2000.0), "CL=F": (75.0, 75.0),
+        "^GSPC": (5000.0, 5000.0), "^IXIC": (16000.0, 16000.0),
+    }, [])  # no crypto entries registered -> CoinGecko returns []
+    cmc_all_url = ("https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+                  "?symbol=BTC,ETH,SOL&convert=USD")
+    fetcher._by_url[cmc_all_url] = _FakeResponse(
+        200, {"data": {
+            "BTC": {"quote": {"USD": {"price": 64000.0, "percent_change_24h": 1.0}}},
+            "ETH": {"quote": {"USD": {"price": 1800.0, "percent_change_24h": 0.5}}},
+            "SOL": {"quote": {"USD": {"price": 70.0, "percent_change_24h": 0.2}}},
+        }})
+    skill = MarketsSkill(fetcher=fetcher, news_skill=_FakeNews())
+
+    result = skill.snapshot(notify=False)
+
+    assert result.ok
+    assert "crypto" in result.data["categories"]
+
+
+# ==================================================== fallback: Alpha Vantage (forex only)
+_AV_URL_KES = ("https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE"
+              "&from_currency=USD&to_currency=KES&apikey=av-test-key")
+
+
+def test_alpha_vantage_fallback_parses_a_bare_usd_pair():
+    inst = Instrument("USD/KES", "KES=X", "yahoo")
+    fetcher = _FakeFetcher({_AV_URL_KES: _FakeResponse(
+        200, {"Realtime Currency Exchange Rate": {"5. Exchange Rate": "129.55"}})})
+
+    q = _fetch_alpha_vantage_forex(fetcher, inst, api_key="av-test-key")
+
+    assert q == Quote(category="forex", name="USD/KES", symbol="KES=X",
+                      price=129.55, change_pct=None)
+
+
+def test_alpha_vantage_fallback_parses_an_explicit_six_letter_pair():
+    inst = Instrument("USD/EUR", "EURUSD=X", "yahoo")
+    url = ("https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE"
+          "&from_currency=EUR&to_currency=USD&apikey=av-test-key")
+    fetcher = _FakeFetcher({url: _FakeResponse(
+        200, {"Realtime Currency Exchange Rate": {"5. Exchange Rate": "1.10"}})})
+
+    q = _fetch_alpha_vantage_forex(fetcher, inst, api_key="av-test-key")
+
+    assert q is not None
+    assert q.price == 1.10
+
+
+def test_alpha_vantage_fallback_never_fabricates_a_change_pct():
+    """The realtime endpoint carries no % change figure at all -- must stay None, never
+    a guessed/interpolated value."""
+    inst = Instrument("USD/KES", "KES=X", "yahoo")
+    fetcher = _FakeFetcher({_AV_URL_KES: _FakeResponse(
+        200, {"Realtime Currency Exchange Rate": {"5. Exchange Rate": "129.55"}})})
+    q = _fetch_alpha_vantage_forex(fetcher, inst, api_key="av-test-key")
+    assert q.change_pct is None
+
+
+def test_alpha_vantage_fallback_with_no_api_key_is_a_silent_noop():
+    inst = Instrument("USD/KES", "KES=X", "yahoo")
+    fetcher = _FakeFetcher({_AV_URL_KES: _FakeResponse(
+        200, {"Realtime Currency Exchange Rate": {"5. Exchange Rate": "129.55"}})})
+    assert _fetch_alpha_vantage_forex(fetcher, inst, api_key="") is None
+    assert fetcher.requested == []
+
+
+def test_alpha_vantage_fallback_is_never_attempted_for_commodities_or_stocks():
+    """No honest mapping exists for gold/oil (no spot function) or an index (an ETF
+    proxy would be a DIFFERENT number under the same label) -- must refuse, not guess."""
+    gold = Instrument("Gold", "GC=F", "yahoo")
+    sp500 = Instrument("S&P 500", "^GSPC", "yahoo")
+    fetcher = _FakeFetcher({})
+
+    assert _fetch_alpha_vantage_forex(fetcher, gold, api_key="k") is None
+    assert _fetch_alpha_vantage_forex(fetcher, sp500, api_key="k") is None
+    assert fetcher.requested == []
+
+
+def test_alpha_vantage_fallback_degrades_to_none_on_unreachable_endpoint():
+    inst = Instrument("USD/KES", "KES=X", "yahoo")
+    assert _fetch_alpha_vantage_forex(_FakeFetcher({}), inst, api_key="k") is None
+
+
+def test_alpha_vantage_fallback_degrades_to_none_on_malformed_payload():
+    inst = Instrument("USD/KES", "KES=X", "yahoo")
+    fetcher = _FakeFetcher({_AV_URL_KES: _FakeResponse(200, {"unexpected": "shape"})})
+    assert _fetch_alpha_vantage_forex(fetcher, inst, api_key="av-test-key") is None
+
+
+def test_snapshot_falls_back_to_alpha_vantage_only_for_the_failing_forex_instrument(monkeypatch):
+    """Yahoo fails for ONE forex pair; Alpha Vantage covers just that one, everything else
+    (including the other forex pairs that Yahoo answered fine) is untouched."""
+    _force_default_instruments(monkeypatch)
+    settings = type("S", (), {
+        "get": staticmethod(lambda *a, default=None, **k: default),
+        "coinmarketcap_api_key": "", "alpha_vantage_api_key": "av-test-key",
+    })()
+    monkeypatch.setattr("skills.markets.get_settings", lambda: settings)
+
+    fetcher = _fetcher_for({
+        "bitcoin": (64000.0, 1.0), "ethereum": (1800.0, 0.5), "solana": (70.0, 0.2),
+        "EURUSD=X": (1.10, 1.10), "GBPUSD=X": (1.30, 1.30),
+        "GC=F": (2050.0, 2000.0), "CL=F": (75.0, 75.0),
+        "^GSPC": (5000.0, 5000.0), "^IXIC": (16000.0, 16000.0),
+        # KES=X deliberately NOT registered -> Yahoo fetch returns None for it
+    }, DEFAULT_INSTRUMENTS["crypto"])
+    fetcher._by_url[_AV_URL_KES] = _FakeResponse(
+        200, {"Realtime Currency Exchange Rate": {"5. Exchange Rate": "129.55"}})
+    skill = MarketsSkill(fetcher=fetcher, news_skill=_FakeNews())
+
+    result = skill.snapshot(notify=False)
+
+    assert result.ok
+    assert result.data["quote_count"] == 10  # all instruments present, KES=X via the fallback
+    assert "129.55" in result.text or "129.6" in result.text  # rendered with the AV rate
 
 
 # ------------------------------------------------------------------ asset resolution

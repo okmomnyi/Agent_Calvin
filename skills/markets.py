@@ -30,6 +30,25 @@ by tools (CoinGecko publishes this exact endpoint as its API; Yahoo's chart endp
 the one every finance library uses), not article/content pages — so respect_robots=False
 is scoped ONLY to these two price endpoints, never to an article-body or HTML page fetch.
 
+Fallback keys (added after the two free primaries proved unreliable in exactly one way
+each — Yahoo goes empty when a market's session is closed, see the closed-market fallback
+below; CoinGecko's public endpoint has no key and no rate-limit guarantee at all):
+  - CoinMarketCap `/v1/cryptocurrency/quotes/latest` — crypto only, tried ONLY when
+    CoinGecko itself returns nothing. Requires `COINMARKETCAP_API_KEY`; a bare-symbol
+    alias table (`markets.coinmarketcap_symbols` in config.yaml) bridges CoinGecko's
+    lowercase ids to CMC's ticker symbols for the configured instruments.
+  - Alpha Vantage `CURRENCY_EXCHANGE_RATE` — forex only, tried ONLY when Yahoo's forex
+    quote fails. Requires `ALPHA_VANTAGE_API_KEY`. Deliberately NOT extended to
+    commodities or stock indices: Alpha Vantage has no gold-spot function at all, and
+    approximating an INDEX via a tracking ETF (SPY for the S&P 500, say) would silently
+    substitute a different, related-but-not-identical number under the same label — the
+    exact class of quiet inaccuracy this codebase exists to avoid (§0 P5). Alpha Vantage's
+    free tier is also severely rate-limited (historically ~25 requests/day), which a
+    blanket fallback across every instrument would burn through in a single briefing.
+  Neither key touches the CHART series path (`_fetch_*_chart_series`) — only the
+  point-in-time quote. The closed-market chart fallback (wider Yahoo daily-bar windows)
+  already covers the observed gap there without needing a second provider.
+
 News correlation: reuses WorldNewsSkill.recent_headlines() (business + world categories)
 rather than duplicating RSS-parsing logic — one set of feeds, one place that owns "what's
 in the news right now." The single LLM call that writes the correlation commentary is
@@ -43,6 +62,7 @@ prompt — the constraint should be visible in the product, not only enforced up
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple
@@ -320,6 +340,92 @@ def _fetch_yahoo_one(fetcher: Any, inst: Instrument, category: str) -> Quote | N
                  price=price, change_pct=change_pct)
 
 
+# --------------------------------------------------------------------- fallback: CoinMarketCap
+# Tried ONLY when CoinGecko itself came back with nothing -- see module docstring.
+_DEFAULT_COINGECKO_TO_CMC_SYMBOL: dict[str, str] = {
+    "bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL",
+}
+
+
+def _coingecko_to_cmc_symbols() -> dict[str, str]:
+    """CoinGecko's lowercase id -> CoinMarketCap's ticker symbol. Config-overridable
+    (`markets.coinmarketcap_symbols`) for the same reason instruments themselves are —
+    a custom-configured crypto instrument needs its own mapping to reach this fallback."""
+    raw = get_settings().get("markets", "coinmarketcap_symbols", default=None)
+    if not raw:
+        return _DEFAULT_COINGECKO_TO_CMC_SYMBOL
+    return dict(raw)
+
+
+def _fetch_crypto_coinmarketcap(fetcher: Any, instruments: list[Instrument],
+                                api_key: str) -> list[Quote]:
+    """Same shape as `_fetch_crypto` (one batched call), a different provider. Yields []
+    with no api_key, no instruments, or no known ticker mapping — this is a fallback, and
+    "nothing to fall back to" must degrade silently, never look like an error."""
+    if not api_key or not instruments:
+        return []
+    symbol_map = _coingecko_to_cmc_symbols()
+    by_cmc_symbol = {symbol_map[i.symbol]: i for i in instruments if i.symbol in symbol_map}
+    if not by_cmc_symbol:
+        return []
+    url = ("https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+          f"?symbol={','.join(by_cmc_symbol)}&convert=USD")
+    resp = fetcher.get(url, accept="application/json", headers={"X-CMC_PRO_API_KEY": api_key})
+    if resp is None or resp.status_code != 200:
+        log.warning("markets: CoinMarketCap fallback unreachable")
+        return []
+    try:
+        data = resp.json()["data"]
+    except (ValueError, KeyError, TypeError):
+        log.warning("markets: CoinMarketCap fallback returned an unexpected shape")
+        return []
+    out: list[Quote] = []
+    for cmc_symbol, inst in by_cmc_symbol.items():
+        row = data.get(cmc_symbol)
+        try:
+            quote = row["quote"]["USD"]
+            price = float(quote["price"])
+        except (KeyError, TypeError, ValueError):
+            log.warning("markets: no CoinMarketCap data for %s, skipping", inst.name)
+            continue
+        out.append(Quote(category="crypto", name=inst.name, symbol=inst.symbol,
+                         price=price, change_pct=quote.get("percent_change_24h")))
+    return out
+
+
+# --------------------------------------------------------------------- fallback: Alpha Vantage (forex only)
+def _fetch_alpha_vantage_forex(fetcher: Any, inst: Instrument, api_key: str) -> Quote | None:
+    """Tried ONLY when Yahoo's own forex quote fails. Deliberately NOT extended to
+    commodities/stocks — see the module docstring for why neither has an honest 1:1
+    mapping. Symbol translation is pattern-driven, never a per-instrument-name lookup:
+    Yahoo's forex convention is either a bare 3-letter code meaning "USD to that currency"
+    (KES=X) or an explicit 6-letter pair (EURUSD=X, GBPUSD=X)."""
+    if not api_key:
+        return None
+    pair = re.match(r"^([A-Z]{3})([A-Z]{3})=X$", inst.symbol)
+    bare = re.match(r"^([A-Z]{3})=X$", inst.symbol)
+    if pair:
+        from_ccy, to_ccy = pair.group(1), pair.group(2)
+    elif bare:
+        from_ccy, to_ccy = "USD", bare.group(1)
+    else:
+        return None
+    url = ("https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE"
+          f"&from_currency={from_ccy}&to_currency={to_ccy}&apikey={api_key}")
+    resp = fetcher.get(url, accept="application/json")
+    if resp is None or resp.status_code != 200:
+        log.warning("markets: Alpha Vantage fallback unreachable for %s", inst.name)
+        return None
+    try:
+        rate = float(resp.json()["Realtime Currency Exchange Rate"]["5. Exchange Rate"])
+    except (ValueError, KeyError, TypeError):
+        log.warning("markets: Alpha Vantage fallback returned an unexpected shape for %s", inst.name)
+        return None
+    # Alpha Vantage's realtime endpoint carries no % change figure at all — never
+    # fabricate one; the quote is honestly price-only when this fallback is what answered.
+    return Quote(category="forex", name=inst.name, symbol=inst.symbol, price=rate, change_pct=None)
+
+
 class MarketsSkill(BaseSkill):
     name = "markets"
 
@@ -380,17 +486,41 @@ class MarketsSkill(BaseSkill):
     def _fetch_all(self) -> list[Quote]:
         instruments = _instruments()
         quotes: list[Quote] = []
+        settings = get_settings()
+
+        crypto_instruments = instruments.get("crypto", [])
+        crypto: list[Quote] = []
         try:
-            quotes.extend(_fetch_crypto(self.fetcher, instruments.get("crypto", [])))
+            crypto = _fetch_crypto(self.fetcher, crypto_instruments)
         except Exception:  # noqa: BLE001 - one category's failure must not block the rest
             log.warning("markets: crypto fetch failed", exc_info=True)
+        if not crypto and crypto_instruments:
+            # CoinGecko itself came back empty (down, or rate-limited without a key) —
+            # try the keyed fallback before giving up on crypto for this run entirely.
+            try:
+                crypto = _fetch_crypto_coinmarketcap(
+                    self.fetcher, crypto_instruments, settings.coinmarketcap_api_key)
+            except Exception:  # noqa: BLE001 - the fallback failing must not block the rest
+                log.warning("markets: CoinMarketCap fallback failed", exc_info=True)
+        quotes.extend(crypto)
+
         for category in ("forex", "commodities", "stocks"):
             for inst in instruments.get(category, []):
+                q: Quote | None = None
                 try:
                     q = _fetch_yahoo_one(self.fetcher, inst, category)
                 except Exception:  # noqa: BLE001 - one instrument's failure must not block the rest
                     log.warning("markets: Yahoo fetch failed for %s", inst.name, exc_info=True)
-                    q = None
+                if q is None and category == "forex":
+                    # Yahoo failed on a forex pair specifically — the one category with an
+                    # honest 1:1 Alpha Vantage mapping (see module docstring for why
+                    # commodities/stocks don't get this fallback at all).
+                    try:
+                        q = _fetch_alpha_vantage_forex(
+                            self.fetcher, inst, settings.alpha_vantage_api_key)
+                    except Exception:  # noqa: BLE001 - the fallback failing must not block the rest
+                        log.warning("markets: Alpha Vantage fallback failed for %s", inst.name,
+                                   exc_info=True)
                 if q is not None:
                     quotes.append(q)
         return quotes

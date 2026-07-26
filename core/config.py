@@ -44,6 +44,12 @@ class Settings:
     telegram_bot_token: str
     telegram_chat_id: str
     serpapi_key: str
+    # Fallback-only market data keys (Phase 38 follow-up) -- the free/keyless CoinGecko +
+    # Yahoo paths stay primary; these only get called when that primary source fails. See
+    # skills/markets.py's module docstring for exactly what each covers and why neither is
+    # given a blanket fallback across every instrument category.
+    alpha_vantage_api_key: str
+    coinmarketcap_api_key: str
 
     # server
     host: str
@@ -127,6 +133,8 @@ def get_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         serpapi_key=os.getenv("SERPAPI_KEY", ""),
+        alpha_vantage_api_key=os.getenv("ALPHA_VANTAGE_API_KEY", ""),
+        coinmarketcap_api_key=os.getenv("COINMARKETCAP_API_KEY", ""),
         host=os.getenv("AGENTOS_HOST", "0.0.0.0"),
         port=int(os.getenv("AGENTOS_PORT", "8000")),
         tz=os.getenv("AGENTOS_TZ", raw.get("timezone", "Africa/Nairobi")),
