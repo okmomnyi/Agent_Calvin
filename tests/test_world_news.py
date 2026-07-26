@@ -6,7 +6,7 @@ from __future__ import annotations
 import time
 
 from skills.world_news import (DEFAULT_FEEDS, Cluster, Headline, Source, WorldNewsSkill,
-                               _cluster_headlines, _feeds, _parse_rss)
+                               _cluster_headlines, _extract_image, _feeds, _parse_rss)
 
 _RSS_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
@@ -848,3 +848,206 @@ def test_fetch_category_uses_the_live_config_driven_source_list(monkeypatch):
 
     assert [h.title for h in headlines] == ["Custom story"]
     assert headlines[0].group == "testgroup"
+
+
+# ==================================================== stage widget images (Phase 38)
+_ITEM_WITH_MEDIA_THUMBNAIL = """<item>
+<title>Story A</title><link>https://x.test/a</link><pubDate>{pub}</pubDate>
+<media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="https://img.test/a.jpg"/>
+</item>"""
+
+_ITEM_WITH_MEDIA_CONTENT_IMAGE = """<item>
+<title>Story B</title><link>https://x.test/b</link><pubDate>{pub}</pubDate>
+<media:content xmlns:media="http://search.yahoo.com/mrss/" url="https://img.test/b.jpg" medium="image"/>
+</item>"""
+
+_ITEM_WITH_IMAGE_ENCLOSURE = """<item>
+<title>Story C</title><link>https://x.test/c</link><pubDate>{pub}</pubDate>
+<enclosure url="https://img.test/c.jpg" type="image/jpeg"/>
+</item>"""
+
+_ITEM_WITH_NON_IMAGE_ENCLOSURE = """<item>
+<title>Story D</title><link>https://x.test/d</link><pubDate>{pub}</pubDate>
+<enclosure url="https://cdn.test/d.mp3" type="audio/mpeg"/>
+</item>"""
+
+_ITEM_WITH_NO_IMAGE = """<item>
+<title>Story E</title><link>https://x.test/e</link><pubDate>{pub}</pubDate>
+</item>"""
+
+
+def _rss_raw(item_xml: str) -> str:
+    return _RSS_TEMPLATE.format(items=item_xml.format(pub=_rfc822(time.time())))
+
+
+def test_extract_image_prefers_media_thumbnail():
+    headlines = _parse_rss(_rss_raw(_ITEM_WITH_MEDIA_THUMBNAIL), "Fake", "world")
+    assert headlines[0].image == "https://img.test/a.jpg"
+
+
+def test_extract_image_reads_media_content_with_medium_image():
+    headlines = _parse_rss(_rss_raw(_ITEM_WITH_MEDIA_CONTENT_IMAGE), "Fake", "world")
+    assert headlines[0].image == "https://img.test/b.jpg"
+
+
+def test_extract_image_reads_an_image_enclosure():
+    headlines = _parse_rss(_rss_raw(_ITEM_WITH_IMAGE_ENCLOSURE), "Fake", "world")
+    assert headlines[0].image == "https://img.test/c.jpg"
+
+
+def test_extract_image_ignores_a_non_image_enclosure():
+    headlines = _parse_rss(_rss_raw(_ITEM_WITH_NON_IMAGE_ENCLOSURE), "Fake", "world")
+    assert headlines[0].image is None
+
+
+def test_extract_image_is_none_when_the_item_has_no_media_at_all():
+    headlines = _parse_rss(_rss_raw(_ITEM_WITH_NO_IMAGE), "Fake", "world")
+    assert headlines[0].image is None
+
+
+def test_plain_rss_items_still_parse_with_no_image_field_present():
+    """The existing (non-image) test fixtures elsewhere in this file must keep working --
+    image is additive, never required."""
+    xml = _rss([("Plain", "https://x.test/plain", _rfc822(time.time()))])
+    headlines = _parse_rss(xml, "Fake", "world")
+    assert headlines[0].image is None
+
+
+# ==================================================== display() stage widget (Phase 38)
+def test_resolve_topic_matches_an_exact_category(mem):
+    skill = WorldNewsSkill(memory=mem)
+    assert skill._resolve_topic("kenya") == "kenya"
+
+
+def test_resolve_topic_matches_via_alias(mem):
+    skill = WorldNewsSkill(memory=mem)
+    assert skill._resolve_topic("what's happening with AI") == "tech_ai"
+    assert skill._resolve_topic("the conflict") == "world"
+
+
+def test_resolve_topic_returns_none_for_an_unresolvable_topic(mem):
+    skill = WorldNewsSkill(memory=mem)
+    assert skill._resolve_topic("underwater basket weaving") is None
+
+
+def test_resolve_topic_defaults_to_top_of_interest_order_when_blank(mem):
+    skill = WorldNewsSkill(memory=mem)
+    assert skill._resolve_topic("") == "world"
+
+
+def test_display_returns_none_for_an_unresolvable_topic(mem):
+    skill = WorldNewsSkill(memory=mem, fetcher=_empty_fetcher())
+    assert skill.display("underwater basket weaving") is None
+
+
+def test_display_returns_none_when_the_category_has_nothing_fresh(mem):
+    skill = WorldNewsSkill(memory=mem, fetcher=_empty_fetcher())
+    assert skill.display("kenya") is None
+
+
+def test_display_returns_none_when_fetch_raises(mem, monkeypatch):
+    skill = WorldNewsSkill(memory=mem, fetcher=_empty_fetcher())
+    monkeypatch.setattr(skill, "_fetch_category",
+                        lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert skill.display("world") is None
+
+
+def test_display_returns_articles_widget_with_feed_image(mem):
+    now = 2_000_000.0
+    urls = DEFAULT_FEEDS["world"]
+    fetcher = _FakeFetcher({urls[0][1]: _FakeResponse(200, _rss_raw(_ITEM_WITH_MEDIA_THUMBNAIL))})
+    skill = WorldNewsSkill(memory=mem, fetcher=fetcher, clock=lambda: now)
+
+    widget = skill.display("world")
+
+    assert widget is not None
+    assert widget.type == "articles"
+    assert widget.items[0]["image"] == "https://img.test/a.jpg"
+    assert widget.items[0]["title"] == "Story A"
+
+
+def test_display_falls_back_to_none_image_when_the_feed_item_has_no_thumbnail(mem):
+    now = 2_000_000.0
+    urls = DEFAULT_FEEDS["world"]
+    fetcher = _FakeFetcher({urls[0][1]: _FakeResponse(200, _rss_raw(_ITEM_WITH_NO_IMAGE))})
+    skill = WorldNewsSkill(memory=mem, fetcher=fetcher, clock=lambda: now)
+
+    widget = skill.display("world")
+
+    assert widget is not None
+    assert widget.items[0]["image"] is None
+
+
+def test_display_caps_item_count(mem):
+    now = 2_000_000.0
+    urls = DEFAULT_FEEDS["world"]
+    # Distinct titles so the (hashing, test-pinned) embedder doesn't cluster them together.
+    items = [(f"Distinct story {i}", f"https://x.test/{i}", _rfc822(now)) for i in range(10)]
+    fetcher = _FakeFetcher({urls[0][1]: _FakeResponse(200, _rss(items))})
+    skill = WorldNewsSkill(memory=mem, fetcher=fetcher, clock=lambda: now)
+
+    widget = skill.display("world", max_items=3)
+
+    assert widget is not None
+    assert len(widget.items) == 3
+
+
+# ==================================================== breaking-news stage catalyst (Phase 38)
+class _FakeStageBus:
+    def __init__(self) -> None:
+        self.pushed = []
+
+    def push(self, directive) -> None:
+        self.pushed.append(directive)
+
+
+def test_check_breaking_pushes_an_alert_directive_when_it_fires(fake_llm, mem, monkeypatch):
+    now = 2_000_000.0
+    bus = _FakeStageBus()
+    monkeypatch.setattr("skills.world_news.get_stage_bus", lambda: bus)
+    fetcher = _world_fetcher_with_sources(now, [0, 1, 2])
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda t: True)
+
+    result = skill.check_breaking()
+
+    assert result.data["fired"] is True
+    assert len(bus.pushed) == 1
+    directive = bus.pushed[0]
+    assert directive.accent == "alert"
+    assert directive.transition == "bloom"
+    types = [w.type for w in directive.widgets]
+    assert "articles" in types and "fact" in types
+
+
+def test_check_breaking_does_not_push_when_it_does_not_fire(fake_llm, mem, monkeypatch):
+    now = 2_000_000.0
+    bus = _FakeStageBus()
+    monkeypatch.setattr("skills.world_news.get_stage_bus", lambda: bus)
+    fetcher = _world_fetcher_with_sources(now, [0])  # single source -> never fires
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda t: True)
+
+    result = skill.check_breaking()
+
+    assert result.data["fired"] is False
+    assert bus.pushed == []
+
+
+def test_check_breaking_survives_a_broken_stage_bus(fake_llm, mem, monkeypatch):
+    """A catalyst push failing (e.g. the bus itself misbehaves) must never take down the
+    breaking-news poll or hide that it fired."""
+    now = 2_000_000.0
+
+    class _BoomBus:
+        def push(self, directive):
+            raise RuntimeError("bus exploded")
+
+    monkeypatch.setattr("skills.world_news.get_stage_bus", lambda: _BoomBus())
+    fetcher = _world_fetcher_with_sources(now, [0, 1, 2])
+    skill = WorldNewsSkill(llm=fake_llm, fetcher=fetcher, memory=mem, clock=lambda: now,
+                           notify=lambda t: True)
+
+    result = skill.check_breaking()
+
+    assert result.data["fired"] is True

@@ -1,4 +1,5 @@
 import { api } from "./transport";
+import type { StageDirective } from "./stageTypes";
 
 export type SocketStatus = "connecting" | "open" | "closed";
 
@@ -10,6 +11,11 @@ export interface VoiceMessage {
   voice_id?: string;
   rate?: string;
   actions?: unknown[];
+  // Phase 38: present only when core/presenter.py built one for this turn (or a catalyst
+  // pushed one between turns) -- absent, not null, when nothing should change on the
+  // stage. See kernel/app.py's ws_voice docstring on why the key is omitted rather than
+  // sent as `directive: null`.
+  directive?: StageDirective;
 }
 
 interface VoiceSocketHandlers {

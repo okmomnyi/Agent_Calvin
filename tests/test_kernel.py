@@ -279,6 +279,44 @@ def test_ws_handshake_with_a_valid_ticket_is_accepted(mem, monkeypatch):
         assert reply["text"] == "accepted"
 
 
+def test_ws_voice_omits_the_directive_key_for_an_unrelated_skill(mem, monkeypatch):
+    """core/presenter.py returns None for a skill it doesn't map -- kernel/app.py must
+    then send no `directive` key at all, so an older client sees nothing different, and a
+    newer Director knows not to touch whatever the stage is already showing."""
+    app_module = importlib.import_module("kernel.app")
+    client = _logged_in_client(mem, monkeypatch, app_module)
+
+    ticket = client.post("/api/auth/ws-ticket").json()["ticket"]
+    with client.websocket_connect(f"/ws/voice?ticket={ticket}") as ws:
+        ws.send_json({"text": "hello"})
+        reply = ws.receive_json()
+        assert reply["ok"] is True
+        assert "directive" not in reply
+
+
+def test_ws_voice_carries_a_stage_directive_for_the_stage_skill(mem, monkeypatch):
+    app_module = importlib.import_module("kernel.app")
+    monkeypatch.setattr("core.auth.get_memory", lambda: mem)
+    monkeypatch.setattr(
+        app_module.registry, "handle_command",
+        lambda text, use_llm=True: (
+            Intent(name="stage_idle", skill="stage", action="idle", via="keyword"),
+            CommandResult(text="Back to idle.", data={"stage_kind": "idle"})))
+    from core.auth import get_store
+
+    get_store(mem).set_password("correct horse battery staple")
+    client = TestClient(app_module.app, base_url="https://testserver")
+    client.post("/api/auth/password", json={"password": "correct horse battery staple"})
+
+    ticket = client.post("/api/auth/ws-ticket").json()["ticket"]
+    with client.websocket_connect(f"/ws/voice?ticket={ticket}") as ws:
+        ws.send_json({"text": "back to idle"})
+        reply = ws.receive_json()
+        assert reply["directive"]["focus"] is None
+        assert reply["directive"]["transition"] == "settle"
+        assert reply["directive"]["widgets"] == []
+
+
 def test_ws_ticket_is_single_use(mem, monkeypatch):
     """The other half of the fix: replaying the URL (browser history, a proxy log) must
     not work a second time."""

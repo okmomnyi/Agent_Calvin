@@ -68,6 +68,7 @@ from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
 from core.notify import send_telegram
 from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
+from core.stage import ArticlesWidget, FactWidget, StageDirective, get_stage_bus
 
 log = get_logger("skills.world_news")
 
@@ -180,6 +181,20 @@ _DELIVERED_RETENTION_DAYS_DEFAULT = 3
 _INTEREST_ORDER_DEFAULT = ["world", "tech_ai", "business", "kenya", "sports"]
 _FRONT_PAGE_SIZE = 3
 
+# Phase 38: spoken/typed topic words -> this skill's own category keys, so "show me what's
+# happening with AI" or "the conflict" resolves without a new taxonomy. Deliberately a small,
+# literal alias table (not fuzzy/LLM matching) -- display() must stay fast and deterministic
+# since it can run on every stage subject change, and an unresolvable topic should say so
+# (return None) rather than guess.
+_TOPIC_ALIASES = {
+    "conflict": "world", "war": "world", "geopolitics": "world", "global": "world",
+    "ai": "tech_ai", "tech": "tech_ai", "technology": "tech_ai",
+    "sport": "sports",
+    "markets": "business", "economy": "business", "economic": "business",
+    "kenyan": "kenya",
+}
+_MAX_DISPLAY_ITEMS = 6
+
 # Breaking news (Phase 37b/S5) -- deliberately conservative defaults. This is a RARE, high-bar
 # exception to pull-only delivery, not a second firehose (AGENTOS_BUG_LIST.md #17's own lesson:
 # an unbounded stream drowns the person it's meant to help). Corroboration-gated, never
@@ -202,6 +217,11 @@ class Headline:
     # "nation_media_group". Defaults to "" for any caller that doesn't set it (tests
     # constructing a Headline directly); production always stamps a real group from _feeds().
     group: str = ""
+    # Feed thumbnail URL (Phase 38), or None. NEVER populated by an image search — only
+    # what the RSS item itself carries (media:thumbnail / media:content / enclosure). A
+    # feed with no image for this item leaves this None; the stage's typed fallback card
+    # handles that, never a broken <img> and never a substituted picture from anywhere else.
+    image: str | None = None
 
 
 @dataclass
@@ -274,6 +294,34 @@ def _cluster_headlines(headlines: list[Headline], embedder: Any, threshold: floa
     return clusters
 
 
+def _local_tag(tag: str) -> str:
+    """Strip ElementTree's `{namespace-uri}` prefix so a tag can be matched by its bare
+    name regardless of which namespace prefix (or none) the feed declared it under."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _extract_image(item: ET.Element) -> str | None:
+    """A feed thumbnail URL, straight from the RSS item — media:thumbnail, an image
+    media:content, or an image enclosure, in that preference order. Returns None if the
+    item carries none of these; this is the ONLY source of `Headline.image` anywhere in
+    this codebase (Phase 38's hard content-safety line: never an image search, ever)."""
+    for child in item.iter():
+        if child is item:
+            continue
+        local = _local_tag(child.tag)
+        url = (child.get("url") or "").strip()
+        if not url:
+            continue
+        if local == "thumbnail":
+            return url
+        if local == "content" and (child.get("medium") == "image"
+                                   or (child.get("type") or "").startswith("image/")):
+            return url
+        if local == "enclosure" and (child.get("type") or "").startswith("image/"):
+            return url
+    return None
+
+
 def _parse_rss(xml_text: str, source: str, category: str, group: str = "") -> list[Headline]:
     """RSS 2.0 <item> parsing via stdlib ElementTree — no new dependency for something this
     simple. Malformed XML degrades to an empty list rather than raising."""
@@ -296,7 +344,8 @@ def _parse_rss(xml_text: str, source: str, category: str, group: str = "") -> li
             except (ValueError, TypeError):
                 published_at = None
         out.append(Headline(category=category, source=source, title=title, url=link,
-                            published_at=published_at, group=group))
+                            published_at=published_at, group=group,
+                            image=_extract_image(item)))
     return out
 
 
@@ -382,6 +431,69 @@ class WorldNewsSkill(BaseSkill):
         reuse this skill's own feeds/freshness-window logic instead of duplicating RSS
         fetching -- one place owns "what's in the news right now"."""
         return self._fetch_category(category)
+
+    # ------------------------------------------------------------- stage widget (Phase 38)
+    def _resolve_topic(self, topic: str) -> str | None:
+        """A spoken/typed topic -> one of this skill's own category keys, or None if it
+        can't be resolved -- the caller must omit the widget rather than guess a category.
+        Blank topic defaults to the top of the configured interest order (the same "what
+        matters most" ranking S4's front page uses)."""
+        feeds = _feeds()
+        t = (topic or "").strip().lower()
+        if not t:
+            order = get_settings().get("world_news", "interest_order",
+                                       default=_INTEREST_ORDER_DEFAULT)
+            return order[0] if order else None
+        if t in feeds:
+            return t
+        for alias, category in _TOPIC_ALIASES.items():
+            if alias in t and category in feeds:
+                return category
+        return None
+
+    @staticmethod
+    def _cluster_image(cluster: Cluster) -> str | None:
+        for h in cluster.members:
+            if h.image:
+                return h.image
+        return None
+
+    def _cluster_items(self, clusters: list[Cluster], max_items: int) -> list[dict[str, Any]]:
+        items = []
+        for cluster in clusters[:max_items]:
+            lead = cluster.members[0]
+            items.append({
+                "title": lead.title,
+                "source": ", ".join(cluster.sources),
+                "url": lead.url,
+                "published": lead.published_at if lead.published_at is not None else self._now(),
+                "image": self._cluster_image(cluster),
+            })
+        return items
+
+    def display(self, topic: str = "", max_items: int = _MAX_DISPLAY_ITEMS,
+                **_: Any) -> ArticlesWidget | None:
+        """Presenter-facing (core/presenter.py): an articles widget for `topic`, built from
+        this skill's own fetch+cluster pipeline -- no LLM call (display() must be fast
+        enough to run on every stage subject change) and no new data source. Returns None
+        -- never a fabricated/empty card -- when the topic doesn't resolve to a known
+        category or nothing was fetchable; the presenter omits the widget entirely, per
+        Phase 38's "un-buildable widget -> omitted, never faked" rule."""
+        category = self._resolve_topic(topic)
+        if category is None:
+            return None
+        try:
+            headlines = self._fetch_category(category)
+        except Exception:  # noqa: BLE001 - display() degrades to "omit", never raises
+            log.warning("world_news: display() fetch failed for %s", category, exc_info=True)
+            return None
+        if not headlines:
+            return None
+        clusters = self._cluster(headlines)
+        items = self._cluster_items(clusters, max_items)
+        if not items:
+            return None
+        return ArticlesWidget(topic=CATEGORY_LABEL.get(category, category), items=items)
 
     # ------------------------------------------------------------- fetch
     def _fetch_category(self, category: str) -> list[Headline]:
@@ -579,9 +691,35 @@ class WorldNewsSkill(BaseSkill):
             self._record_breaking_pushed(category, [h.url for h in top.members])
         except Exception:  # noqa: BLE001 - the push already happened; recording failure must not raise
             log.warning("world_news: recording the breaking push failed", exc_info=True)
+        try:
+            self._push_breaking_directive(category, top)
+        except Exception:  # noqa: BLE001 - a stage push failing must never break the poll
+            log.warning("world_news: pushing the breaking stage directive failed", exc_info=True)
         return CommandResult(text=text, ok=True,
                              data={"fired": True, "category": category,
                                    "corroboration": top.corroboration})
+
+    def _push_breaking_directive(self, category: str, cluster: Cluster) -> None:
+        """Phase 38's ONE catalyst path: breaking news is the sole event allowed to
+        re-choreograph the stage without Calvin having said anything (the corroboration bar
+        above is what keeps this rare, per AGENTOS_BUG_LIST.md #17's lesson that an
+        ungated stream drowns the person it's meant to help). accent='alert' (amber) is
+        reserved for exactly this case. A dead/absent stage bus is a silent no-op -- see
+        core/stage.py's StageBus.push()."""
+        items = self._cluster_items([cluster], max_items=_MAX_DISPLAY_ITEMS)
+        widget = ArticlesWidget(topic=CATEGORY_LABEL.get(category, category), items=items)
+        fact = FactWidget(
+            title="CORROBORATION", stat=str(cluster.corroboration),
+            sub="independent source(s) reporting this inside the last "
+                f"{cluster.publish_span_hours:.1f}h — a corroboration bar, not a forecast.",
+            sources=cluster.sources,
+        )
+        get_stage_bus().push(StageDirective(
+            focus=CATEGORY_LABEL.get(category, category), transition="bloom", accent="alert",
+            headline=f"Corroborated by {cluster.corroboration} independent source(s): "
+                     f"{', '.join(cluster.sources)}",
+            widgets=[fact, widget],
+        ))
 
     # ------------------------------------------------------------- synthesis
     def _synthesize(self, clusters: list[Cluster]) -> str:

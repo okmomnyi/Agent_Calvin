@@ -285,3 +285,44 @@ def test_email_deletion_still_works():
     for text in ["clear my emails", "delete all linkedin emails", "get rid of the okx emails"]:
         intent = IntentRouter(llm=None).route(text, use_llm=False)
         assert (intent.skill, intent.action) == ("email_agent", "trash"), text
+
+
+# ==================================================== stage voice-steering (Phase 38)
+STAGE_KEYWORDS = [
+    ("show oil", "stage", "focus"),
+    ("show bitcoin", "stage", "focus"),
+    ("pull up gold", "stage", "focus"),
+    ("pin that", "stage", "pin"),
+    ("pin this", "stage", "pin"),
+    ("unpin", "stage", "unpin"),
+    ("un-pin that", "stage", "unpin"),
+    ("back to idle", "stage", "idle"),
+    ("go idle", "stage", "idle"),
+    ("clear the stage", "stage", "idle"),
+]
+
+
+@pytest.mark.parametrize("text,skill,action", STAGE_KEYWORDS)
+def test_stage_keyword_routing(text, skill, action):
+    intent = IntentRouter(llm=None).route(text, use_llm=False)
+    assert (intent.skill, intent.action) == (skill, action), f"{text!r} misrouted"
+
+
+def test_stage_focus_extracts_the_subject_argument():
+    intent = IntentRouter(llm=None).route("show oil", use_llm=False)
+    assert intent.args == {"subject": "oil"}
+
+
+def test_stage_pin_unpin_idle_take_no_argument():
+    for text in ("pin that", "unpin", "back to idle"):
+        intent = IntentRouter(llm=None).route(text, use_llm=False)
+        assert intent.args == {}
+
+
+def test_show_my_emails_still_routes_to_email_search_not_the_stage():
+    """"show" is a real trigger word for email_search -- the stage's own "show X" rule sits
+    at the very end of the table, after every rule with a genuine claim on the word, so it
+    only ever catches what nothing else wanted."""
+    intent = IntentRouter(llm=None).route(
+        "show my emails from recruiting@acme.com", use_llm=False)
+    assert (intent.skill, intent.action) == ("email_agent", "search")

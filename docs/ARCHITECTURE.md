@@ -1000,6 +1000,126 @@ hold advice under any framing, even hedged. Instruments are config-driven from t
 (`config.yaml`'s `markets.instruments`, falling back to `DEFAULT_INSTRUMENTS`) — Phase 37
 only reached that pattern in a later slice (S6); no reason to relearn the lesson here.
 
+### Phase 38b — The self-driving stage (`core/stage.py`, `core/presenter.py`, `skills/stage.py`, `frontend/src/ui/stage/`)
+Extends Phase 36's React dashboard with a choreographed visual layer that shows *what* is
+being talked about — a live chart, corroborating headlines, a fact — around the reactor
+ring, without adding a second source of truth for data or a second authority for actions.
+Visual/interaction spec: `agentos_stage_prototype.html` (a static hand-drawn-canvas
+prototype, demo data, timer-driven auto-cycle — none of that is ported; see below). The
+prototype's own "AGENTOS_BUG_LIST.md #17" reference does not exist as a file anywhere in
+this repo or its parent directory; the lesson it names (a corroboration-gated, never-
+keyword-gated breaking-news bar, S5 above) is independently and fully documented in
+`world_news.py` itself, so this was treated as a missing citation, not a blocking gap.
+
+**The primitive.** A `StageDirective` (`core/stage.py`, mirrored exactly by
+`frontend/src/core/stageTypes.ts`) carries `focus`, an optional `headline`, an `accent`
+(`primary` | `alert`), a `transition` (`bloom` | `swap` | `settle`), an optional `ttl_s`,
+and a list of typed `widgets` (`chart` | `articles` | `ticker` | `fact` | `map`). It is
+display data only — no widget type can carry an action, and building one never touches
+`core/approvals.py`. `kernel/app.py`'s `/ws/voice` reply carries it alongside the existing
+`{ok, text, intent, skill, ...}` shape as an optional `directive` key, present only when
+there is something to say about the stage; its absence (not `null`) means "leave whatever
+is currently shown alone," distinct from an explicit idle directive (`focus: null,
+widgets: []`), which means "go back to calm."
+
+**`core/presenter.py` is a router, not a data source.** `build_directive(intent, result)`
+maps a turn to a directive by asking `skills/markets.py`'s and `skills/world_news.py`'s own
+new `display()` methods for widgets built from what those skills already fetch for their
+ordinary commands (`snapshot`/`whats_up`) — no new fetch, no new LLM call (both `display()`
+methods are synthesis-free and fast enough to run on every subject change). Three routes:
+`stage.*` actions (voice-steered, below), `markets.{snapshot,display}`, and
+`world_news.{whats_up,display}`; anything else returns `None`, and a builder exception
+degrades the same way — the reply still lands, the stage just doesn't change.
+
+**Voice steering (`skills/stage.py`), not DOM-poking.** "Show oil", "pin that", "back to
+idle" are ordinary routed commands (new keyword rules in `core/intent.py`: `stage_focus`,
+`stage_pin`, `stage_unpin`, `stage_idle` — `show`/`pull up` sit at the very end of the
+keyword table, after every rule with a real prior claim on those words, e.g.
+`email_search`'s "show my emails from..."). `focus(subject)` decides whether the subject is
+a market asset (`skills/markets._resolve_asset`, a small alias table over the configured
+instrument list — "oil" → `Crude Oil (WTI)`) or a news topic
+(`WorldNewsSkill._resolve_topic`, same pattern over configured categories), and hands that
+decision to the presenter via `CommandResult.data` — it never builds a widget itself.
+Pin/unpin carry no data at all; they're recognized by intent NAME alone
+(`msg.intent === "stage_pin"`) on the frontend, since pinning is pure client-side state
+(which widget is frozen), not something the server needs to know.
+
+**The one catalyst.** `world_news.check_breaking()` (S5, the corroboration-gated
+breaking-news poll) is the sole event allowed to re-choreograph the stage without Calvin
+having said anything. It pushes a `StageDirective` (accent `alert`, a `FactWidget` with the
+real corroboration count, an `ArticlesWidget`) through `core/stage.py`'s `StageBus` — an
+in-process registry of connected `/ws/voice` sockets. `check_breaking` is an *unqueued*
+APScheduler job (runs in the API process, not the worker), but `AsyncIOScheduler` executes
+plain sync callables on a worker **thread**, not the event loop — so `StageBus.push()` is
+the thread-safe entry point, handing the broadcast coroutine to the loop captured once at
+kernel startup (`lifespan()`) via `run_coroutine_threadsafe`. A push with no loop bound or
+no sockets connected is a silent no-op; a catalyst must never raise because nobody's
+watching.
+
+**Chart data: extended fetches, not a new data source.** `markets.py` already fetched
+CoinGecko's `/simple/price` and Yahoo's `/v8/finance/chart/{symbol}`, but only read a
+single current price. `display()` adds `_fetch_crypto_chart_series` (CoinGecko's own
+`/market_chart` endpoint — same host, same robots.txt exception already justified in that
+module's docstring) and `_fetch_yahoo_chart_series` (the exact same Yahoo chart endpoint,
+now asking for the `range`/`interval` series it always returns instead of only `.meta`).
+Every `ChartWidget` carries `as_of` (the last real tick's timestamp) and a `delayed_label`
+keyed by source — `"real-time"` for CoinGecko, `"~15m delayed (free feed)"` for Yahoo — on
+the widget itself, not just upstream of it. No series → the chart widget is omitted, never
+synthesized or interpolated; a null point from either API is dropped, not smoothed over.
+
+**News images: feed thumbnails, or the typed fallback — never a search.**
+`world_news._extract_image` reads `media:thumbnail` / an image `media:content` / an image
+`enclosure` directly off the RSS `<item>` (namespace-agnostic tag matching) — the *only*
+place `Headline.image` is ever set anywhere in this codebase. `display(topic)` reuses the
+existing fetch+cluster pipeline (no LLM call) and resolves `topic` via a small alias table
+over the configured categories (`_resolve_topic`), returning `None` — omitted, never a
+placeholder — for an unresolvable topic or nothing fetchable. Frontend:
+`ui/stage/ArticlesWidget.tsx`'s `<Thumb>` renders the feed image if present, and falls back
+to the same typed card (a plain icon, not a broken `<img>`) on a missing image **or** a
+runtime load failure (`onError`) — there is no third path that substitutes a searched or
+generic photo.
+
+**Chart rendering: hand-rolled canvas, not a new dependency.** Rather than adding
+uPlot/lightweight-charts, `ui/stage/ChartWidget.tsx` draws the (fixed, historical) series
+on a plain `<canvas>` — one draw per dataset, no rAF loop — the same architecture
+`ReactorRing`/`Waveform` already use, and the same technique the prototype itself uses
+(hand-drawn canvas, no library). This keeps the bundle dependency-free, keeps the widget
+entirely out of the animation budget below (nothing to animate continuously), and avoids
+pulling a third-party canvas-heavy library into a jsdom test environment that has no native
+`canvas` package (`frontend/src/test/setup.ts`'s shared fake 2D context stub was extended
+with `closePath`/`createLinearGradient` for this).
+
+**Choreography (`ui/stage/StageCanvas.tsx`, the Director).** Widgets are assigned to fixed
+slots by type (ticker → top strip, chart → right, fact/map → left, articles → bottom
+strip), matching the prototype's layout. Transitions are enter-only (`bloom`: fade + rise;
+`swap`: crossfade; `settle`: instant) — mirroring the prototype's own choreography exactly
+(`clearSlots()` hides the old scene instantly, then rebuilds and blooms the new one; there
+is no fade-out racing a fade-in to coordinate, which also makes a swap a synchronous fact
+rather than something gated behind an animation's completion callback). `useReducedMotion()`
+collapses every transition to instant and starts no loop. The shared
+`ui/stage/animationBudget.ts` caps concurrently-animating widgets at 2 (the ring is
+separate and always allowed) — a widget denied a slot renders statically rather than
+queuing; `ui/stage/useOffscreenPause.ts` (IntersectionObserver, fails open) frees a slot
+the moment its widget scrolls out of view. **Event-driven only**: there is no
+`setInterval`/timer anywhere in `StageCanvas.tsx` (asserted directly by
+`test_stage_canvas...source contains no interval-driven scene rotation`) — the prototype's
+own `setInterval` auto-cycle (a demo aid, explicitly not production behavior per its own
+on-page note) is not ported. The one client-side timer is `ttl_s`'s idle-return
+(`setTimeout`, re-armed only when the directive *reference* changes, i.e. once per real WS
+event) — a purely local decay back to calm, needing no server round-trip.
+
+**Pin.** `pinCurrentWidget()`/`pinWidget()`/`unpinWidget()` live in `core/store.ts`; a
+pinned widget is merged back on top of every subsequent directive
+(`StageCanvas.mergeWithPin`) for its widget type, surviving even a directive that doesn't
+mention that type at all, until explicitly unpinned — voice ("pin that"/"unpin", matched by
+intent name) and a manual per-widget button both end at the same store actions. Priority
+for "pin that" with no explicit target: chart, then fact, then articles.
+
+**Degrades to Phase 36.** `StageCanvas` renders the *exact* pre-Phase-38 idle markup
+(ring + waveform + mic button) whenever there's no directive and nothing pinned — a
+presenter failure, an empty `display()`, or simply "nothing asked yet" are visually
+indistinguishable from before this phase ever existed.
+
 ---
 
 ## 9. Conversational state machines

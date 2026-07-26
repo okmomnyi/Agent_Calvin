@@ -81,6 +81,10 @@ INTENTS: dict[str, tuple[str, str]] = {
     "music_pl_remove": ("music", "playlist_remove"),
     "weather":         ("weather", "current"),
     "youtube_play":    ("youtube", "play"),
+    "stage_focus":     ("stage", "focus"),
+    "stage_pin":       ("stage", "pin"),
+    "stage_unpin":     ("stage", "unpin"),
+    "stage_idle":      ("stage", "idle"),
     "contacts_find":   ("contacts", "find"),
     "phone_call":      ("phone", "call"),
     "phone_answer":    ("phone", "answer"),
@@ -113,6 +117,19 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     # normalizer, which is exactly what this router's docstring warns against.
     ("weather", re.compile(r"(?P<t>.*\bweather\b.*)", re.I), "text"),
     ("youtube_play", re.compile(r"(?P<t>.*\byou\s*tube\b.*)", re.I), "query"),
+    # Stage voice-steering (Phase 38) -- "pin"/"back to idle" are unclaimed trigger words
+    # elsewhere in this table, same reasoning as weather/youtube_play above. unpin is
+    # checked before pin so "unpin that" can't be swallowed by the pin rule first (moot in
+    # practice -- \bpin\b has no boundary between "un" and "pin" -- but explicit ordering
+    # makes that non-collision a fact of the list, not an accident of regex engines).
+    # stage_focus ("show X"/"pull up X") is deliberately NOT here: "show" is claimed by
+    # email_search ("show my emails from...") and other specific rules below, so it lives
+    # at the very end of this list, after every rule with a real claim on "show", and just
+    # ahead of the generic "research" catch-all.
+    ("stage_unpin", re.compile(r"\bun-?pin\b", re.I), None),
+    ("stage_pin", re.compile(r"\bpin\s+(?:that|this|it)\b", re.I), None),
+    ("stage_idle", re.compile(
+        r"\b(?:back to idle|go idle|clear the stage|nothing needs (?:you|me))\b", re.I), None),
     ("contacts_find", re.compile(r"\bfind contact\s+(?P<t>.+)", re.I), "name"),
     # Answer/hangup checked BEFORE the broad "call X" rule below — "answer the call" ends in
     # the bare word "call" with nothing after it to capture as a name, so it wouldn't collide
@@ -234,6 +251,11 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     # the phrase at 0.9 and answered nothing. Specific summaries keep their own rules above
     # (summarize_inbox); everything else falls to the catalogue router, which can pick vault.ask
     # or research.search from what is actually being summarized.
+    # Last specific rule before the generic research catch-all: "show oil", "pull up gold",
+    # "show bitcoin" -- anything with a real claim on "show"/"pull up" above (email_search,
+    # in particular) has already matched by the time the router gets here.
+    ("stage_focus", re.compile(r"\b(?:show|pull up)\s+(?:me\s+)?(?:the\s+)?(?P<t>.+)", re.I),
+     "subject"),
     ("research", re.compile(r"\b(?:search|research|look up|find out)(?: for| about)?\s+(?P<t>.+)", re.I), "query"),
 ]
 
@@ -280,6 +302,9 @@ _ARG_NAMES = {
     ("youtube", "play"): "query",
     ("contacts", "find"): "name",
     ("email_agent", "search"): "query",
+    ("stage", "focus"): "subject",
+    ("markets", "display"): "asset",
+    ("world_news", "display"): "topic",
 }
 
 

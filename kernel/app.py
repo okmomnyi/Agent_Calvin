@@ -10,6 +10,7 @@ never brings the kernel down.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import inspect
 from pathlib import Path
@@ -26,6 +27,8 @@ from starlette.concurrency import run_in_threadpool
 from core.config import get_settings
 from core.logging_setup import get_logger
 from core.memory import get_memory
+from core.presenter import build_directive
+from core.stage import get_stage_bus
 from kernel.registry import SkillRegistry
 
 log = get_logger("kernel.app")
@@ -80,6 +83,11 @@ async def lifespan(app: FastAPI):
     log.info("AgentOS kernel starting up…")
     registry.discover()
     get_memory()  # ensure schema exists
+    # Phase 38: bind the stage bus to THIS event loop so a catalyst firing on an
+    # APScheduler worker thread (world_news.check_breaking is a plain sync job — see
+    # core/stage.py's StageBus docstring) can still push a directive to connected
+    # dashboards via run_coroutine_threadsafe.
+    get_stage_bus().bind_loop(asyncio.get_running_loop())
     _register_scheduled_jobs()
     if not scheduler.running:
         scheduler.start()
@@ -731,6 +739,12 @@ async def ws_voice(websocket: WebSocket) -> None:
         await websocket.close(code=4401)
         return
 
+    # Phase 38: registered for the connection's whole lifetime so a catalyst (breaking
+    # news) can push a StageDirective to this browser between turns, not only as a reply
+    # to something Calvin said. Unregistered in `finally` so a socket that drops mid-poll
+    # never accumulates as a dead send target (see core/stage.py's StageBus).
+    stage_bus = get_stage_bus()
+    stage_bus.register(websocket)
     try:
         while True:
             msg = await websocket.receive_json()
@@ -754,24 +768,33 @@ async def ws_voice(websocket: WebSocket) -> None:
             intent, result = await run_in_threadpool(_handle_command, text, channel="voice")
             _record_turn(text, result.text, "voice", intent.skill)
             voice = _current_voice()
-            await websocket.send_json(
-                {
-                    "ok": result.ok,
-                    "text": to_spoken(result.text),
-                    "intent": intent.name,
-                    "skill": intent.skill,
-                    # client speaks with this pre-built voice/rate (updates instantly on "change voice")
-                    "voice_id": voice["voice_id"],
-                    "rate": voice["rate"],
-                    # Phase 23: app ops for the LAPTOP to run — {"op": ..., "app": ...} keys
-                    # only, never commands. The laptop re-checks each against its own allowlist
-                    # and refuses anything it doesn't know; see client/apps.py. Only /ws/voice
-                    # carries these — the phone and dashboard can't reach the laptop.
-                    "actions": _client_actions(result),
-                }
-            )
+            # Phase 38: the agent's turn carries a stage directive alongside the text, on
+            # the SAME message -- no second channel. `None` means "don't touch the stage"
+            # (an unrelated skill ran), distinct from an explicit idle directive; the key
+            # is simply omitted rather than sent as `null` so an older client that doesn't
+            # know about it sees nothing different at all.
+            directive = build_directive(intent, result, text=text)
+            payload = {
+                "ok": result.ok,
+                "text": to_spoken(result.text),
+                "intent": intent.name,
+                "skill": intent.skill,
+                # client speaks with this pre-built voice/rate (updates instantly on "change voice")
+                "voice_id": voice["voice_id"],
+                "rate": voice["rate"],
+                # Phase 23: app ops for the LAPTOP to run — {"op": ..., "app": ...} keys
+                # only, never commands. The laptop re-checks each against its own allowlist
+                # and refuses anything it doesn't know; see client/apps.py. Only /ws/voice
+                # carries these — the phone and dashboard can't reach the laptop.
+                "actions": _client_actions(result),
+            }
+            if directive is not None:
+                payload["directive"] = directive.to_dict()
+            await websocket.send_json(payload)
     except WebSocketDisconnect:
         log.debug("Voice websocket disconnected.")
+    finally:
+        stage_bus.unregister(websocket)
 
 
 # ------------------------------------------------------------------ dashboard (Phase 36)

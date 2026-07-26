@@ -1,13 +1,25 @@
 import { useEffect, useRef } from "react";
 import { tokens } from "@/design/tokens";
 import type { HudState } from "@/core/types";
+import type { StageAccent } from "@/core/stageTypes";
 
 // One canvas, one requestAnimationFrame loop, state driven by props -- it must NOT re-render
 // through React each frame (that's how the glow stays at 60fps). Extended from the reference
 // spec with more arc layers, a tick-mark dial ring, a center reticle, and a CSS boot-in
 // fade/scale on the wrapping div (deliberately NOT inside the rAF loop -- a one-shot mount
 // transition belongs to the DOM, not the per-frame draw call).
-export function ReactorRing({ state, level = 0 }: { state: HudState; level?: number }) {
+export function ReactorRing({
+  state,
+  level = 0,
+  accentOverride,
+}: {
+  state: HudState;
+  level?: number;
+  // Phase 38: the stage's amber "alert" accent (breaking news / a conflict directive)
+  // overrides the ordinarily HUD-state-derived color, WITHOUT touching pulse speed or any
+  // other state-driven behavior below -- accent is the only thing a directive may steer.
+  accentOverride?: StageAccent;
+}) {
   const ref = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -27,8 +39,8 @@ export function ReactorRing({ state, level = 0 }: { state: HudState; level?: num
     resize();
     addEventListener("resize", resize);
 
-    const accent = accentFor(state);
-    const glow = glowFor(state);
+    const accent = accentOverride === "alert" ? tokens.color.attention : accentFor(state);
+    const glow = accentOverride === "alert" ? tokens.glow.alert : glowFor(state);
     const speed = state === "thinking" ? 2.2 : state === "listening" ? 1.4 : 0.5;
 
     const drawTicks = (s: number, c: number, rot: number) => {
@@ -125,7 +137,7 @@ export function ReactorRing({ state, level = 0 }: { state: HudState; level?: num
       cancelAnimationFrame(raf);
       removeEventListener("resize", resize);
     };
-  }, [state, level]);
+  }, [state, level, accentOverride]);
 
   return (
     <div className="reactor-boot-in" style={{ width: "100%" }}>

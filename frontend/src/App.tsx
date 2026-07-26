@@ -40,6 +40,9 @@ function Live({ shell }: { shell: "web" | "desktop" }) {
   const setJobs = useAppStore((s) => s.setJobs);
   const setHudState = useAppStore((s) => s.setHudState);
   const setSocketStatus = useAppStore((s) => s.setSocketStatus);
+  const setStageDirective = useAppStore((s) => s.setStageDirective);
+  const pinCurrentWidget = useAppStore((s) => s.pinCurrentWidget);
+  const unpinWidget = useAppStore((s) => s.unpinWidget);
   const [sending, setSending] = useState(false);
 
   const socketRef = useRef<VoiceSocket | null>(null);
@@ -89,6 +92,13 @@ function Live({ shell }: { shell: "web" | "desktop" }) {
         });
         setHudState(msg.ok ? "idle" : "error");
         setSending(false);
+
+        // Phase 38: pin/unpin are pure client-side signals (skills/stage.py never sends a
+        // directive for them -- see core/presenter.py's docstring) recognized by intent
+        // name alone; any directive present is applied on top, same as any other turn.
+        if (msg.intent === "stage_pin") pinCurrentWidget();
+        else if (msg.intent === "stage_unpin") unpinWidget();
+        if (msg.directive) setStageDirective(msg.directive);
       },
     });
     socketRef.current = socket;
@@ -113,7 +123,18 @@ function Live({ shell }: { shell: "web" | "desktop" }) {
       socket.close();
       socketRef.current = null;
     };
-  }, [authState, addTurn, setHudState, setJobs, setPendingApprovals, setSocketStatus, setTurns]);
+  }, [
+    authState,
+    addTurn,
+    setHudState,
+    setJobs,
+    setPendingApprovals,
+    setSocketStatus,
+    setTurns,
+    setStageDirective,
+    pinCurrentWidget,
+    unpinWidget,
+  ]);
 
   const sendText = useCallback(
     (text: string) => {

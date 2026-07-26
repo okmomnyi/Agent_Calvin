@@ -52,6 +52,7 @@ from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 from core.notify import send_telegram
 from core.skill import BaseSkill, CommandResult, ScheduledJob, SkillContract
+from core.stage import ChartWidget, TickerWidget, Widget
 from skills.world_news import Headline, WorldNewsSkill
 
 log = get_logger("skills.markets")
@@ -124,6 +125,101 @@ _MAX_HEADLINES_FOR_CONTEXT = 20  # keeps the LLM call small and bounded, not a f
 # Only quotes moving at least this much (absolute %) get news-correlation commentary — a
 # flat market doesn't need the model reaching for a headline to explain nothing.
 _NOTABLE_MOVE_PCT_DEFAULT = 2.0
+
+# Phase 38 stage widget: source -> the honesty label that must ride on every chart widget
+# from that source (§0 P5 applies to the product surface, not only to what the model is
+# told). CoinGecko's simple/price and market_chart are effectively real-time free data;
+# Yahoo's free chart endpoint is the industry-standard ~15-minute-delayed quote.
+_DELAYED_LABEL = {"coingecko": "real-time", "yahoo": "~15m delayed (free feed)"}
+
+# category -> the Widget.klass vocabulary the frontend/prototype spec defines. A category
+# with no mapping here (a future config addition) falls back to its own name unchanged.
+_KLASS_FOR_CATEGORY = {"crypto": "crypto", "forex": "fx", "commodities": "commodity",
+                       "stocks": "equity", "nse": "nse"}
+
+# Small alias table so a spoken/typed asset name resolves without a new taxonomy ("show
+# oil" -> the configured "Crude Oil (WTI)" instrument). Deliberately literal, not
+# fuzzy/LLM matching, so asset resolution stays fast and deterministic — display() can run
+# on every stage subject change. Falls through to a plain substring match against whatever
+# is actually configured (so a custom config.yaml instrument is still reachable by name).
+_ASSET_ALIASES: dict[str, tuple[str, str]] = {
+    "btc": ("crypto", "Bitcoin"), "bitcoin": ("crypto", "Bitcoin"),
+    "eth": ("crypto", "Ethereum"), "ethereum": ("crypto", "Ethereum"),
+    "sol": ("crypto", "Solana"), "solana": ("crypto", "Solana"),
+    "oil": ("commodities", "Crude Oil (WTI)"), "crude": ("commodities", "Crude Oil (WTI)"),
+    "wti": ("commodities", "Crude Oil (WTI)"),
+    "gold": ("commodities", "Gold"), "xau": ("commodities", "Gold"),
+    "kes": ("forex", "USD/KES"), "shilling": ("forex", "USD/KES"),
+    "sp500": ("stocks", "S&P 500"), "s&p": ("stocks", "S&P 500"),
+    "nasdaq": ("stocks", "Nasdaq Composite"),
+}
+
+# Chart range -> CoinGecko's `days` query param.
+_CRYPTO_RANGE_DAYS = {"1d": 1, "1w": 7, "1m": 30}
+# Chart range -> Yahoo's (range, interval) query params.
+_YAHOO_RANGE_PARAMS = {"1d": ("1d", "5m"), "1w": ("5d", "30m"), "1m": ("1mo", "1d")}
+
+
+def _resolve_asset(hint: str, instruments: dict[str, list[Instrument]]
+                   ) -> tuple[Instrument | None, str | None]:
+    """A spoken/typed asset name -> (Instrument, category), or (None, None) if it can't be
+    resolved. The caller must omit the chart widget rather than guess."""
+    h = (hint or "").strip().lower()
+    if not h:
+        return None, None
+    for alias, (cat_key, name_key) in _ASSET_ALIASES.items():
+        if alias in h:
+            for inst in instruments.get(cat_key, []):
+                if inst.name == name_key:
+                    return inst, cat_key
+    for category, insts in instruments.items():
+        for inst in insts:
+            name_lower = inst.name.lower()
+            if name_lower in h or h in name_lower:
+                return inst, category
+    return None, None
+
+
+def _fetch_crypto_chart_series(fetcher: Any, coingecko_id: str,
+                               range_key: str) -> list[dict[str, float]]:
+    """CoinGecko's own `/market_chart` endpoint — same host, same robots.txt exception
+    already justified in this module's docstring for `/simple/price`. Degrades to [] (no
+    chart, never a fabricated series) on any transport/parse failure."""
+    days = _CRYPTO_RANGE_DAYS.get(range_key, 1)
+    url = f"https://api.coingecko.com/api/v3/coins/{coingecko_id}/market_chart?vs_currency=usd&days={days}"
+    resp = fetcher.get(url, accept="application/json")
+    if resp is None or resp.status_code != 200:
+        log.warning("markets: CoinGecko market_chart unreachable for %s", coingecko_id)
+        return []
+    try:
+        prices = resp.json()["prices"]
+    except (ValueError, KeyError, TypeError):
+        log.warning("markets: CoinGecko market_chart returned an unexpected shape for %s",
+                   coingecko_id)
+        return []
+    return [{"t": p[0] / 1000.0, "v": float(p[1])} for p in prices
+            if isinstance(p, list) and len(p) == 2 and p[1] is not None]
+
+
+def _fetch_yahoo_chart_series(fetcher: Any, symbol: str, range_key: str) -> list[dict[str, float]]:
+    """The SAME Yahoo chart endpoint `_fetch_yahoo_one` already calls, just asking for the
+    series (range/interval) it always returns instead of reading only `.meta`. Null closes
+    (a gap in Yahoo's own intraday data) are dropped rather than interpolated — never
+    synthesize a tick that didn't come from the source."""
+    rng, interval = _YAHOO_RANGE_PARAMS.get(range_key, _YAHOO_RANGE_PARAMS["1d"])
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={rng}&interval={interval}"
+    resp = fetcher.get(url, accept="application/json")
+    if resp is None or resp.status_code != 200:
+        log.warning("markets: Yahoo chart series unreachable for %s", symbol)
+        return []
+    try:
+        result = resp.json()["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        closes = result["indicators"]["quote"][0]["close"]
+    except (ValueError, KeyError, TypeError, IndexError):
+        log.warning("markets: Yahoo chart series returned an unexpected shape for %s", symbol)
+        return []
+    return [{"t": float(t), "v": float(c)} for t, c in zip(timestamps, closes) if c is not None]
 
 
 @dataclass
@@ -265,6 +361,52 @@ class MarketsSkill(BaseSkill):
                 if q is not None:
                     quotes.append(q)
         return quotes
+
+    # ------------------------------------------------------------- stage widgets (Phase 38)
+    def _ticker_widget(self, quotes: list[Quote]) -> TickerWidget | None:
+        """Quotes with no % change at all (rare — only when the source genuinely didn't
+        provide one) are left OUT of the ticker rather than shown as a fabricated 0.0%.
+        Returns None (never an empty widget) if that leaves nothing to show."""
+        now = self._now()
+        items = [{"symbol": q.name, "price": q.price, "change_pct": q.change_pct, "as_of": now}
+                for q in quotes if q.change_pct is not None]
+        return TickerWidget(items=items) if items else None
+
+    def _chart_widget(self, inst: Instrument, category: str, range_key: str) -> ChartWidget | None:
+        if inst.source == "coingecko":
+            series = _fetch_crypto_chart_series(self.fetcher, inst.symbol, range_key)
+            source = "coingecko"
+        else:
+            series = _fetch_yahoo_chart_series(self.fetcher, inst.symbol, range_key)
+            source = "yahoo"
+        if not series:
+            return None
+        return ChartWidget(asset=inst.name, klass=_KLASS_FOR_CATEGORY.get(category, category),
+                           range=range_key, series=series, as_of=series[-1]["t"],
+                           delayed_label=_DELAYED_LABEL[source], source=source)
+
+    def display(self, asset: str = "", range: str = "1d", **_: Any) -> list[Widget]:
+        """Presenter-facing (core/presenter.py): a ticker widget from whatever quotes are
+        reachable right now, plus a chart widget for `asset` when it resolves to a
+        configured instrument AND a real series is fetchable. No new data source: the
+        chart reuses the exact same CoinGecko/Yahoo hosts and robots.txt exception this
+        module's docstring already justifies — CoinGecko's own market_chart endpoint
+        alongside simple/price, and Yahoo's chart endpoint's series instead of only its
+        `.meta`. Never synthesizes a tick: an unresolved asset, or one with no fetchable
+        series, means that ONE widget is omitted, never faked — the ticker still renders
+        on its own quotes regardless.
+        """
+        widgets: list[Widget] = []
+        quotes = self._fetch_all()
+        ticker = self._ticker_widget(quotes) if quotes else None
+        if ticker is not None:
+            widgets.append(ticker)
+        inst, category = _resolve_asset(asset, _instruments())
+        if inst is not None and category is not None:
+            chart = self._chart_widget(inst, category, range)
+            if chart is not None:
+                widgets.append(chart)
+        return widgets
 
     # ------------------------------------------------------------- news correlation
     def _headlines_for_context(self) -> list[Headline]:

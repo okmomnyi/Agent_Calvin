@@ -67,6 +67,7 @@ SERVICES: dict[str, list[str]] = {
     "research": ["test_research.py"],
     "world news briefing": ["test_world_news.py"],
     "markets snapshot": ["test_markets.py"],
+    "self-driving stage": ["test_stage.py", "test_stage_skill.py", "test_presenter.py"],
     "kernel & routing": ["test_kernel.py", "test_intent.py", "test_router.py",
                          "test_llm_routing.py", "test_memory.py", "test_config.py",
                          "test_auth.py"],

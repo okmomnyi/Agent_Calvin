@@ -276,3 +276,195 @@ def test_headlines_for_context_caps_total_count():
     skill = MarketsSkill(news_skill=news)
     headlines = skill._headlines_for_context()
     assert len(headlines) == 20
+
+
+# ==================================================== stage widgets (Phase 38)
+from skills.markets import (_ASSET_ALIASES, _fetch_crypto_chart_series,  # noqa: E402
+                            _fetch_yahoo_chart_series, _resolve_asset)
+
+
+def _crypto_chart_url(coingecko_id: str, days: int) -> str:
+    return (f"https://api.coingecko.com/api/v3/coins/{coingecko_id}/market_chart"
+            f"?vs_currency=usd&days={days}")
+
+
+def _yahoo_chart_url(symbol: str, rng: str, interval: str) -> str:
+    return f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={rng}&interval={interval}"
+
+
+def test_fetch_crypto_chart_series_parses_prices():
+    url = _crypto_chart_url("bitcoin", 1)
+    fetcher = _FakeFetcher({url: _FakeResponse(200, {"prices": [[1000, 60000.0], [2000, 60100.0]]})})
+    series = _fetch_crypto_chart_series(fetcher, "bitcoin", "1d")
+    assert series == [{"t": 1.0, "v": 60000.0}, {"t": 2.0, "v": 60100.0}]
+
+
+def test_fetch_crypto_chart_series_uses_the_range_specific_days_param():
+    url = _crypto_chart_url("bitcoin", 30)
+    fetcher = _FakeFetcher({url: _FakeResponse(200, {"prices": [[1000, 1.0]]})})
+    assert _fetch_crypto_chart_series(fetcher, "bitcoin", "1m") == [{"t": 1.0, "v": 1.0}]
+
+
+def test_fetch_crypto_chart_series_degrades_to_empty_on_unreachable_endpoint():
+    assert _fetch_crypto_chart_series(_FakeFetcher({}), "bitcoin", "1d") == []
+
+
+def test_fetch_crypto_chart_series_degrades_to_empty_on_malformed_payload():
+    url = _crypto_chart_url("bitcoin", 1)
+    fetcher = _FakeFetcher({url: _FakeResponse(200, {"not_prices": []})})
+    assert _fetch_crypto_chart_series(fetcher, "bitcoin", "1d") == []
+
+
+def test_fetch_crypto_chart_series_drops_null_points_never_interpolates():
+    url = _crypto_chart_url("bitcoin", 1)
+    fetcher = _FakeFetcher({url: _FakeResponse(200, {"prices": [[1000, 60000.0], [2000, None]]})})
+    assert _fetch_crypto_chart_series(fetcher, "bitcoin", "1d") == [{"t": 1.0, "v": 60000.0}]
+
+
+def test_fetch_yahoo_chart_series_parses_timestamps_and_closes():
+    url = _yahoo_chart_url("GC=F", "1d", "5m")
+    payload = {"chart": {"result": [{
+        "timestamp": [100, 200, 300],
+        "indicators": {"quote": [{"close": [2000.0, 2001.0, 2002.0]}]},
+    }]}}
+    fetcher = _FakeFetcher({url: _FakeResponse(200, payload)})
+    series = _fetch_yahoo_chart_series(fetcher, "GC=F", "1d")
+    assert series == [{"t": 100.0, "v": 2000.0}, {"t": 200.0, "v": 2001.0}, {"t": 300.0, "v": 2002.0}]
+
+
+def test_fetch_yahoo_chart_series_drops_null_closes_never_interpolates():
+    url = _yahoo_chart_url("GC=F", "1d", "5m")
+    payload = {"chart": {"result": [{
+        "timestamp": [100, 200],
+        "indicators": {"quote": [{"close": [2000.0, None]}]},
+    }]}}
+    fetcher = _FakeFetcher({url: _FakeResponse(200, payload)})
+    assert _fetch_yahoo_chart_series(fetcher, "GC=F", "1d") == [{"t": 100.0, "v": 2000.0}]
+
+
+def test_fetch_yahoo_chart_series_uses_range_specific_params_for_1w():
+    url = _yahoo_chart_url("GC=F", "5d", "30m")
+    fetcher = _FakeFetcher({url: _FakeResponse(200, {
+        "chart": {"result": [{"timestamp": [1], "indicators": {"quote": [{"close": [1.0]}]}}]}})})
+    assert _fetch_yahoo_chart_series(fetcher, "GC=F", "1w") == [{"t": 1.0, "v": 1.0}]
+
+
+def test_fetch_yahoo_chart_series_degrades_to_empty_on_unreachable_endpoint():
+    assert _fetch_yahoo_chart_series(_FakeFetcher({}), "GC=F", "1d") == []
+
+
+def test_fetch_yahoo_chart_series_degrades_to_empty_on_malformed_payload():
+    url = _yahoo_chart_url("GC=F", "1d", "5m")
+    fetcher = _FakeFetcher({url: _FakeResponse(200, {"chart": {"result": []}})})
+    assert _fetch_yahoo_chart_series(fetcher, "GC=F", "1d") == []
+
+
+# ------------------------------------------------------------------ asset resolution
+def test_resolve_asset_matches_via_alias():
+    inst, category = _resolve_asset("show oil", DEFAULT_INSTRUMENTS)
+    assert inst is not None and inst.name == "Crude Oil (WTI)"
+    assert category == "commodities"
+
+
+def test_resolve_asset_matches_via_plain_substring():
+    inst, category = _resolve_asset("what about gold today", DEFAULT_INSTRUMENTS)
+    assert inst is not None and inst.name == "Gold"
+    assert category == "commodities"
+
+
+def test_resolve_asset_returns_none_for_an_unresolvable_asset():
+    assert _resolve_asset("underwater basket weaving", DEFAULT_INSTRUMENTS) == (None, None)
+
+
+def test_resolve_asset_returns_none_for_a_blank_hint():
+    assert _resolve_asset("", DEFAULT_INSTRUMENTS) == (None, None)
+
+
+def test_every_asset_alias_target_actually_exists_in_default_instruments():
+    """A stale alias (renamed/removed instrument) would silently never resolve again."""
+    for cat_key, name_key in _ASSET_ALIASES.values():
+        names = [i.name for i in DEFAULT_INSTRUMENTS.get(cat_key, [])]
+        assert name_key in names, f"{cat_key}/{name_key} not in DEFAULT_INSTRUMENTS"
+
+
+# ------------------------------------------------------------------ display() end to end
+def test_display_ticker_omits_quotes_with_no_change_pct():
+    skill = MarketsSkill(fetcher=_FakeFetcher({}), news_skill=_FakeNews())
+    quotes = [Quote(category="crypto", name="Bitcoin", symbol="bitcoin", price=1.0, change_pct=None),
+             Quote(category="crypto", name="Ethereum", symbol="ethereum", price=2.0, change_pct=1.0)]
+    widget = skill._ticker_widget(quotes)
+    assert widget is not None
+    assert [i["symbol"] for i in widget.items] == ["Ethereum"]
+
+
+def test_display_ticker_widget_is_none_when_every_quote_lacks_change_pct():
+    skill = MarketsSkill(fetcher=_FakeFetcher({}), news_skill=_FakeNews())
+    quotes = [Quote(category="crypto", name="Bitcoin", symbol="bitcoin", price=1.0, change_pct=None)]
+    assert skill._ticker_widget(quotes) is None
+
+
+def test_display_with_no_asset_returns_ticker_only(monkeypatch):
+    _force_default_instruments(monkeypatch)
+    fetcher = _fetcher_for({"bitcoin": (64000.0, 1.0)}, DEFAULT_INSTRUMENTS["crypto"])
+    skill = MarketsSkill(fetcher=fetcher, news_skill=_FakeNews())
+
+    widgets = skill.display()
+
+    assert len(widgets) == 1
+    assert widgets[0].type == "ticker"
+
+
+def test_display_omits_chart_for_an_unresolvable_asset(monkeypatch):
+    _force_default_instruments(monkeypatch)
+    fetcher = _fetcher_for({"bitcoin": (64000.0, 1.0)}, DEFAULT_INSTRUMENTS["crypto"])
+    skill = MarketsSkill(fetcher=fetcher, news_skill=_FakeNews())
+
+    widgets = skill.display(asset="underwater basket weaving")
+
+    assert [w.type for w in widgets] == ["ticker"]
+
+
+def test_display_includes_chart_with_as_of_and_delayed_label_for_a_resolved_asset(monkeypatch):
+    _force_default_instruments(monkeypatch)
+    fetcher = _fetcher_for({"bitcoin": (64000.0, 1.0)}, DEFAULT_INSTRUMENTS["crypto"])
+    fetcher._by_url[_crypto_chart_url("bitcoin", 1)] = _FakeResponse(
+        200, {"prices": [[1000, 64000.0], [2000, 64100.0]]})
+    skill = MarketsSkill(fetcher=fetcher, news_skill=_FakeNews())
+
+    widgets = skill.display(asset="bitcoin")
+
+    chart = next(w for w in widgets if w.type == "chart")
+    assert chart.asset == "Bitcoin"
+    assert chart.klass == "crypto"
+    assert chart.source == "coingecko"
+    assert chart.delayed_label == "real-time"
+    assert chart.as_of == 2.0
+    assert chart.series == [{"t": 1.0, "v": 64000.0}, {"t": 2.0, "v": 64100.0}]
+
+
+def test_display_omits_chart_for_a_resolved_asset_with_no_fetchable_series(monkeypatch):
+    """The hostile case named in the spec: no data means no chart, never a fabricated
+    series, even though the asset itself resolved fine."""
+    _force_default_instruments(monkeypatch)
+    fetcher = _fetcher_for({"bitcoin": (64000.0, 1.0)}, DEFAULT_INSTRUMENTS["crypto"])
+    # No market_chart entry registered for "bitcoin" -> fetcher.get() returns None.
+    skill = MarketsSkill(fetcher=fetcher, news_skill=_FakeNews())
+
+    widgets = skill.display(asset="bitcoin")
+
+    assert all(w.type != "chart" for w in widgets)
+
+
+def test_display_yahoo_chart_carries_the_delayed_label(monkeypatch):
+    _force_default_instruments(monkeypatch)
+    fetcher = _fetcher_for({"GC=F": (2050.0, 2000.0)}, [])
+    fetcher._by_url[_yahoo_chart_url("GC=F", "1d", "5m")] = _FakeResponse(200, {
+        "chart": {"result": [{"timestamp": [1.0], "indicators": {"quote": [{"close": [2050.0]}]}}]}})
+    skill = MarketsSkill(fetcher=fetcher, news_skill=_FakeNews())
+
+    widgets = skill.display(asset="gold")
+
+    chart = next(w for w in widgets if w.type == "chart")
+    assert chart.source == "yahoo"
+    assert chart.delayed_label == "~15m delayed (free feed)"
+    assert chart.klass == "commodity"

@@ -2,10 +2,10 @@ import "@testing-library/jest-dom/vitest";
 import { vi } from "vitest";
 
 // jsdom has no real <canvas> renderer (no native `canvas` package here -- deliberately not
-// added just to satisfy tests). ReactorRing/Waveform only ever call a small, fixed set of
-// CanvasRenderingContext2D methods, so a minimal stub is enough to let their effects run
-// and be asserted on (rAF scheduled/cancelled, etc.) without pulling in native canvas
-// rendering, which no CI environment here needs.
+// added just to satisfy tests). ReactorRing/Waveform/the stage's ChartWidget only ever call
+// a small, fixed set of CanvasRenderingContext2D methods, so a minimal stub is enough to
+// let their effects run and be asserted on (rAF scheduled/cancelled, etc.) without pulling
+// in native canvas rendering, which no CI environment here needs.
 class FakeGradient {
   addColorStop() {}
 }
@@ -15,6 +15,7 @@ function fakeContext() {
     clearRect: vi.fn(),
     fillRect: vi.fn(),
     beginPath: vi.fn(),
+    closePath: vi.fn(),
     moveTo: vi.fn(),
     lineTo: vi.fn(),
     arc: vi.fn(),
@@ -22,6 +23,7 @@ function fakeContext() {
     fill: vi.fn(),
     setLineDash: vi.fn(),
     createRadialGradient: vi.fn(() => new FakeGradient()),
+    createLinearGradient: vi.fn(() => new FakeGradient()),
     strokeStyle: "",
     fillStyle: "",
     lineWidth: 0,
