@@ -201,12 +201,19 @@ def _fetch_crypto_chart_series(fetcher: Any, coingecko_id: str,
             if isinstance(p, list) and len(p) == 2 and p[1] is not None]
 
 
-def _fetch_yahoo_chart_series(fetcher: Any, symbol: str, range_key: str) -> list[dict[str, float]]:
-    """The SAME Yahoo chart endpoint `_fetch_yahoo_one` already calls, just asking for the
-    series (range/interval) it always returns instead of reading only `.meta`. Null closes
-    (a gap in Yahoo's own intraday data) are dropped rather than interpolated — never
-    synthesize a tick that didn't come from the source."""
-    rng, interval = _YAHOO_RANGE_PARAMS.get(range_key, _YAHOO_RANGE_PARAMS["1d"])
+# Widened fallback windows, daily bars only -- tried in order when the requested
+# (range, interval) comes back empty. Verified live against the real endpoint (2026-07-26):
+# when a commodity/stock's exchange session is closed (after-hours, weekend), Yahoo's
+# intraday chart returns NO "timestamp" key at all and an empty indicators.quote — not a
+# malformed response, just nothing to show for THAT window. A daily-bar window is real
+# data almost always present regardless of whether the market happens to be open right
+# now, so this still satisfies "never synthesize a tick" -- every point is still a real
+# close Yahoo reported, just from a wider, coarser window than first requested.
+_YAHOO_FALLBACK_PARAMS: list[tuple[str, str]] = [("5d", "1d"), ("1mo", "1d")]
+
+
+def _fetch_yahoo_chart_series_once(fetcher: Any, symbol: str, rng: str,
+                                   interval: str) -> list[dict[str, float]]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={rng}&interval={interval}"
     resp = fetcher.get(url, accept="application/json")
     if resp is None or resp.status_code != 200:
@@ -217,9 +224,35 @@ def _fetch_yahoo_chart_series(fetcher: Any, symbol: str, range_key: str) -> list
         timestamps = result["timestamp"]
         closes = result["indicators"]["quote"][0]["close"]
     except (ValueError, KeyError, TypeError, IndexError):
-        log.warning("markets: Yahoo chart series returned an unexpected shape for %s", symbol)
+        log.warning("markets: Yahoo chart series returned an unexpected shape for %s "
+                   "(range=%s interval=%s) — likely no session data for this window",
+                   symbol, rng, interval)
         return []
     return [{"t": float(t), "v": float(c)} for t, c in zip(timestamps, closes) if c is not None]
+
+
+def _fetch_yahoo_chart_series(fetcher: Any, symbol: str, range_key: str) -> list[dict[str, float]]:
+    """The SAME Yahoo chart endpoint `_fetch_yahoo_one` already calls, just asking for the
+    series (range/interval) it always returns instead of reading only `.meta`. Null closes
+    (a gap in Yahoo's own intraday data) are dropped rather than interpolated — never
+    synthesize a tick that didn't come from the source.
+
+    Falls back to progressively wider daily-bar windows when the requested window is
+    genuinely empty (the exchange session is closed right now) — real ticks from a wider
+    window beat no chart at all for an asset that trades on a schedule, and every point
+    returned is still exactly what Yahoo reported, never invented.
+    """
+    rng, interval = _YAHOO_RANGE_PARAMS.get(range_key, _YAHOO_RANGE_PARAMS["1d"])
+    series = _fetch_yahoo_chart_series_once(fetcher, symbol, rng, interval)
+    if series:
+        return series
+    for fallback_rng, fallback_interval in _YAHOO_FALLBACK_PARAMS:
+        if (fallback_rng, fallback_interval) == (rng, interval):
+            continue
+        series = _fetch_yahoo_chart_series_once(fetcher, symbol, fallback_rng, fallback_interval)
+        if series:
+            return series
+    return []
 
 
 @dataclass

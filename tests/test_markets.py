@@ -283,6 +283,18 @@ from skills.markets import (_ASSET_ALIASES, _fetch_crypto_chart_series,  # noqa:
                             _fetch_yahoo_chart_series, _resolve_asset)
 
 
+def _closed_market_response() -> _FakeResponse:
+    """The exact shape verified live against the real Yahoo endpoint (2026-07-26): when
+    the exchange session is closed (after-hours / weekend), the intraday chart has no
+    "timestamp" key at all and an empty indicators.quote -- not malformed, just nothing
+    for that window. This is the shape that silently dropped every commodity/stock chart
+    in production (CL=F/oil) until the range-widening fallback below was added."""
+    return _FakeResponse(200, {"chart": {"result": [{
+        "meta": {"regularMarketPrice": 89.31, "previousClose": 92.19},
+        "indicators": {"quote": [{}]},
+    }], "error": None}})
+
+
 def _crypto_chart_url(coingecko_id: str, days: int) -> str:
     return (f"https://api.coingecko.com/api/v3/coins/{coingecko_id}/market_chart"
             f"?vs_currency=usd&days={days}")
@@ -357,6 +369,75 @@ def test_fetch_yahoo_chart_series_degrades_to_empty_on_malformed_payload():
     url = _yahoo_chart_url("GC=F", "1d", "5m")
     fetcher = _FakeFetcher({url: _FakeResponse(200, {"chart": {"result": []}})})
     assert _fetch_yahoo_chart_series(fetcher, "GC=F", "1d") == []
+
+
+# ------------------------------------------------------------------ closed-market fallback
+# Regression for a REAL production bug found live (2026-07-26): "show oil" produced a
+# ticker but no chart, because CL=F's 1d/5m intraday window was empty (the futures session
+# was closed) and the old code had no fallback at all -- _chart_widget silently returned
+# None. Verified against the actual Yahoo endpoint before fixing.
+def test_fetch_yahoo_chart_series_falls_back_to_5d_daily_when_the_intraday_window_is_empty():
+    primary_url = _yahoo_chart_url("CL=F", "1d", "5m")
+    fallback_url = _yahoo_chart_url("CL=F", "5d", "1d")
+    fetcher = _FakeFetcher({
+        primary_url: _closed_market_response(),
+        fallback_url: _FakeResponse(200, {"chart": {"result": [{
+            "timestamp": [100, 200, 300],
+            "indicators": {"quote": [{"close": [88.0, 89.0, 89.31]}]},
+        }]}}),
+    })
+
+    series = _fetch_yahoo_chart_series(fetcher, "CL=F", "1d")
+
+    assert series == [{"t": 100.0, "v": 88.0}, {"t": 200.0, "v": 89.0}, {"t": 300.0, "v": 89.31}]
+
+
+def test_fetch_yahoo_chart_series_falls_back_further_to_1mo_daily_when_5d_is_also_empty():
+    fetcher = _FakeFetcher({
+        _yahoo_chart_url("CL=F", "1d", "5m"): _closed_market_response(),
+        _yahoo_chart_url("CL=F", "5d", "1d"): _closed_market_response(),
+        _yahoo_chart_url("CL=F", "1mo", "1d"): _FakeResponse(200, {"chart": {"result": [{
+            "timestamp": [500], "indicators": {"quote": [{"close": [90.5]}]},
+        }]}}),
+    })
+
+    series = _fetch_yahoo_chart_series(fetcher, "CL=F", "1d")
+
+    assert series == [{"t": 500.0, "v": 90.5}]
+
+
+def test_fetch_yahoo_chart_series_never_synthesizes_when_every_window_is_empty():
+    """No real tick anywhere -- no chart, never a fabricated one, even after exhausting
+    every fallback window."""
+    fetcher = _FakeFetcher({
+        _yahoo_chart_url("CL=F", "1d", "5m"): _closed_market_response(),
+        _yahoo_chart_url("CL=F", "5d", "1d"): _closed_market_response(),
+        _yahoo_chart_url("CL=F", "1mo", "1d"): _closed_market_response(),
+    })
+    assert _fetch_yahoo_chart_series(fetcher, "CL=F", "1d") == []
+
+
+def test_fetch_yahoo_chart_series_does_not_re_request_a_fallback_identical_to_the_primary():
+    """1w's primary window IS 5d/30m -- the 5d/1d fallback is still a distinct request
+    (different interval), so this just confirms no duplicate/wasted request against the
+    exact same (range, interval) pair already tried."""
+    calls = []
+    real_fetcher = _FakeFetcher({
+        _yahoo_chart_url("CL=F", "5d", "30m"): _closed_market_response(),
+        _yahoo_chart_url("CL=F", "5d", "1d"): _FakeResponse(200, {"chart": {"result": [{
+            "timestamp": [1], "indicators": {"quote": [{"close": [1.0]}]},
+        }]}}),
+    })
+
+    class _Tracking:
+        def get(self, url, accept=None):
+            calls.append(url)
+            return real_fetcher.get(url, accept)
+
+    series = _fetch_yahoo_chart_series(_Tracking(), "CL=F", "1w")
+
+    assert series == [{"t": 1.0, "v": 1.0}]
+    assert len(calls) == len(set(calls))  # no URL requested twice
 
 
 # ------------------------------------------------------------------ asset resolution
