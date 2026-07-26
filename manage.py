@@ -537,11 +537,13 @@ def cmd_voice(args: argparse.Namespace) -> int:
 
 
 def cmd_research(args: argparse.Namespace) -> int:
-    """Search the web and synthesize a cited answer."""
+    """Research a topic and build the house-style PDF report (always a document, never inline text)."""
     from skills.research import SKILL
 
-    result = SKILL.search(query=args.query, deliver_full=not args.no_send)
+    result = SKILL.search(query=args.query, notify=not args.no_send)
     print(result.text)
+    if result.data.get("pdf_path"):
+        print(f"  PDF: {result.data['pdf_path']}")
     for s in result.data.get("sources", []):
         print(f"  [{s['n']}] {s['title']} — {s['url']}")
     return 0 if result.ok else 1
@@ -963,9 +965,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_form.set_defaults(func=cmd_form)
 
     # --- Phase 6: research & interview prep ---
-    p_res = sub.add_parser("research", help="search the web and synthesize a cited answer")
+    p_res = sub.add_parser("research", help="research a topic and build a house-style PDF report")
     p_res.add_argument("query")
-    p_res.add_argument("--no-send", action="store_true", help="don't push full version to Telegram")
+    p_res.add_argument("--no-send", action="store_true", help="don't push the PDF to Telegram")
     p_res.set_defaults(func=cmd_research)
 
     p_prep = sub.add_parser("prep", help="generate an interview prep pack (PDF)")

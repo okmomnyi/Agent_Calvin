@@ -31,7 +31,12 @@ log = get_logger("skills.telegram_bot")
 # command -> (skill, action, arg_key). Special commands (status/jobs/approve/voice) handled separately.
 COMMAND_MAP: dict[str, tuple[str, str, str | None]] = {
     "ask": ("persona", "answer", "question"),
+    # Both routed to the SAME action: /research had no COMMAND_MAP entry at all (the real
+    # bug -- "/research Camaro" fell through to /find as a workaround), and every path
+    # into this skill always builds the same house-style PDF now, so there is nothing
+    # left to route them to differently.
     "find": ("research", "search", "query"),
+    "research": ("research", "search", "query"),
     "prep": ("interview_prep", "prep", "company"),
     "mock": ("interview_prep", "mock", "company"),
     "draft": ("email_agent", "draft", "instruction"),
@@ -68,7 +73,8 @@ HELP = (
     "/jobs — latest job matches with Apply/Skip buttons\n"
     "/approve 1,3 — apply to jobs by id\n"
     "/ask <question> — answer as you (from verified facts)\n"
-    "/find <query> — web research (cited)\n"
+    "/research <topic> (or /find) — authoritative research, delivered as a PDF report "
+    "(add \"3-page\"/\"brief\"/\"detailed\", or \"with a cover letter\")\n"
     "/form <text|url> — build an answer sheet (never submits)\n"
     "/prep <company> · /mock <company> — interview prep & rehearsal\n"
     "/draft <instruction> — draft an email reply (never sends)\n"

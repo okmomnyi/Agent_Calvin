@@ -403,12 +403,16 @@ solve skills tests** (routes them to a prep pack). Produces a numbered answer sh
 is approval-gated. **Achieved:** per-question status (`answered/needs_input/story_needed/
 assessment_skipped`); assessments detected by regex independent of the model's own label.
 
-### Phase 6 — Research + interview prep (`research.py`, `interview_prep.py`)
+### Phase 6 — Research + interview prep (`skills/research/`, `interview_prep.py`)
 `research()` does a free DuckDuckGo search, synthesizes a **cited** answer, and never invents
-sources. Prep packs research the company then generate 15 Q&A (in Calvin's voice), 3 questions
-to ask, and a checklist → a charcoal **PDF** + Telegram summary. `/mock` is a kv-backed
-one-question-at-a-time rehearsal with candid feedback. **Achieved:** injectable searcher; PDF
-via `core/pdf.py`.
+sources — kept as a fast, snippet-based grounding helper for OTHER skills (interview prep's
+company research, study vault's web fallback below). Prep packs research the company then
+generate 15 Q&A (in Calvin's voice), 3 questions to ask, and a checklist → a charcoal **PDF** +
+Telegram summary. `/mock` is a kv-backed one-question-at-a-time rehearsal with candid feedback.
+**Achieved:** injectable searcher; PDF via `core/pdf.py`. **The user-facing `/research` command
+itself was rebuilt in Phase 39 below** — a request now always produces a full house-styled PDF
+report (authoritative sourcing, cited synthesis, images, references), never `research()`'s
+plain cited-text reply.
 
 ### Phase 7 — Voice layer (`voice.py`, `client/`)
 Laptop client: wake word (openwakeword) → record-till-silence → local faster-whisper STT →
@@ -1119,6 +1123,94 @@ for "pin that" with no explicit target: chart, then fact, then articles.
 (ring + waveform + mic button) whenever there's no directive and nothing pinned — a
 presenter failure, an empty `display()`, or simply "nothing asked yet" are visually
 indistinguishable from before this phase ever existed.
+
+### Phase 39 — Research reports: always a polished PDF (`skills/research/`)
+Upgrades the research skill to fix real, observed production bugs, all from one transcript:
+"make a 3-page doc" answered inline instead of producing a file; `/research` had no route
+at all (only `/find` worked); the format directive ("3page doc") was searched literally;
+citations were mangled (`Chevrolet_Camaro￼[3]`, a date captured as a ref); the reply sent
+twice; and — the one that made this an accuracy bug, not a polish one — essay-mill sourcing
+(Scribd, Bartleby) produced a real factual error: the output claimed the Camaro "is one of
+the last remaining muscle cars still in production today," when GM actually retired the
+sixth generation at the end of the 2024 model year. `Camaro_Research_Report.pdf` /
+`_v2.pdf` (the visual target named in the build brief) do not exist anywhere on this
+machine or its parent directory — confirmed by an exhaustive search — so this was built
+from the brief's own exhaustive textual furniture spec (palette hexes, cover elements,
+running header/footer, reference/figure/table style) rather than a pixel-matched render;
+same for `AGENTOS_BUG_LIST.md #15` (double-send), whose lesson is independently documented
+below and in `skills/job_hunter/skill.py`'s own comment on the identical bug class.
+
+**PDF is a routing rule, not a per-request choice.** Every path into this skill — the
+`research`/`find` commands (`skills/telegram_bot.py`'s `COMMAND_MAP`; `/research` had NO
+entry before this phase — that was the actual routing bug), and the keyword rules in
+`core/intent.py` for "search/research/look up/look into X", "make/write/create/build a
+doc/report/pdf/paper (about) X", and "X, N-page doc" — all resolve to the same
+`ResearchSkill.search()`. There is no inline-text branch and no "short answer" fast path;
+`search()` always builds and delivers a document. A DIFFERENT, narrower method,
+`research()`, still returns a quick cited-text `ResearchResult` for OTHER skills'
+own grounding (`interview_prep.py`'s company research, `study_vault.py`'s web fallback) —
+those are inputs to a different skill's output, never "the research report" shown to
+Calvin, so they keep the old fast, snippet-based path deliberately.
+
+**Package layout** (`skills/research/`, mirroring `job_hunter/`'s modular split):
+- `request_parsing.py` — `parse_request(text)` splits TOPIC from format/length/extras
+  ("3-page"/"brief"/"detailed", "with a cover letter to X") in exactly one place, reusing
+  `core.intent`'s own punctuation normalizer rather than re-solving Whisper's curly-quote
+  inconsistency a second time. Prefix framing ("make a doc about X") and suffix framing
+  ("X, 3-page doc") are both stripped, the latter anchored to the END of the string only —
+  an unanchored strip would just as happily eat "report" out of "the Mueller report".
+- `gather.py` — `search_authoritative()` filters every essay-mill/content-farm domain
+  (`ESSAY_MILL_DOMAINS`: Scribd, Bartleby, Coursehero, and similar; `research.
+  blocklist_domains` in config.yaml only ever EXTENDS this, never shrinks it) before a
+  result is even fetched; `gather_sources()` then fetches the FULL page (never hands a
+  bare search snippet to synthesis — a snippet is the search engine's relevance guess, not
+  evidence a fact is actually stated on the page), degrading to the snippet only if the
+  fetch itself fails.
+- `synthesis.py` — one `llm.chat_json("research", ...)` call turns the fetched sources into
+  a structured `DocumentPlan` (title/subtitle/abstract/sections/table), instructed to cite
+  every claim `[n]` against only the given source numbers, to hedge or OMIT a load-bearing
+  detail (date/status/figure) supported by just one source, and to paraphrase — never copy
+  a source's sentences verbatim (short attributed quotes excepted). `LLMError`, or a
+  response with no usable sections, degrades to `_degrade_to_fact_list()` — the sourced
+  snippets themselves, still individually cited, never a fabricated narrative and never
+  silent.
+- `images.py` — `WikimediaImages.find_image()` searches Commons's own free API, and embeds
+  a candidate ONLY after its own `extmetadata` verifies an open license (CC/public domain
+  markers checked against Commons's actual `LicenseShortName`/`LicenseUrl`, never guessed
+  from a filename). No open-licensed candidate anywhere in the result set → `None`, and the
+  caller renders the typed placeholder box — never an unverified image, never a search
+  substitute for a missing one.
+- `house_style.py` — the ONE place the look lives: palette (dark green + brass — `ink`,
+  `soft`, `accent`, `hairline`, `fig_fill`), the byline (`research.byline` in config.yaml,
+  default `"Research by Momanyi Kelvin"`) and monogram initials (`research.
+  monogram_initials`, default `"KM"`) are all config reads, never literals, so two
+  different-topic reports render identically and retuning the look is a one-line config
+  edit. Furniture helpers: the cover (kicker, title, accent rule, byline, source count,
+  date), the running header (topic left / "RESEARCH REPORT" right + rule — every page
+  EXCEPT the cover, whose own title already states the topic in full) and footer (the
+  byline as a signature line + page number, on every page including the cover), the brass
+  monogram ring (top-left of the cover only), figure/placeholder/table/reference flowables,
+  and an optional one-page cover letter (off by default; only built when a "with a cover
+  letter" directive is parsed).
+- `pdf_builder.py` — assembles a `DocumentPlan` + sources + an optional image into the
+  final ReportLab `SimpleDocTemplate`, calling `house_style.py` for every piece of look and
+  owning only layout/ordering: cover → contents (auto-included once section count reaches
+  5, a deterministic proxy for "roughly 5+ pages" that doesn't need a two-pass render) →
+  abstract → numbered sections (one figure or its placeholder placed after the first
+  section's own text) → table (only if the plan has one) → references.
+- `skill.py` — `ResearchSkill.search()` orchestrates parse → gather → synthesize → image →
+  build → **deliver once**. The double-send fix mirrors `job_hunter.approve()`'s own
+  documented fix for the identical bug class: the document goes out through
+  `core.notify.send_telegram_document()` — called exactly ONCE — and the `CommandResult.
+  text` returned to the caller's own reply channel is a short confirmation, never the
+  report's content, so the two literally cannot carry the same thing twice. There is no
+  "dashboard download" delivery path anywhere in this codebase (checked before reusing it,
+  per the build brief's own instruction) — Telegram document push, already proven by
+  `job_hunter.py`, is the one real mechanism, reused as-is.
+
+**Copyright discipline.** Synthesis is instructed to paraphrase, never reproduce — the
+report is original prose grounded in fetched sources, not a stitched-together copy; short,
+quoted, attributed fragments are the only verbatim exception.
 
 ---
 

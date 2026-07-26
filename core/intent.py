@@ -256,7 +256,22 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     # in particular) has already matched by the time the router gets here.
     ("stage_focus", re.compile(r"\b(?:show|pull up)\s+(?:me\s+)?(?:the\s+)?(?P<t>.+)", re.I),
      "subject"),
-    ("research", re.compile(r"\b(?:search|research|look up|find out)(?: for| about)?\s+(?P<t>.+)", re.I), "query"),
+    # Phase 39: every phrasing that means "research this and give me a document" routes
+    # here -- captures the WHOLE utterance (not just a tail) so
+    # skills/research/request_parsing.py stays the ONE place that ever splits topic from
+    # format directives ("3-page doc", "detailed", "with a cover letter"). This matters
+    # for the exact production bug: "Camaro and make a 3page doc" has no
+    # "search/research/look up" trigger word in it at all, so a rule keyed only on those
+    # verbs would never have caught it.
+    ("research", re.compile(
+        r"(?P<t>.*\b\d+\s*-?\s*pages?\b.*\b(?:doc(?:ument)?|report|pdf|paper)\b.*)", re.I),
+     "query"),
+    ("research", re.compile(
+        r"(?P<t>.*\b(?:make|write|create|build)\b.*\b(?:a\s+)?(?:doc(?:ument)?|report|pdf|paper)\b.*)",
+        re.I), "query"),
+    ("research", re.compile(
+        r"\b(?:search|research|look up|look into|find out)(?: for| about)?\s+(?P<t>.+)", re.I),
+     "query"),
 ]
 
 # Labels offered to the LLM fallback classifier (only when keywords miss).

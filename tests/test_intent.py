@@ -319,6 +319,30 @@ def test_stage_pin_unpin_idle_take_no_argument():
         assert intent.args == {}
 
 
+# ==================================================== research routing (Phase 39)
+# Regression coverage for the real production bug: "/research Camaro..." had no route at
+# all (only "/find" reached skills/research), and "Camaro and make a 3page doc" had no
+# "search/research/look up" trigger word in it, so nothing routed it either.
+RESEARCH_KEYWORDS = [
+    "search for the history of jazz",
+    "research Kenyan tax law",
+    "look up quantum computing",
+    "look into the history of NASA",
+    "find out about the Camaro",
+    "Camaro and make a 3page doc",
+    "Camaro, 3-page doc",
+    "make me a doc about the history of jazz",
+    "write a report on Kenyan tax law",
+]
+
+
+@pytest.mark.parametrize("text", RESEARCH_KEYWORDS)
+def test_every_research_phrasing_routes_to_the_research_skill(text):
+    intent = IntentRouter(llm=None).route(text, use_llm=False)
+    assert (intent.skill, intent.action) == ("research", "search"), f"{text!r} misrouted"
+    assert intent.args.get("query"), f"{text!r} captured no query arg"
+
+
 def test_show_my_emails_still_routes_to_email_search_not_the_stage():
     """"show" is a real trigger word for email_search -- the stage's own "show X" rule sits
     at the very end of the table, after every rule with a genuine claim on the word, so it

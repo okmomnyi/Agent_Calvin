@@ -300,6 +300,26 @@ markets:
       - {name: "S&P 500", symbol: "^GSPC", source: yahoo}
       - {name: "Nasdaq Composite", symbol: "^IXIC", source: yahoo}
 
+# --- Research reports (Phase 39) — always delivered as a PDF, never inline text ---
+research:
+  # Printed on the cover and every page footer as the signature line. Config, not a
+  # literal, so it retunes in one place (skills/research/house_style.py reads it live).
+  byline: "Research by Momanyi Kelvin"
+  monogram_initials: "KM"
+  # House-style palette (dark green + brass) -- one source of truth so two different-topic
+  # reports render visually identical. Hex values, not names, so house_style.py never
+  # guesses a shade.
+  palette:
+    ink: "#17352B"
+    soft: "#4A5A52"
+    accent: "#B08D57"
+    hairline: "#D3D9D4"
+    fig_fill: "#EDF1EE"
+  # Extends (never replaces) skills/research/gather.py's own hardcoded essay-mill floor --
+  # this is for deployment-specific additions, not for loosening the built-in blocklist.
+  blocklist_domains: []
+  max_sources: 6
+
 # --- Self-audit / infra recon (Phase 21) — REPORT ONLY, enrolled targets only ---
 infra:
   tls_warn_days: 21           # warn this far ahead of certificate expiry

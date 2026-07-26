@@ -668,6 +668,25 @@ cp config/timetable.example.yaml config/timetable.yaml   # then fill in your rea
 
 Job hunting, briefings, quizzes, tutoring, events, and CV tailoring all work off this data.
 
+**Research reports (Phase 39):** every `/research` (and `/find`) request is delivered as a
+house-styled PDF, never inline text. The signature line on the cover and every page
+footer — and the palette/monogram — are config, not hardcoded, in `config.yaml`'s
+`research:` section:
+
+```yaml
+research:
+  byline: "Research by Momanyi Kelvin"   # printed on the cover + every page footer
+  monogram_initials: "KM"                # the brass-ring mark, top-left of the cover
+  palette: { ink: "#17352B", soft: "#4A5A52", accent: "#B08D57",
+            hairline: "#D3D9D4", fig_fill: "#EDF1EE" }
+  blocklist_domains: []                  # EXTENDS (never replaces) the built-in essay-mill floor
+  max_sources: 6
+```
+
+Edit `byline`/`monogram_initials` once here — `skills/research/house_style.py` reads them
+live, so every future report picks up the change with no code edit and no restart-specific
+step beyond the normal deploy loop (§13).
+
 ---
 
 ## 11a. Verifying a deploy (Phase 28)
