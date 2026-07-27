@@ -123,6 +123,10 @@ def _slugify(text: str) -> str:
 
 class ResearchSkill(BaseSkill):
     name = "research"
+    acks = {
+        "search": ("Research started. I'll send the PDF through when it's ready.", "long"),
+        "research": ("Research started. I'll send the PDF through when it's ready.", "long"),
+    }
 
     def __init__(self, llm: LLMClient | None = None, searcher: Any | None = None,
                  fetcher: Any | None = None, images: WikimediaImages | None = None,

@@ -351,6 +351,10 @@ def _parse_rss(xml_text: str, source: str, category: str, group: str = "") -> li
 
 class WorldNewsSkill(BaseSkill):
     name = "world_news"
+    acks = {
+        "whats_up": ("On it — scanning the wires now…", "moment"),
+        "news": ("On it — scanning the wires now…", "moment"),
+    }
 
     def __init__(self, llm: LLMClient | None = None, fetcher: Any | None = None,
                  embedder: Any | None = None, memory: Memory | None = None,

@@ -8,14 +8,33 @@ work with zero API latency and the router stays testable without network access.
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 
 from core.llm import LLMClient, LLMError, get_client
 from core.logging_setup import get_logger
 
 log = get_logger("core.intent")
+
+# Phase 40: shared "did you mean...?" fuzzy match. Offline, dependency-free (stdlib
+# difflib), scoped narrowly to genuinely-unroutable input (an unrecognized Telegram slash
+# command, or the rare case dispatch_intent() can't find the routed skill at all) — never
+# applied to ordinary conversation, which the two-stage router above already resolves.
+_CLOSEST_MATCH_CUTOFF = 0.5
+
+
+def closest_match(word: str, candidates: Iterable[str], cutoff: float = _CLOSEST_MATCH_CUTOFF) -> str | None:
+    """The best fuzzy-string match for `word` among `candidates`, or None if nothing
+    clears the similarity cutoff — callers must treat None as "say so honestly, don't
+    guess", never substitute an arbitrary candidate."""
+    pool = list(candidates)
+    if not word or not pool:
+        return None
+    lowered = {c.lower(): c for c in pool}
+    hit = difflib.get_close_matches(word.lower(), list(lowered.keys()), n=1, cutoff=cutoff)
+    return lowered[hit[0]] if hit else None
 
 
 @dataclass

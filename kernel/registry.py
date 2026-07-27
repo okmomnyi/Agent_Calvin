@@ -222,6 +222,34 @@ class SkillRegistry:
         except Exception:  # noqa: BLE001 - config trouble must preserve command routing
             return False
 
+    # ------------------------------------------------------------- ack (Phase 40)
+    def route(self, text: str, *, use_llm: bool = True) -> Intent:
+        """Resolve `text` to an Intent via the SAME two paths handle_command() dispatches
+        an ordinary command through (the fast keyword table, falling back to the full
+        catalogue/LLM router) — but does NOT run continuations, the orchestrator, or
+        dispatch anything. This exists so a channel (Telegram today) can look up the ack
+        for what WILL run before calling handle_command()/dispatch_intent() to actually
+        run it, without paying for a second LLM call: resolve once here, dispatch the
+        SAME Intent afterward.
+        """
+        fast = self.router.route(text, use_llm=False)
+        if fast.confidence >= 0.9:
+            return fast
+        return self.router.route(text, use_llm=use_llm)
+
+    def ack_for(self, intent: Intent) -> tuple[str, str] | None:
+        """The (ack text, latency class) the accepting skill declares for this intent's
+        action, or None if the intent's skill isn't actually registered — the caller's
+        cue to show the unroutable error instead of an ack (see skills/telegram_bot.py)."""
+        skill = self._skills.get(intent.skill)
+        if skill is None:
+            return None
+        try:
+            return skill.ack_for(intent.action)
+        except Exception:  # noqa: BLE001 - a broken ack_for() must never block routing
+            log.warning("ack_for() failed for %s.%s", intent.skill, intent.action, exc_info=True)
+            return None
+
     # ------------------------------------------------------------- dispatch
     def dispatch_intent(self, intent: Intent) -> CommandResult:
         """Run a resolved Intent against its target skill, with graceful fallbacks."""

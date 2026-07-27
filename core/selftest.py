@@ -72,7 +72,7 @@ SERVICES: dict[str, list[str]] = {
     "self-driving stage": ["test_stage.py", "test_stage_skill.py", "test_presenter.py"],
     "kernel & routing": ["test_kernel.py", "test_intent.py", "test_router.py",
                          "test_llm_routing.py", "test_memory.py", "test_config.py",
-                         "test_auth.py"],
+                         "test_auth.py", "test_registry.py", "test_skill.py"],
 }
 
 

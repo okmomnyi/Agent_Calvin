@@ -73,6 +73,7 @@ def _to_24h(hour: int, meridiem: str | None) -> int:
 
 class MusicSkill(BaseSkill):
     name = "music"
+    acks = {"playlist": ("Right away. Cueing that up…", "moment")}
 
     def __init__(self, memory: Memory | None = None, llm: LLMClient | None = None,
                  spotify: SpotifyClient | None = None,

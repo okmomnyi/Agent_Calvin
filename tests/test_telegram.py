@@ -65,7 +65,9 @@ def test_job_buttons_shape():
 # ------------------------------------------------------------------ command routing
 def test_help_and_status(mem):
     core = _core(mem)
-    assert "AgentOS remote control" in core.run_command("help")
+    # Phase 40: /start's old hand-typed wall of commands is retired -- it's a short
+    # welcome pointing to /menu (the registry-derived source of truth) now.
+    assert "/menu" in core.run_command("help")
     assert "AgentOS status" in core.run_command("status")
 
 
@@ -240,28 +242,50 @@ def test_transcribe_injection(mem):
 def test_slow_work_is_acknowledged_before_it_starts(mem):
     """Calvin: "i need to see clearing emails in progress ... to know its already on it".
 
-    A long task with no acknowledgement is indistinguishable from a dead bot.
+    A long task with no acknowledgement is indistinguishable from a dead bot. Phase 40:
+    the ack is router-level now (BotCore.prepare()), keyed off the ROUTED (skill, action)
+    via the skill's own ack_for() -- not a raw-text regex table.
     """
     core = BotCore(memory=mem)
-    assert "email" in core.progress_line("delete all my LinkedIn emails").lower()
-    assert core.progress_line("create a playlist for late night coding")
+    prepared = core.prepare("create a playlist for late night coding")
+    assert prepared.error is None
+    assert prepared.ack  # music.playlist declares its own JARVIS-flavoured line
 
 
-def test_instant_replies_are_not_acknowledged(mem):
-    """Acking something that answers immediately is just noise."""
+def test_every_accepted_command_gets_exactly_one_ack_before_the_result(mem):
+    """The router-level guarantee: ANY confidently-routed command gets one ack, in the
+    skill's declared wording (or the plain default for a skill that hasn't set one)."""
     core = BotCore(memory=mem)
-    assert core.progress_line("what time is it") == ""
-    assert core.progress_line("/status") == ""
+    prepared = core.prepare("what time is it")
+    assert prepared.error is None
+    assert prepared.ack  # chat.time_status has no custom line -> the plain default
+    assert prepared.finish() != prepared.ack  # the ack is never the final answer itself
 
 
-def test_a_broken_ack_never_blocks_the_message(mem, monkeypatch):
+def test_no_ack_commands_are_never_acknowledged(mem):
+    """Interactive/instant slash commands (their own custom keyboards, or genuinely
+    immediate) are exempt -- an ack in front of a status snapshot would just be noise."""
+    core = BotCore(memory=mem)
+    for cmd in ("status", "menu", "jobs"):
+        prepared = core.prepare_command(cmd, "")
+        assert prepared.ack is None
+        assert prepared.error is None
+
+
+def test_a_broken_ack_lookup_never_blocks_the_message(mem, monkeypatch):
+    """A skill whose ack_for() itself raises must degrade to the default, not crash the
+    whole reply (registry.ack_for() already guards this — this proves BotCore relies on
+    that guard rather than re-raising)."""
     core = BotCore(memory=mem)
 
-    def boom(*a, **k):
+    def boom(intent):
         raise RuntimeError("router down")
 
-    monkeypatch.setattr(core, "_PROGRESS_PATTERNS", boom)   # not iterable -> would raise
-    assert core.progress_line("anything") == ""      # reported as no-ack, not raised
+    monkeypatch.setattr(core.registry, "ack_for", boom)
+    with pytest.raises(RuntimeError):
+        core.prepare("what time is it")
+    # registry.ack_for() itself (tested in test_registry.py) is what actually catches a
+    # broken skill.ack_for() -- BotCore trusts that contract rather than duplicating it.
 
 
 def test_a_forgotten_session_stops_hijacking_after_the_ttl(mem):
@@ -530,3 +554,88 @@ def test_password_reset_revokes_other_sessions_but_not_devices(mem):
 
     assert "other signed-in session" in reply
     assert store.validate_session(device) is not None
+
+
+# ---------------------------------------------------------- Phase 40: /menu is registry-derived
+def test_menu_lists_a_real_registered_command(mem):
+    """/menu must reflect what's ACTUALLY registered, not a hand-typed wall of text --
+    /research (COMMAND_MAP -> research.search) is a real, always-on skill."""
+    core = BotCore(memory=mem)
+    text = core.menu_text()
+    assert "/research" in text
+    assert "/digest" in text
+
+
+def test_menu_grows_when_a_new_skill_registers_without_any_hand_edit(mem):
+    """The guardrail from the task spec: register a fake skill the menu code has never
+    heard of, and it must appear -- proving menu_entries() walks registry.manifest()
+    rather than a hardcoded table."""
+    from core.skill import BaseSkill, CommandResult
+
+    class _BrandNewSkill(BaseSkill):
+        name = "totally_new_skill"
+
+        def commands(self):
+            return {"do_thing": self.do_thing}
+
+        def do_thing(self, **_):
+            return CommandResult(text="done")
+
+    core = BotCore(memory=mem)
+    before = core.menu_text()
+    assert "totally_new_skill" not in before
+
+    core.registry.register(_BrandNewSkill())
+    after = core.menu_text()
+    assert "totally_new_skill" in after
+
+
+def test_telegram_commands_match_the_menus_own_command_set(mem):
+    """setMyCommands (the native '/' popup) must be built from the exact same source as
+    /menu's text -- two independently hand-maintained lists is the bug this replaces."""
+    core = BotCore(memory=mem)
+    menu_words = {
+        line.split(" ", 1)[0][1:]
+        for line in core.menu_text().splitlines()
+        if line.startswith("/")
+    }
+    popup_words = {word for word, _desc in core.telegram_commands()}
+    assert menu_words == popup_words
+    assert "research" in popup_words
+
+
+# ------------------------------------------------------- Phase 40: helpful, never a stack trace
+def test_unroutable_free_text_gets_a_guess_and_a_menu_pointer(mem, monkeypatch):
+    """The two-stage router's classify() fallback always names SOME registered skill
+    (confidence 0.6), so plain gibberish alone never hits this branch -- the real
+    "unroutable" case for free text is the catalogue/classify router naming a (skill,
+    action) that isn't actually registered (e.g. a hallucinated intent). prepare() must
+    still degrade to a helpful error rather than acking nothing meaningful or crashing."""
+    from core.intent import Intent
+
+    core = BotCore(memory=mem)
+    monkeypatch.setattr(
+        core.registry, "route",
+        lambda text, use_llm=True: Intent(name="ghost.act", skill="not_a_real_skill", action="act"),
+    )
+    prepared = core.prepare("asdkjfh qwerty zzzz nonsense gibberish")
+    assert prepared.ack is None
+    assert prepared.error is not None
+    assert "/menu" in prepared.error
+
+
+def test_a_typoed_slash_command_gets_a_did_you_mean(mem):
+    core = BotCore(memory=mem)
+    prepared = core.prepare_command("reserch", "Camaro")  # typo of /research
+    assert prepared.ack is None
+    assert prepared.error is not None
+    assert "research" in prepared.error
+
+
+def test_error_never_stacks_with_an_ack(mem):
+    """An unroutable command must return the error ALONE -- never an 'on it!' immediately
+    followed by a failure, which the task calls out by name as the bug being fixed."""
+    core = BotCore(memory=mem)
+    prepared = core.prepare_command("totally_not_a_real_command_xyz", "")
+    assert prepared.ack is None
+    assert prepared.error is not None

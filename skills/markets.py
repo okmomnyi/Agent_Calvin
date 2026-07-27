@@ -428,6 +428,10 @@ def _fetch_alpha_vantage_forex(fetcher: Any, inst: Instrument, api_key: str) -> 
 
 class MarketsSkill(BaseSkill):
     name = "markets"
+    acks = {
+        "snapshot": ("Reading the tape — one moment…", "moment"),
+        "markets": ("Reading the tape — one moment…", "moment"),
+    }
 
     def __init__(self, llm: LLMClient | None = None, fetcher: Any | None = None,
                  news_skill: WorldNewsSkill | None = None,

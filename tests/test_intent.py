@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.intent import IntentRouter
+from core.intent import IntentRouter, closest_match
 from core.llm import LLMClient
 
 
@@ -350,3 +350,27 @@ def test_show_my_emails_still_routes_to_email_search_not_the_stage():
     intent = IntentRouter(llm=None).route(
         "show my emails from recruiting@acme.com", use_llm=False)
     assert (intent.skill, intent.action) == ("email_agent", "search")
+
+
+# ==================================================== closest_match (Phase 40)
+def test_closest_match_finds_a_typo_ed_command():
+    assert closest_match("crete", ["create", "playlist", "news"]) == "create"
+
+
+def test_closest_match_is_case_insensitive_but_returns_original_casing():
+    assert closest_match("PLAYLYST", ["playlist", "news"]) == "playlist"
+
+
+def test_closest_match_returns_none_when_nothing_is_close():
+    assert closest_match("zzzzz", ["playlist", "news", "markets"]) is None
+
+
+def test_closest_match_returns_none_for_empty_word_or_empty_candidates():
+    assert closest_match("", ["playlist"]) is None
+    assert closest_match("playlist", []) is None
+
+
+def test_closest_match_picks_the_single_best_candidate_not_a_list():
+    result = closest_match("nws", ["news", "new", "menu"])
+    assert result in ("news", "new", "menu")  # deterministic given difflib, just not a list
+    assert isinstance(result, str)

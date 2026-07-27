@@ -1214,6 +1214,72 @@ quoted, attributed fragments are the only verbatim exception.
 
 ---
 
+### Phase 40 — The Telegram bot feels alive (`skills/telegram_bot.py`, `core/skill.py`, `core/intent.py`, `kernel/registry.py`)
+Fixes three real bugs, all from the same root cause: acknowledgements and command
+resolution were scattered and ad hoc instead of living in one place. `_PROGRESS_PATTERNS`
+was a regex table matched against raw text — it never saw slash commands, so `/find X`
+(a genuinely slow research call) got silent treatment while a lucky free-text phrasing of
+the same request got acked. `CommandHandler(known, on_command)` silently swallowed any
+slash command not in a hand-typed `known` list, dropping it with no reply at all — not an
+error, not a routed command, nothing. And `/start`'s reply was a hand-typed wall of text
+that drifted from what the registry actually contained the moment a skill was added or
+renamed.
+
+**Ack lives at the router, not in each skill.** `core/skill.py` adds `ack_for(action) ->
+(text, latency_class)` to the `Skill` protocol — `BaseSkill`'s default reads a per-instance
+`acks: dict[str, tuple[str, str]]`, falling back to `(ACK_DEFAULT_TEXT, ACK_DEFAULT_LATENCY)`
+= `("On it…", "moment")` for any action a skill hasn't given its own line. `kernel/
+registry.py` adds `route(text) -> Intent` (resolves via the same fast-keyword-then-LLM path
+`handle_command()` uses, but never dispatches — no side effect) and `ack_for(intent) ->
+(text, latency) | None` (`None` only when the intent's skill isn't actually registered, or
+the skill's own `ack_for()` raises — degrades rather than propagating). `BotCore.prepare()`
+/ `.prepare_command()` (`skills/telegram_bot.py`) are the ONLY callers of either: they
+resolve-and-ack (or resolve-and-error) *before* anything runs, returning a `PreparedReply`
+with exactly one of `ack` / `error` set (both `None` only for an active session
+continuation, which bypasses acking entirely — a mock interview or quiz answer isn't a new
+command). The on_command/on_text PTB handlers send `prepared.ack` first (if set), then call
+`prepared.finish()` for the actual result — one send per outcome, never a duplicate (the
+same bug class as `AGENTOS_BUG_LIST.md #15`, the research-report double-send). If routing
+fails, `prepared.error` replaces the ack outright; they never stack, because the ack was
+never sent in the first place.
+
+**`/menu` is generated, never hand-typed.** `BotCore.menu_entries()` walks `registry.
+manifest()` (Phase 35) and groups by skill via a small display-only `_MENU_GROUPS` table
+(command word looked up from `COMMAND_MAP`, or the special-case table for
+approve/voiceon/voiceoff/summarize — those never got a `COMMAND_MAP` entry to begin with).
+Register a new skill and `/menu` picks it up on the next call automatically. `telegram_
+commands()` derives Telegram's native "/" popup from the exact same entries, and
+`build_application()`'s `post_init` hook (plus `/menu` itself, so the popup stays current
+mid-session) calls `set_my_commands()` with it — one source for both surfaces, so they
+cannot drift apart the way a hand-typed `/start` list eventually would. `/start`'s reply is
+now a short pointer at `/menu` instead of a copy of it.
+
+**Unroutable input guesses, helpfully.** `core/intent.py` adds `closest_match(word,
+candidates)` — stdlib `difflib.get_close_matches`, case-insensitive, a 0.5 cutoff below
+which it returns `None` rather than a wrong guess (callers must treat `None` as "say so
+honestly," never substitute an arbitrary candidate). This is the only fuzzy-matcher
+anywhere in this codebase — none existed before this phase, confirmed by grep before
+building rather than assumed. Both a typoed slash command (`/reserch` → "did you mean
+/research?") and unroutable free text run through the same helper against the same
+candidate pool (`COMMAND_MAP` keys plus the small set of special-cased commands), so the
+two error paths give consistent suggestions. No raw exception ever reaches the chat —
+`registry.ack_for()`'s own try/except is the last line of defense if a skill's `ack_for()`
+itself is broken.
+
+**Known trade-off, not a gap:** `prepare()`'s `finish()` calls the existing `route_text()`
+unchanged rather than threading through the already-resolved `Intent`, so a message that
+misses the fast keyword table is routed twice (once to decide the ack, once to actually
+dispatch). Restructuring `route_text()`/`handle_command()` to share one resolved `Intent`
+would touch every test's `_FakeRegistry`; deferred rather than risked in this pass. Also
+pre-existing and unrelated to this phase: `COMMAND_MAP["plan"]` maps to `("semester_
+planner", "plan", None)`, but `run_command()`'s hardcoded `if cmd == "plan":` branch (the
+orchestrator dispatch) is checked first, so that `COMMAND_MAP` entry is dead for
+slash-command purposes — `/menu` now surfaces this pre-existing shadowing as a visible
+"/plan" entry whose docstring doesn't quite match what typing `/plan` does; out of scope to
+fix here.
+
+---
+
 ## 9. Conversational state machines
 
 Three flows keep session state in `kv` (JSON) so they work identically over voice, Telegram

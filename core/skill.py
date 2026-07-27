@@ -40,6 +40,20 @@ UNIVERSAL_INVARIANTS = [
     "no_voice_cloning",    # P9
 ]
 
+# Phase 40: the one router-level acknowledgement mechanism. A skill declares its own
+# wording via `ack_for()`; the router (kernel/registry.py) looks it up and sends it the
+# INSTANT a command is accepted and routed — before the skill runs, never after, and
+# never emitted by the skill itself (that was the old, scattered per-skill-text-regex
+# mechanism this replaces — see skills/telegram_bot.py's module docstring).
+ACK_DEFAULT_TEXT = "On it…"
+# "instant" — no real ack needed (trivial/near-zero-latency work; still declared so every
+#             action has a defined latency class, but callers may skip sending it).
+# "moment"  — a few seconds; a brief "on it" reads as alive, not slow.
+# "long"    — the reply may take a while; the ack's OWN wording must say the result
+#             follows later, so silence-until-done never reads as the bot having died.
+ACK_DEFAULT_LATENCY = "moment"
+AckLatency = str  # "instant" | "moment" | "long" — not a real Enum to keep skill.py dependency-free
+
 
 @dataclass
 class SkillContract:
@@ -124,6 +138,11 @@ class Skill(Protocol):
     def handle(self, action: str, payload: dict[str, Any]) -> CommandResult:
         """Dispatch an action by name to the matching command handler."""
 
+    def ack_for(self, action: str) -> tuple[str, AckLatency]:
+        """(ack text, latency class) the router shows the instant `action` is accepted
+        and routed — before this skill runs. Override per-action for a skill-specific,
+        JARVIS-flavoured line; the default applies to every action not explicitly named."""
+
 
 class BaseSkill:
     """Convenience base providing a default handle() that dispatches via commands()."""
@@ -156,3 +175,14 @@ class BaseSkill:
                 text=f"Skill '{self.name}' has no action '{action}'.", ok=False
             )
         return handler(**payload)
+
+    # Per-action overrides: {action: (ack_text, latency)}. A skill sets this class
+    # attribute rather than overriding ack_for() directly, unless it needs logic beyond a
+    # plain lookup — keeps the common case (a handful of custom lines) a one-line dict.
+    acks: dict[str, tuple[str, AckLatency]] = {}
+
+    def ack_for(self, action: str) -> tuple[str, AckLatency]:
+        """Default: the plain generic ack for anything not in `self.acks`. See
+        core.skill's module-level ACK_DEFAULT_TEXT/ACK_DEFAULT_LATENCY docstring for what
+        the three latency classes mean."""
+        return self.acks.get(action, (ACK_DEFAULT_TEXT, ACK_DEFAULT_LATENCY))

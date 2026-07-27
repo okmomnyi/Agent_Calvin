@@ -1,29 +1,51 @@
 """Telegram bot — full remote control of AgentOS (Phase 8).
 
-Single authorized chat id. Commands (/status /jobs /approve /ask /find /form /prep /mock
-/draft /facts /events /cv /summarize /remember /forget /instructions /voiceoff /voiceon
-/news /markets),
-inline Apply/Skip/Details buttons on the job digest, free text routed through the SAME
-intent engine as voice, and voice notes transcribed on the droplet (faster-whisper) and
-routed identically — the reliable "call it from my phone" path (Phase 7 phone access).
+Single authorized chat id. Commands (/menu for the full, always-current list) — inline
+Apply/Skip/Details buttons on the job digest, free text routed through the SAME intent
+engine as voice, and voice notes transcribed on the droplet (faster-whisper) and routed
+identically — the reliable "call it from my phone" path (Phase 7 phone access).
 
 BotCore holds all the testable logic (authorization, status, callbacks, routing); the
 python-telegram-bot handlers at the bottom are thin async wrappers. PTB is imported lazily
 so importing this module never requires the library or starts polling.
+
+Phase 40 — "does the bot feel alive": three real transcript bugs, one fix. (1) A correct
+command could return NOTHING until the work finished — indistinguishable from a dead bot.
+The old fix was `_PROGRESS_PATTERNS`, a hand-maintained regex table matched against RAW
+TEXT before routing, and it explicitly skipped every slash command (`if raw.startswith("/")
+: return ""`) — so the majority of real usage got no ack at all. (2) A wrong/unrecognized
+slash command was WORSE than silent: `CommandHandler(known, on_command)` only registers a
+hand-typed `known` list, so anything outside it never reached `on_command` at all — the
+`"Unknown command /{cmd}. Try /help."` fallback already written in `run_command()` was
+dead code Telegram never let fire. (3) `/start`'s help text was a second hand-maintained
+list, independent of both COMMAND_MAP and whatever skills are actually registered.
+
+The fix is ONE mechanism, at the router: `PreparedReply` (`BotCore.prepare()` /
+`.prepare_command()`) resolves a message to its (skill, action) via
+`registry.route()`/`registry.ack_for()` (kernel/registry.py, Phase 40) and returns EITHER
+an ack (the skill's own declared wording, core/skill.py's `ack_for()`) to show before the
+work runs, OR a helpful error (a closest-match guess via `core.intent.closest_match()`,
+stdlib `difflib` — no fuzzy-matcher existed anywhere in this codebase before this) — never
+both, never neither for an ordinary command. `_PROGRESS_PATTERNS`/`progress_line()` are
+gone; the catch-all `MessageHandler(filters.COMMAND, on_command)` replaces the hand-typed
+`known` list; `/menu` (registry-derived, also calls `setMyCommands`) replaces the old
+hand-typed `/start` wall of text.
 """
 
 from __future__ import annotations
 
 import inspect
 import json
-import re
 import secrets
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from core.config import get_settings
+from core.intent import closest_match
 from core.logging_setup import get_logger
 from core.memory import Memory, get_memory
+from core.skill import ACK_DEFAULT_LATENCY, ACK_DEFAULT_TEXT
 from kernel.registry import SkillRegistry
 
 log = get_logger("skills.telegram_bot")
@@ -67,35 +89,105 @@ COMMAND_MAP: dict[str, tuple[str, str, str | None]] = {
     "markets": ("markets", "snapshot", None),
 }
 
+# Slash commands handled with custom logic (an orchestrator call, a live OTP flow, an
+# inline-keyboard reply) rather than a plain (skill, action) dispatch — these get NO
+# router-level ack (mostly instant/interactive, not the "long silent wait" this phase
+# exists to fix) and are never candidates for the "unroutable" error either, since they
+# unambiguously exist. "plan" is deliberately here, not resolved via COMMAND_MAP's own
+# (shadowed) "plan" entry: run_command() has always special-cased /plan to the
+# orchestrator ahead of the COMMAND_MAP lookup, so COMMAND_MAP["plan"] never actually
+# fires as a slash command today — a pre-existing quirk this phase doesn't change.
+_NO_ACK_COMMANDS = frozenset({
+    "start", "help", "status", "plan", "jobs", "quiz", "cards", "deadlines", "deadline",
+    "events", "tags", "cv", "resetpassword", "menu",
+})
+
+# (skill, action) -> the slash word that reaches it OUTSIDE of COMMAND_MAP (hardcoded
+# branches in run_command()). Bridges the same pair for both the ack lookup and /menu's
+# reverse "what word types this" display.
+_SPECIAL_COMMAND_TARGETS: dict[tuple[str, str], str] = {
+    ("job_hunter", "approve"): "approve",
+    ("voice", "mute"): "voiceoff",
+    ("voice", "unmute"): "voiceon",
+    ("email_agent", "digest"): "summarize",
+}
+
+
+def _command_word_for(skill: str, action: str) -> str | None:
+    """The slash word that reaches (skill, action), if one exists — COMMAND_MAP first,
+    then the hardcoded specials. None means this capability has no slash command at all
+    (still reachable by free text/voice, and still shown in /menu, just not as a "/word").
+
+    Some actions have more than one alias (e.g. "find"/"research" both reach
+    research.search — "find" predates the Phase 39 fix and is kept only for backward
+    compatibility). When a skill-named alias exists, prefer it — it's the discoverable,
+    self-documenting one — rather than whichever alias happens to appear first."""
+    matches = [cmd for cmd, (s, a, _arg) in COMMAND_MAP.items() if (s, a) == (skill, action)]
+    if skill in matches:
+        return skill
+    if matches:
+        return matches[0]
+    return _SPECIAL_COMMAND_TARGETS.get((skill, action))
+
+
+def _resolve_command_skill_action(cmd: str) -> tuple[str, str] | None:
+    """(skill, action) for a slash command NOT in `_NO_ACK_COMMANDS` — the mirror image of
+    `_command_word_for`, used to look up the ack (or conclude the command is unroutable)
+    before it actually runs."""
+    if cmd == "approve":
+        return ("job_hunter", "approve")
+    if cmd in ("voiceoff", "voiceon"):
+        return ("voice", "mute" if cmd == "voiceoff" else "unmute")
+    if cmd == "summarize":
+        return ("email_agent", "digest")
+    if cmd in COMMAND_MAP:
+        skill, action, _arg_key = COMMAND_MAP[cmd]
+        return (skill, action)
+    return None
+
+
+# /menu's grouping (Jobs · Study · Email · Markets · News · Research · Media · System) —
+# a skill absent here defaults to "System" rather than needing a hand-edit every time a
+# new skill is added.
+_MENU_GROUPS: dict[str, str] = {
+    "job_hunter": "Jobs", "cv_tailor": "Jobs", "interview_prep": "Jobs", "event_scout": "Jobs",
+    "spaced_rep": "Study", "vault": "Study", "code_tutor": "Study",
+    "semester_planner": "Study", "lecture_capture": "Study",
+    "email_agent": "Email",
+    "markets": "Markets",
+    "world_news": "News",
+    "research": "Research",
+    "music": "Media", "youtube": "Media",
+}
+_DEFAULT_MENU_GROUP = "System"
+_MENU_GROUP_ORDER = ["Jobs", "Study", "Email", "Markets", "News", "Research", "Media", "System"]
+
+# Retired (Phase 40): the old /start reply was a second hand-maintained command list,
+# independent of both COMMAND_MAP and whatever's actually registered — /menu (built live
+# from the registry) is the one source of truth now; this is just a short welcome.
 HELP = (
-    "AgentOS remote control:\n"
-    "/status — system snapshot\n"
-    "/jobs — latest job matches with Apply/Skip buttons\n"
-    "/approve 1,3 — apply to jobs by id\n"
-    "/ask <question> — answer as you (from verified facts)\n"
-    "/research <topic> (or /find) — authoritative research, delivered as a PDF report "
-    "(add \"3-page\"/\"brief\"/\"detailed\", or \"with a cover letter\")\n"
-    "/form <text|url> — build an answer sheet (never submits)\n"
-    "/prep <company> · /mock <company> — interview prep & rehearsal\n"
-    "/draft <instruction> — draft an email reply (never sends)\n"
-    "/facts — browse persona facts\n"
-    "/quiz [unit] · /cards — spaced-repetition review & card approval\n"
-    "/tutor <mode> <topic> — explain/drill/socratic/mock lab · /explain <topic>\n"
-    "/briefing · /plan · /due · /cram <unit> — semester command center\n"
-    "/deadline <YYYY-MM-DD> <title> · /deadlines — add/confirm deadlines\n"
-    "/remember <rule> · /forget <rule> · /instructions\n"
-    "/events [tag] · /tags add|remove <tag> — free events matching your interests\n"
-    "/cv [update|tailor <JD>|facts] — CV tailoring & ATS optimization\n"
-    "/rules · /retro · /contracts — patterns I've noticed & what each skill may read\n"
-    "/news [world,tech_ai,sports,business,kenya] [full] · /whatsup — today's world briefing, "
-    "only what's new since you last asked unless you add \"full\" (also runs automatically "
-    "each morning)\n"
-    "/markets — crypto/forex/gold-oil/stock-index prices with news context. Data only — "
-    "no predictions, no buy/sell calls (also runs automatically each morning)\n"
-    "/summarize <thing> · /voiceoff · /voiceon\n"
-    "/resetpassword — reset your break-glass password (emails a code first; reply with it)\n"
-    "Send a voice note or just type — it routes like everything else."
+    "👋 I'm AgentOS.\n\n"
+    "Send /menu for everything I can do right now — grouped, and always current with "
+    "whatever's actually registered.\n\n"
+    "Or just type or say what you want naturally; I'll route it. Voice notes work too."
 )
+
+
+@dataclass
+class PreparedReply:
+    """Phase 40's one router-level ack/error primitive. Exactly one of `ack`/`error` is
+    set for an ordinary command — or BOTH are None only for a session continuation
+    (mid-quiz answer, a pending trash/send confirmation, ...), which runs its own
+    established flow via `finish()` with no pre-emptive ack (see BotCore.prepare()).
+    Callers: send `ack` first if set (or `error` INSTEAD, never both), THEN call
+    `finish()` exactly once for the real result — this is what makes "one send per
+    outcome" (ack, then result/error, never stacked, never duplicated) a fact of the
+    call shape rather than something each caller has to remember.
+    """
+
+    ack: str | None
+    error: str | None
+    finish: Callable[[], str]
 
 _MOCK_KEY = "interview_prep.mock"
 _QUIZ_KEY = "spaced_rep.session"
@@ -208,6 +300,8 @@ class BotCore:
         cmd = cmd.lstrip("/").lower()
         if cmd in ("start", "help"):
             return HELP
+        if cmd == "menu":
+            return self.menu_text()
         if cmd == "status":
             return self.status_text()
         if cmd == "approve":
@@ -233,7 +327,10 @@ class BotCore:
             skill, action, arg_key = COMMAND_MAP[cmd]
             payload = {arg_key: arg} if arg_key else {}
             return self._dispatch(skill, action, payload)
-        return f"Unknown command /{cmd}. Try /help."
+        guess = closest_match(cmd, self._known_command_words())
+        if guess:
+            return f'I couldn\'t place "/{cmd}" — did you mean /{guess}? See /menu for everything I can do.'
+        return f'I couldn\'t place "/{cmd}". See /menu for everything I can do.'
 
     def _session_fresh(self, key: str, ttl: int = 600) -> bool:
         """True only if a stored session exists AND is younger than ttl.
@@ -313,43 +410,144 @@ class BotCore:
                 note = "\n(Remembered — I won't ask about this pattern again.)"
         return f"{verb}: {action.description}{note}"
 
-    # Phrase -> what to say while it runs. Matched on the RAW TEXT, not on a routed intent:
-    # routing with use_llm=False misses anything only the catalogue router resolves (playlist
-    # included), and routing WITH the LLM would spend a model call deciding what to say before
-    # the work even starts -- doubling the latency the ack exists to hide.
-    _PROGRESS_PATTERNS = [
-        (re.compile(r"\b(?:delete|trash|clear|clean)\b.*\bemail", re.I), "🧹 Finding those emails…"),
-        (re.compile(r"\b(?:summari[sz]e|digest|check)\b.*\b(?:inbox|email)", re.I), "📬 Reading your inbox…"),
-        (re.compile(r"\b(?:write|send|compose|draft)\b.*\bemail", re.I), "✍️ Drafting that email…"),
-        (re.compile(r"\bplaylist\b", re.I), "🎵 Building that playlist…"),
-        (re.compile(r"\b(?:dj|mix|set)\b.*\b(?:music|track|song)|\bdj\s+(?:set|mode)", re.I),
-         "🎧 Sequencing a set…"),
-        (re.compile(r"\b(?:queue|play)\b.*\b(?:music|song|track)|\bmusic\b.*\bqueue", re.I),
-         "🎵 Picking tracks…"),
-        (re.compile(r"\b(?:find|search|scan|any)\b.*\bjobs?\b|\bhunt\b", re.I), "💼 Scanning job sources…"),
-        (re.compile(r"\btailor|refine|polish\b.*\b(?:cv|resume)|\b(?:cv|resume)\b.*\btailor", re.I),
-         "📄 Tailoring your CV…"),
-        (re.compile(r"\bprep(?:are)?\b.*\binterview|\bprep pack\b", re.I), "🎯 Building a prep pack…"),
-        (re.compile(r"\b(?:research|look up|find out)\b", re.I), "🔎 Researching…"),
-        (re.compile(r"\bask (?:my )?notes\b|\bin my notes\b", re.I), "📚 Searching your notes…"),
-        (re.compile(r"\btriage\b|\bclean\b.*\binbox", re.I), "🧹 Triaging your inbox…"),
-        (re.compile(r"\bbriefing\b", re.I), "☀️ Assembling your briefing…"),
-        (re.compile(r"\bevents?\b.*\b(?:scan|find|any)|\bany (?:free )?events?\b", re.I),
-         "🌐 Scanning for events…"),
-    ]
+    # ------------------------------------------------------------- ack / menu / errors (Phase 40)
+    def _known_command_words(self) -> list[str]:
+        """Every real slash word — COMMAND_MAP plus the hardcoded specials — the pool a
+        "did you mean...?" guess is drawn from."""
+        return sorted(set(COMMAND_MAP.keys()) | _NO_ACK_COMMANDS | {
+            "approve", "voiceoff", "voiceon", "summarize",
+        })
 
-    def progress_line(self, text: str) -> str:
-        """A one-line 'on it' for slow work, or '' when the reply will be immediate."""
-        raw = (text or "").strip()
-        if not raw or raw.startswith("/"):
-            return ""
+    def _is_continuation(self, text: str) -> bool:
+        """True if this free-text message would be swallowed by an active session/reply
+        flow instead of ordinary routing — read-only checks only (mirrors route_text()'s
+        own precedence exactly), so this is always safe to call before route_text() runs
+        without double-triggering anything stateful."""
         try:
-            for pattern, line in self._PROGRESS_PATTERNS:
-                if pattern.search(raw):
-                    return line
-        except Exception:  # noqa: BLE001 - a courtesy line must never block the real reply
-            return ""
-        return ""
+            from core.orchestrator import is_plan_reply
+
+            if is_plan_reply(text) and self.mem.list_plans(active_only=True):
+                return True
+        except Exception:  # noqa: BLE001 - an unavailable planner must not block routing
+            pass
+        try:
+            from core.approvals import get_store, parse_approval_reply
+
+            store = get_store(self.mem)
+            if store.pending() and parse_approval_reply(text):
+                return True
+        except Exception:  # noqa: BLE001 - an unavailable approval store degrades to "no"
+            pass
+        if self._session_fresh(_SEND_KEY) or self._session_fresh(_TRASH_KEY):
+            return True
+        if self._session_fresh(_MOCK_KEY, ttl=_LIVE_SESSION_TTL):
+            return True
+        if self._session_fresh(_QUIZ_KEY, ttl=_LIVE_SESSION_TTL):
+            return True
+        if self._session_fresh(_TUTOR_KEY, ttl=_LIVE_SESSION_TTL):
+            return True
+        return False
+
+    @staticmethod
+    def _unroutable_text(shown: str, guess: str | None) -> str:
+        shown = shown if len(shown) <= 60 else shown[:57] + "…"
+        if guess:
+            return f'I couldn\'t place "{shown}" — did you mean /{guess}? See /menu for everything I can do.'
+        return f'I couldn\'t place "{shown}". See /menu for everything I can do.'
+
+    def prepare(self, text: str) -> PreparedReply:
+        """The router-level ack/error mechanism for FREE TEXT. Resolves once via
+        `registry.route()`, looks up the accepting skill's own ack via
+        `registry.ack_for()`, and returns a PreparedReply whose `finish()` re-runs
+        `route_text()` (unchanged) to get the real result — never both an ack and an
+        error, and a continuation gets neither (its own flow already replies).
+        """
+        if text.startswith("/") or self._is_continuation(text):
+            return PreparedReply(None, None, lambda: self.route_text(text))
+        intent = self.registry.route(text, use_llm=True)
+        ack = self.registry.ack_for(intent)
+        if ack is None:
+            guess = closest_match(text, self._known_command_words())
+            error = self._unroutable_text(text, guess)
+            return PreparedReply(None, error, lambda: error)
+        return PreparedReply(ack[0], None, lambda: self.route_text(text))
+
+    def prepare_command(self, cmd: str, arg: str = "") -> PreparedReply:
+        """The router-level ack/error mechanism for SLASH COMMANDS. A command with custom
+        (interactive-keyboard / instant / orchestrator) handling in `_NO_ACK_COMMANDS`
+        gets no ack — `on_command`'s own existing branches run it, `finish()` here is
+        never actually called for those. Anything else resolves via
+        `_resolve_command_skill_action()`; no resolution -> the closest-match error.
+        """
+        cmd = cmd.lstrip("/").lower()
+        if cmd in _NO_ACK_COMMANDS:
+            return PreparedReply(None, None, lambda: self.run_command(cmd, arg))
+        resolved = _resolve_command_skill_action(cmd)
+        if resolved is None:
+            guess = closest_match(cmd, self._known_command_words())
+            error = (f'I couldn\'t place "/{cmd}" — did you mean /{guess}? See /menu for '
+                    "everything I can do." if guess else
+                    f'I couldn\'t place "/{cmd}". See /menu for everything I can do.')
+            return PreparedReply(None, error, lambda: error)
+        skill_name, action = resolved
+        skill = self.registry.get(skill_name)
+        ack_text, _latency = skill.ack_for(action) if skill is not None else (
+            ACK_DEFAULT_TEXT, ACK_DEFAULT_LATENCY)
+        return PreparedReply(ack_text, None, lambda: self.run_command(cmd, arg))
+
+    def menu_entries(self) -> list[dict[str, str]]:
+        """[{group, command, description}], derived ENTIRELY from the live registry
+        (`registry.manifest()`) — never hand-maintained. A skill with no wired slash
+        command still appears exactly once (so a newly-registered skill is always
+        visible with zero hand-edits here), shown by its skill+action pair rather than a
+        "/word" it doesn't have."""
+        seen_skills: set[str] = set()
+        entries: list[dict[str, str]] = []
+        for item in self.registry.manifest():
+            skill, action, doc = item["skill"], item["action"], item["doc"]
+            cmd_word = _command_word_for(skill, action)
+            if cmd_word is None and skill in seen_skills:
+                continue
+            seen_skills.add(skill)
+            group = _MENU_GROUPS.get(skill, _DEFAULT_MENU_GROUP)
+            command = f"/{cmd_word}" if cmd_word else skill
+            entries.append({"group": group, "command": command,
+                            "description": doc or f"{skill} {action}"})
+        return entries
+
+    def menu_text(self) -> str:
+        """The /menu message — grouped, scannable, always current."""
+        entries = self.menu_entries()
+        by_group: dict[str, list[dict[str, str]]] = {}
+        for e in entries:
+            by_group.setdefault(e["group"], []).append(e)
+        order = list(_MENU_GROUP_ORDER) + sorted(g for g in by_group if g not in _MENU_GROUP_ORDER)
+        lines = ["🧭 What I can do (always current):"]
+        for group in order:
+            items = by_group.get(group)
+            if not items:
+                continue
+            lines.append(f"\n{group}")
+            for e in sorted(items, key=lambda x: x["command"]):
+                lines.append(f"{e['command']} — {e['description']}")
+        lines.append("\nOr just say it naturally — I'll route it.")
+        return "\n".join(lines)
+
+    def telegram_commands(self) -> list[tuple[str, str]]:
+        """(command, description) pairs for Telegram's `setMyCommands` — ONLY entries
+        with a real, typeable "/word" (Telegram rejects a command name containing a
+        space), deduplicated, description capped at Telegram's own 256-char limit."""
+        out: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for e in self.menu_entries():
+            if not e["command"].startswith("/"):
+                continue
+            word = e["command"][1:]
+            if word in seen:
+                continue
+            seen.add(word)
+            out.append((word, (e["description"] or word)[:256]))
+        return out
 
     def _consume(self, key: str, skill: str, action: str, payload: dict) -> str:
         """Run one continuation, then end that session.
@@ -660,8 +858,7 @@ async def _delete_later(bot: Any, chat_id: int, message_id: int, delay: float) -
 def build_application(core: BotCore | None = None):
     """Build the python-telegram-bot Application with all handlers wired."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-    from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
-                              MessageHandler, filters)
+    from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
 
     core = core or BotCore()
     settings = core.settings
@@ -683,6 +880,27 @@ def build_application(core: BotCore | None = None):
             return
         cmd = update.message.text.split()[0].lstrip("/").split("@")[0]
         arg = update.message.text[len(update.message.text.split()[0]):].strip()
+
+        # Phase 40: the router-level ack/error, BEFORE any special-case handling below —
+        # exactly one of ack/error fires, ack always before the eventual result, and
+        # _NO_ACK_COMMANDS (the commands with their OWN custom handling right below) get
+        # neither, since `on_command`'s own branches — not `prepared.finish()` — run them.
+        prepared = core.prepare_command(cmd, arg)
+        if prepared.error:
+            await _reply(update, prepared.error)
+            return
+        if prepared.ack:
+            await update.message.reply_text(prepared.ack)
+        if cmd == "menu":
+            await _reply(update, core.menu_text())
+            try:  # keep the native "/" popup in sync every time /menu is asked for
+                from telegram import BotCommand
+
+                await context.bot.set_my_commands(
+                    [BotCommand(word, desc) for word, desc in core.telegram_commands()])
+            except Exception:  # noqa: BLE001 - the menu MESSAGE must still land either way
+                log.warning("setMyCommands failed", exc_info=True)
+            return
 
         def _kb(rows):
             return InlineKeyboardMarkup(
@@ -796,14 +1014,18 @@ def build_application(core: BotCore | None = None):
                 context.application.create_task(
                     _delete_later(context.bot, msg.chat_id, msg.message_id, delay=180))
             return
-        # Say what is being started BEFORE doing it. Calvin: "when i tell the bot to clear
-        # emails i need to see clearing emails in progress ... when i say create a playlist i
+        # Say what is being started BEFORE doing it (Phase 40's one router-level ack/error
+        # mechanism — see BotCore.prepare()). Calvin: "when i tell the bot to clear emails
+        # i need to see clearing emails in progress ... when i say create a playlist i
         # need to se a creating playlist feedback". A long task with no acknowledgement is
         # indistinguishable from a dead bot, and he had no way to tell which he had.
-        ack = core.progress_line(text)
-        if ack:
-            await update.message.reply_text(ack)
-        await _reply(update, core.route_text(text))
+        prepared = core.prepare(text)
+        if prepared.error:
+            await _reply(update, prepared.error)
+            return
+        if prepared.ack:
+            await update.message.reply_text(prepared.ack)
+        await _reply(update, prepared.finish())
 
     async def on_voice(update: "Update", context) -> None:  # noqa: ANN001
         if not await _guard(update):
@@ -820,11 +1042,25 @@ def build_application(core: BotCore | None = None):
             return
         await _reply(update, f"🎙 “{transcript}”\n\n" + core.route_text(transcript))
 
-    app = Application.builder().token(settings.telegram_bot_token).build()
-    known = (["start", "help", "status", "jobs", "approve", "voiceoff", "voiceon", "summarize",
-              "quiz", "cards", "deadline", "deadlines", "events", "tags", "resetpassword"]
-             + list(COMMAND_MAP.keys()))
-    app.add_handler(CommandHandler(known, on_command))
+    async def _post_init(application) -> None:  # noqa: ANN001
+        """Populate the native "/" popup at startup so it's current even before anyone
+        ever asks for /menu."""
+        try:
+            from telegram import BotCommand
+
+            await application.bot.set_my_commands(
+                [BotCommand(word, desc) for word, desc in core.telegram_commands()])
+        except Exception:  # noqa: BLE001 - the bot must still come up if this one call fails
+            log.warning("setMyCommands failed at startup", exc_info=True)
+
+    app = Application.builder().token(settings.telegram_bot_token).post_init(_post_init).build()
+    # Phase 40: a catch-all for EVERY slash command, known or not — replaces the old
+    # hand-typed `known` list, which silently swallowed anything outside it (PTB never
+    # even invoked on_command for an unregistered command, so the "Unknown command"
+    # fallback already written in run_command() could never actually fire). on_command's
+    # own prepare_command() now decides ack vs. the closest-match error for whatever
+    # comes through.
+    app.add_handler(MessageHandler(filters.COMMAND, on_command))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

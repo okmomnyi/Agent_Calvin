@@ -40,6 +40,7 @@ _SEND_SESSION_KEY = "email_agent.send_session"
 
 class EmailAgentSkill(BaseSkill):
     name = "email_agent"
+    acks = {"digest": ("Right away. Going through the inbox…", "moment")}
 
     def __init__(
         self,
