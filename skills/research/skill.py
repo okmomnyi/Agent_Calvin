@@ -232,7 +232,8 @@ class ResearchSkill(BaseSkill):
 
         sources = gather_sources(self.searcher, self.fetcher, parsed.topic,
                                  max_results=max_sources, extra_blocklist=extra_blocklist)
-        plan = synthesize(self.llm, parsed.topic, sources, length=parsed.length)
+        plan = synthesize(self.llm, parsed.topic, sources, length=parsed.length,
+                         target_pages=parsed.target_pages)
 
         image_dir = settings.data_dir / "research" / "images"
         image = None

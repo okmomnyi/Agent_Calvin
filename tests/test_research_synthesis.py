@@ -153,6 +153,42 @@ def test_length_affects_the_section_budget_in_the_prompt(fake_llm):
     assert brief_prompt != detailed_prompt
 
 
+def test_an_explicit_page_target_asks_for_more_than_the_detailed_bucket_alone(fake_llm):
+    """Regression: "make it a 10 page doc" used to collapse into the same fixed "detailed"
+    budget as a plain 5-page ask (target_pages was parsed and then silently discarded), so
+    every request above 5 pages got byte-for-byte identical instructions AND the same fixed
+    max_tokens=2200 ceiling (~3 pages) -- which is exactly why a 10-page request landed at
+    3 pages. A real page count must steer for MORE content and get a bigger token budget."""
+    fake_llm.post_result = json.dumps({"sections": [{"heading": "H", "paragraphs": ["p [1]"]}]})
+    sources = [_source(1, "T", "https://x.test/a", "...")]
+
+    synthesize(fake_llm, "topic", sources, length="detailed")
+    detailed_prompt = fake_llm.calls[-1]["messages"][1]["content"]
+    detailed_tokens = fake_llm.calls[-1]["params"]["max_tokens"]
+
+    synthesize(fake_llm, "topic", sources, length="detailed", target_pages=10)
+    ten_page_prompt = fake_llm.calls[-1]["messages"][1]["content"]
+    ten_page_tokens = fake_llm.calls[-1]["params"]["max_tokens"]
+
+    assert ten_page_prompt != detailed_prompt
+    assert ten_page_tokens > detailed_tokens
+
+
+def test_page_target_scales_max_tokens_but_stays_within_a_safe_ceiling(fake_llm):
+    """A single completion call has a real ceiling -- an absurd page count must still ask
+    for more than a modest one, but never past what the endpoint can safely return."""
+    fake_llm.post_result = json.dumps({"sections": [{"heading": "H", "paragraphs": ["p [1]"]}]})
+    sources = [_source(1, "T", "https://x.test/a", "...")]
+
+    synthesize(fake_llm, "topic", sources, target_pages=3)
+    small = fake_llm.calls[-1]["params"]["max_tokens"]
+
+    synthesize(fake_llm, "topic", sources, target_pages=200)
+    huge = fake_llm.calls[-1]["params"]["max_tokens"]
+
+    assert small < huge <= 4096
+
+
 def test_never_copies_source_text_verbatim_beyond_the_degrade_paths_own_snippet(fake_llm):
     """The degrade path's own fact list legitimately quotes the snippet directly (it says
     so honestly via the section heading "Findings") -- but a SUCCESSFUL synthesis's system
