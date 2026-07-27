@@ -113,6 +113,12 @@ class _FakeSpotify:
         return {"item": {"name": "Suzanna", "artists": [{"name": "Sauti Sol"}]}}
 
 
+_DEFAULT_TRACK_POOL = [
+    "Sauti Sol - Suzanna", "Burna Boy - Last Last", "Nyashinski - Malaika",
+    "Sauti Sol - Melanin", "Burna Boy - Ye", "Nyashinski - Now You Know",
+]
+
+
 class _MusicLLM(LLMClient):
     def __init__(self, payload=None):
         self.routes = {"default": "m", "write": "m"}
@@ -128,7 +134,11 @@ class _MusicLLM(LLMClient):
         if "adjacent" in blob.lower() or "artists" in schema_hint:
             return {"artists": [{"name": "Nviiri the Storyteller", "why": "same Nairobi soul lane"},
                                 {"name": "Madeup Artist", "why": "does not exist"}]}
-        return {"tracks": ["Sauti Sol - Suzanna", "Burna Boy - Last Last", "Nyashinski - Malaika"]}
+        # Mirrors a real model asked the same question twice: skip whatever the "avoid"
+        # line already named (matched by title, since the avoid line uses an em dash while
+        # this pool uses a hyphen) rather than woodenly returning the identical three tracks.
+        picks = [t for t in _DEFAULT_TRACK_POOL if t.split(" - ", 1)[-1] not in blob]
+        return {"tracks": (picks or _DEFAULT_TRACK_POOL)[:3]}
 
 
 @pytest.fixture
@@ -599,6 +609,18 @@ def test_session_survives_the_laptop_and_keeps_topping_up(music):
     assert len(sp.queued) > before
 
 
+def test_a_repeated_topup_never_requeues_the_same_track_twice(music):
+    """Regression: with a picker that keeps answering the same question the same way, one
+    song (e.g. "Day in a Life") kept re-queuing itself every 4-minute tick forever, and
+    clearing/skipping did nothing because the NEXT tick just added it right back. The
+    picker must remember what this session already queued and never repeat a URI."""
+    skill, sp, _, _ = music
+    skill.start_session(cue="focus")
+    for _ in range(5):
+        skill.session_tick()
+    assert len(sp.queued) == len(set(sp.queued)), f"a track was queued more than once: {sp.queued}"
+
+
 def test_tick_does_nothing_when_no_session_is_running(music):
     """A timer that acts unasked is how music starts by itself at 3am."""
     skill, sp, _, _ = music
@@ -729,7 +751,8 @@ def test_sessions_mix_in_discovery(music):
     skill.start_session()
     seen = []
     orig = skill._candidates
-    skill._candidates = lambda cue, n=10, discover=False: seen.append(discover) or orig(cue, n)
+    skill._candidates = (lambda cue, n=10, discover=False, avoid=None:
+                         seen.append(discover) or orig(cue, n, discover=discover, avoid=avoid))
     for _ in range(3):
         skill.session_tick()
     assert any(seen), "no discovery pass in three top-ups"

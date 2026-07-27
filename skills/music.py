@@ -52,6 +52,9 @@ DISCOVERY_RATIO = 0.35
 # How many tracks to keep queued ahead. Small enough that a "stop" takes effect within a
 # track or two -- Spotify has no API to clear a queue, so anything already queued WILL play.
 SESSION_LOOKAHEAD = 4
+# How many recently-queued tracks a session remembers and tells the picker to avoid. Capped
+# so the kv row and the "don't repeat" prompt line stay small, not for any musical reason.
+SESSION_MEMORY = 30
 TIME_RANGES = ("short_term", "medium_term", "long_term")
 
 # Substring of core.spotify's 404 message. Matched rather than typed as its own exception
@@ -272,15 +275,25 @@ class MusicSkill(BaseSkill):
         return kept, dropped
 
     # ------------------------------------------------------------- candidate generation
-    def _candidates(self, cue: str, n: int = 10, discover: bool = False) -> list[str]:
+    def _candidates(self, cue: str, n: int = 10, discover: bool = False,
+                    avoid: list[str] | None = None) -> list[str]:
         """Ask the model for track ideas from the taste picture — NOT Spotify's recommender.
 
         `discover` biases toward artists ADJACENT to his taste rather than the ones already on
         repeat: same scene, era or lane, but names he is unlikely to have saved. That is the
         "help me discover more music" half of a session; the rest stays familiar so background
         listening does not become a listening test.
+
+        `avoid` is what a continuous session already queued recently. Without it, every tick
+        asks the model the same question from the same taste snapshot and gets the same
+        "obvious" answer back (typically the artist's biggest single) — a real bug that showed
+        up as one song re-queuing itself every 4 minutes for as long as the session ran.
         """
         model = self._taste()
+        avoid_line = ""
+        if avoid:
+            avoid_line = ("\nAlready queued recently in this session -- do NOT suggest any of "
+                          "these again: " + "; ".join(avoid[-20:]))
         try:
             data = self.llm.chat_json(
                 "write",
@@ -291,45 +304,57 @@ class MusicSkill(BaseSkill):
                  {"role": "user", "content":
                     f"Cue: {cue or 'keep it going'}\nGenres: {model.get('top_genres')}\n"
                     f"Artists: {model.get('top_artists')}\nEras: {model.get('eras')}\n"
-                    f"Give {n} tracks."}],
+                    f"Give {n} tracks.{avoid_line}"}],
                 schema_hint='{"tracks": [string]}', temperature=0.7, max_tokens=500)
             return [t for t in data.get("tracks", []) if isinstance(t, str)][:n]
         except LLMError:
             return [a for a in (self._taste().get("top_artists") or [])[:n]]
 
-    def _resolve(self, queries: list[str], filters: dict[str, bool]) -> list[dict[str, Any]]:
-        """Every idea must resolve to a REAL Spotify track before it goes anywhere near a queue."""
+    def _resolve(self, queries: list[str], filters: dict[str, bool],
+                avoid_uris: set[str] | None = None) -> list[dict[str, Any]]:
+        """Every idea must resolve to a REAL Spotify track before it goes anywhere near a queue.
+
+        `avoid_uris` is a hard backstop, not just the prompt-level ask above: if the model
+        ignores the "don't repeat" instruction (or a query happens to resolve to the same
+        track another way), a track already queued this session is dropped here regardless.
+        """
         found = []
         for q in queries:
             try:
                 track = self.sp.search_track(q)
             except SpotifyError:
                 continue
-            if track:
+            if track and (not avoid_uris or track.get("uri") not in avoid_uris):
                 found.append(track)
         found, _ = self._apply_filters(found, filters)
         return found
 
     # ------------------------------------------------------------- auto-queue
     def auto_queue(self, cue: str = "", count: int = 8, discover: bool = False,
-                   **_: Any) -> CommandResult:
+                   avoid: list[dict[str, str]] | None = None, **_: Any) -> CommandResult:
+        avoid = avoid or []
+        avoid_uris = {a["uri"] for a in avoid if a.get("uri")}
+        avoid_labels = [a["label"] for a in avoid if a.get("label")]
         filters = self.rule_filters(cue)
-        tracks = self._resolve(self._candidates(cue, count * 2, discover=discover), filters)[:count]
+        tracks = self._resolve(
+            self._candidates(cue, count * 2, discover=discover, avoid=avoid_labels),
+            filters, avoid_uris=avoid_uris)[:count]
         if not tracks:
             return CommandResult(text="Couldn't find anything that fits (and I won't queue "
                                       "songs I can't verify exist).", ok=False)
-        queued = []
+        queued, queued_ids = [], []
         for t in tracks:
             try:
                 self.sp.queue(t["uri"])
                 queued.append(f"{t['artists'][0]['name']} — {t['name']}")
+                queued_ids.append({"uri": t["uri"], "label": queued[-1]})
             except SpotifyError as exc:
                 return CommandResult(text=f"Queued {len(queued)} then hit: {exc}",
-                                     ok=False, data={"queued": queued})
+                                     ok=False, data={"queued": queued, "queued_ids": queued_ids})
         note = " (explicit filtered per your rule)" if filters["no_explicit"] else ""
         return CommandResult(text=f"▶️ Queued {len(queued)} track(s){note}:\n" +
                                   "\n".join(f"  • {q}" for q in queued),
-                             data={"queued": queued, "filters": filters})
+                             data={"queued": queued, "queued_ids": queued_ids, "filters": filters})
 
     # ------------------------------------------------------------- listening budget
     def _month_key(self) -> str:
@@ -411,10 +436,12 @@ class MusicSkill(BaseSkill):
                 text="No active Spotify device. Open Spotify on your laptop or phone and play "
                      "anything for a second, then say 'start the session' again.", ok=False)
 
-        self.mem.kv_set(_SESSION_KV, json.dumps({
-            "active": True, "cue": cue, "started_at": self._now(),
-            "last_topup": 0.0, "queued_total": 0}))
+        state = {"active": True, "cue": cue, "started_at": self._now(),
+                "last_topup": 0.0, "queued_total": 0, "recent": []}
+        self.mem.kv_set(_SESSION_KV, json.dumps(state))
         first = self.auto_queue(cue=cue, count=SESSION_LOOKAHEAD)
+        state["recent"] = first.data.get("queued_ids", [])[-SESSION_MEMORY:]
+        self.mem.kv_set(_SESSION_KV, json.dumps(state))
         try:
             self.sp.play()
         except SpotifyError:
@@ -493,11 +520,14 @@ class MusicSkill(BaseSkill):
         # adjacent artists so the "discover more music" ask actually happens.
         discover = (int(state.get("topups", 0)) % 3 == 2)
         res = self.auto_queue(cue=state.get("cue", ""), count=SESSION_LOOKAHEAD,
-                              discover=discover)
+                              discover=discover, avoid=state.get("recent", []))
         n = len(res.data.get("queued", []))
         state["last_topup"] = self._now()
         state["topups"] = int(state.get("topups", 0)) + 1
         state["queued_total"] = int(state.get("queued_total", 0)) + n
+        # Roll the "avoid" memory forward -- without this, the exact same picker call every
+        # 4 minutes was how one song (e.g. "Day in a Life") kept re-queuing itself on a loop.
+        state["recent"] = (state.get("recent", []) + res.data.get("queued_ids", []))[-SESSION_MEMORY:]
         self.mem.kv_set(_SESSION_KV, json.dumps(state))
         return CommandResult(
             text=f"Topped up {n} track(s)" + (" (discovery mix)" if discover else "")
