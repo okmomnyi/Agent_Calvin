@@ -93,11 +93,22 @@ class WikimediaImages:
         info = self._image_info(title)
         if info is None:
             return None
-        url, license_name, license_url, artist = info
+        url, license_name, license_url, artist, mime = info
+        # Commons's File: namespace holds video/audio/PDF uploads too (srnamespace=6 is not
+        # "images", it's "files") -- a report about "agentic coding" once resolved to a
+        # Cline demo .webm, which reportlab/PIL cannot open as an image and the whole PDF
+        # build blew up on. Commons's own reported MIME is authoritative; an Accept header
+        # is only a request-side hint and Commons serves whatever the file actually is
+        # regardless of it.
+        if not mime.startswith("image/"):
+            return None
         if not _is_open_license(license_name, license_url):
             return None
         resp = self.fetcher.get(url, accept="image/*")
         if resp is None or resp.status_code != 200:
+            return None
+        content_type = resp.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
             return None
         content = getattr(resp, "content", None)
         if not content:
@@ -122,8 +133,8 @@ class WikimediaImages:
             return []
         return [h["title"] for h in hits if h.get("title")]
 
-    def _image_info(self, title: str) -> tuple[str, str, str, str] | None:
-        url = (f"{_COMMONS_API}?action=query&prop=imageinfo&iiprop=url%7Cextmetadata"
+    def _image_info(self, title: str) -> tuple[str, str, str, str, str] | None:
+        url = (f"{_COMMONS_API}?action=query&prop=imageinfo&iiprop=url%7Cextmetadata%7Cmime"
               f"&format=json&titles={quote_plus(title)}")
         resp = self.fetcher.get(url, accept="application/json")
         if resp is None or resp.status_code != 200:
@@ -136,6 +147,7 @@ class WikimediaImages:
             license_name = (meta.get("LicenseShortName") or {}).get("value", "")
             license_url = (meta.get("LicenseUrl") or {}).get("value", "")
             artist = (meta.get("Artist") or {}).get("value", "")
-            return info["url"], license_name, license_url, artist
+            mime = info.get("mime") or ""
+            return info["url"], license_name, license_url, artist, mime
         except (ValueError, KeyError, TypeError, IndexError, StopIteration):
             return None

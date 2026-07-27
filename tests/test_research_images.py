@@ -20,10 +20,12 @@ _PNG_BYTES = bytes.fromhex(
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, json_data=None, content: bytes | None = None) -> None:
+    def __init__(self, status_code: int, json_data=None, content: bytes | None = None,
+                headers: dict[str, str] | None = None) -> None:
         self.status_code = status_code
         self._json = json_data
         self.content = content
+        self.headers = headers if headers is not None else {"Content-Type": "image/jpeg"}
 
     def json(self):
         if self._json is None:
@@ -49,9 +51,10 @@ def _search_response(titles: list[str]) -> _FakeResponse:
 
 
 def _imageinfo_response(url: str, license_name: str, license_url: str = "",
-                        artist: str = "Jane Doe") -> _FakeResponse:
+                        artist: str = "Jane Doe", mime: str = "image/jpeg") -> _FakeResponse:
     return _FakeResponse(200, {"query": {"pages": {"1": {"imageinfo": [{
         "url": url,
+        "mime": mime,
         "extmetadata": {
             "LicenseShortName": {"value": license_name},
             "LicenseUrl": {"value": license_url},
@@ -153,6 +156,43 @@ def test_a_raising_fetcher_degrades_to_no_image_not_a_crash(tmp_path):
 
     images = WikimediaImages(fetcher=_BoomFetcher())
     assert images.find_image("Anything", tmp_path) is None
+
+
+def test_a_non_image_file_in_the_commons_namespace_is_rejected(tmp_path):
+    """Regression: a research report on "agentic coding" once resolved to a Commons video
+    (a Cline demo .webm) -- srnamespace=6 is Commons's File: namespace, which holds video/
+    audio/PDF uploads too, not just images. reportlab/PIL cannot open a video as an image,
+    and that took the whole PDF build down. Commons's own reported MIME must gate this
+    before the file is ever downloaded or handed to reportlab."""
+    fetcher = _FakeFetcher({
+        "list=search": _search_response(["File:Agentic_Coding_Demo.webm"]),
+        "titles=File%3AAgentic_Coding_Demo.webm": _imageinfo_response(
+            "https://upload.wikimedia.org/Agentic_Coding_Demo.webm", "CC BY-SA 4.0",
+            mime="video/webm"),
+    })
+    images = WikimediaImages(fetcher=fetcher)
+
+    result = images.find_image("agentic coding", tmp_path)
+
+    assert result is None
+    # never even attempted the download -- rejected on Commons's own metadata alone
+    assert not any("Agentic_Coding_Demo.webm" in u and "upload.wikimedia.org" in u
+                  for u in fetcher.requested)
+
+
+def test_a_response_whose_actual_content_type_is_not_an_image_is_rejected(tmp_path):
+    """Backstop for the mime check above: even if Commons's metadata claims image/*, a
+    served file whose actual Content-Type disagrees must not be trusted either."""
+    fetcher = _FakeFetcher({
+        "list=search": _search_response(["File:Mislabeled.jpg"]),
+        "titles=File%3AMislabeled.jpg": _imageinfo_response(
+            "https://upload.wikimedia.org/Mislabeled.jpg", "CC0 1.0"),
+        "upload.wikimedia.org/Mislabeled.jpg": _FakeResponse(
+            200, content=b"not really an image", headers={"Content-Type": "application/octet-stream"}),
+    })
+    images = WikimediaImages(fetcher=fetcher)
+
+    assert images.find_image("Something", tmp_path) is None
 
 
 def test_attribution_strips_html_tags_from_the_artist_field(tmp_path):
