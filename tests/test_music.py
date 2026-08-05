@@ -3,11 +3,14 @@
 What must hold, given Spotify's real restrictions:
   * we never call an endpoint Spotify removed for new apps (Recommendations / Audio-Features
     / Related-Artists / Featured-Playlists) — the client refuses even if asked;
-  * nothing is queued or suggested that wasn't RESOLVED to a real track/artist via Search;
+  * nothing is added to a playlist that wasn't RESOLVED to a real track via Search;
   * discovery is framed as OUR suggestion, never as Spotify's recommendation;
-  * "DJ mode" is sequencing + narration and says so — the Web API cannot mix audio;
-  * transition lines use a stock voice (§0 P9) — there is no cloning path;
   * Calvin's standing music rules are honoured (and 'music' is a category this skill declares).
+
+The auto-queue picker, the continuous "session" (Phase 27), and DJ-set sequencing were
+removed (see skills/music.py's module docstring) -- they pushed tracks onto Spotify's live
+queue on their own initiative, and the Web API has no way to clear a queue once something is
+on it. There is deliberately no test coverage for them here.
 """
 
 from __future__ import annotations
@@ -129,16 +132,10 @@ class _MusicLLM(LLMClient):
         if self._payload is not None:
             return self._payload
         blob = " ".join(m["content"] for m in messages)
-        if "order" in schema_hint:
-            return {"order": [2, 0, 1], "intro": "Easing in with some Afrobeats."}
         if "adjacent" in blob.lower() or "artists" in schema_hint:
             return {"artists": [{"name": "Nviiri the Storyteller", "why": "same Nairobi soul lane"},
                                 {"name": "Madeup Artist", "why": "does not exist"}]}
-        # Mirrors a real model asked the same question twice: skip whatever the "avoid"
-        # line already named (matched by title, since the avoid line uses an em dash while
-        # this pool uses a hyphen) rather than woodenly returning the identical three tracks.
-        picks = [t for t in _DEFAULT_TRACK_POOL if t.split(" - ", 1)[-1] not in blob]
-        return {"tracks": (picks or _DEFAULT_TRACK_POOL)[:3]}
+        return {"tracks": _DEFAULT_TRACK_POOL[:3]}
 
 
 @pytest.fixture
@@ -147,12 +144,10 @@ def music(mem, monkeypatch):
 
     engine = PersonaEngine(llm=None, memory=mem)
     monkeypatch.setattr(mus, "get_engine", lambda: engine)
-    spoken: list[str] = []
     sp = _FakeSpotify()
-    skill = MusicSkill(memory=mem, llm=_MusicLLM(), spotify=sp,
-                       speak=lambda t: spoken.append(t), clock=lambda: NOW_9AM)
+    skill = MusicSkill(memory=mem, llm=_MusicLLM(), spotify=sp, clock=lambda: NOW_9AM)
     mem.register_contract("music", ["music"], list(UNIVERSAL_INVARIANTS))
-    return skill, sp, engine, spoken
+    return skill, sp, engine
 
 
 # ================================================================= Spotify's real constraints
@@ -268,7 +263,7 @@ def test_playlist_403_with_missing_scopes_points_at_reauth_not_the_dashboard():
 # ================================================================= no active device (Phase 23)
 def test_play_without_a_device_asks_the_laptop_to_open_spotify(music):
     """The Web API can't start the app, so 'open Spotify first' was a dead end by voice."""
-    skill, sp, _, _ = music
+    skill, sp, _ = music
 
     def no_device():
         raise SpotifyError("No active Spotify device — open Spotify somewhere first.")
@@ -282,7 +277,7 @@ def test_play_without_a_device_asks_the_laptop_to_open_spotify(music):
 
 def test_other_spotify_errors_do_not_open_anything(music):
     """Only the one failure opening Spotify can actually fix should trigger it."""
-    skill, sp, _, _ = music
+    skill, sp, _ = music
 
     def not_premium():
         raise SpotifyError("Spotify returned 403 — the account likely isn't Premium.")
@@ -351,7 +346,7 @@ def test_consent_flow_fails_before_asking_for_a_code_if_the_client_id_is_missing
 
 
 def test_connect_flags_a_non_premium_account(music):
-    skill, sp, _, _ = music
+    skill, sp, _ = music
     sp.me = lambda: {"id": "c", "display_name": "Calvin", "product": "free"}
     res = skill.connect()
     assert res.ok is False and "Premium" in res.text
@@ -359,7 +354,7 @@ def test_connect_flags_a_non_premium_account(music):
 
 # ================================================================= taste model
 def test_taste_model_uses_available_endpoints_only(music):
-    skill, sp, engine, _ = music
+    skill, sp, engine = music
     res = skill.taste()
     assert "afrobeats" in res.data["top_genres"]
     assert "Sauti Sol" in res.data["top_artists"]
@@ -367,48 +362,30 @@ def test_taste_model_uses_available_endpoints_only(music):
 
 
 def test_taste_feeds_verified_persona_facts(music):
-    skill, _, engine, _ = music
+    skill, _, engine = music
     skill.taste()
     facts = {f["key"]: f for f in engine.get_facts("music")}
     assert "top_genres" in facts and facts["top_genres"]["verified"] == 1
     assert facts["top_genres"]["source"] == "spotify"
 
 
-# ================================================================= queueing (verified only)
-def test_queue_resolves_every_track_via_search(music):
-    skill, sp, _, _ = music
-    skill.taste()
-    res = skill.auto_queue(cue="study music", count=3)
-    assert res.ok
-    assert len(sp.queued) == len(res.data["queued"])
-    assert sp.searched                          # nothing queued without a Search hit
-
-
-def test_unverifiable_tracks_are_never_queued(music):
-    skill, sp, _, _ = music
-    skill._llm = _MusicLLM({"tracks": ["Nonexistent Band - Nonexistent Song"]})
-    res = skill.auto_queue(cue="whatever")
-    assert res.ok is False
-    assert sp.queued == []
-    assert "won't queue songs I can't verify" in res.text
-
-
 # ================================================================= standing rules
 def test_explicit_rule_filters_tracks_before_8am(mem, music):
-    skill, sp, engine, _ = music
+    skill, sp, engine = music
     engine.remember("never queue explicit lyrics before 8am", category="music")
     skill._now = lambda: at_hour(6)
     filters = skill.rule_filters("morning focus")
     assert filters["no_explicit"] is True
 
+    skill.taste()
     skill._llm = _MusicLLM({"tracks": ["Someone - explicit banger", "Sauti Sol - Suzanna"]})
-    res = skill.auto_queue(cue="morning focus", count=5)
-    assert len(sp.queued) == 1                  # the explicit one was dropped
-    assert "explicit filtered per your rule" in res.text
+    res = skill.playlist(theme="morning focus", count=5)
+    assert res.ok
+    assert len(sp.playlist_uris) == 1            # the explicit one was dropped
 
 
 def test_explicit_rule_does_not_apply_after_the_cutoff(music):
-    skill, _, engine, _ = music
+    skill, _, engine = music
     engine.remember("never queue explicit lyrics before 8am", category="music")
     skill._now = lambda: at_hour(9)
     assert skill.rule_filters("focus")["no_explicit"] is False
@@ -416,14 +393,14 @@ def test_explicit_rule_does_not_apply_after_the_cutoff(music):
 
 def test_unconditional_explicit_rule_applies_all_day(music):
     """No time bound -> it really does mean never."""
-    skill, _, engine, _ = music
+    skill, _, engine = music
     engine.remember("never queue explicit lyrics", category="music")
     skill._now = lambda: at_hour(9)
     assert skill.rule_filters("focus")["no_explicit"] is True
 
 
 def test_after_style_window(music):
-    skill, _, engine, _ = music
+    skill, _, engine = music
     engine.remember("no explicit lyrics after 10pm", category="music")
     skill._now = lambda: at_hour(9)                    # 9am -> outside the window
     assert skill.rule_filters("x")["no_explicit"] is False
@@ -433,7 +410,7 @@ def test_after_style_window(music):
 
 def test_context_bound_rule_only_applies_to_that_context(music):
     """'always start study sessions instrumental only' must not silence a workout mix."""
-    skill, _, engine, _ = music
+    skill, _, engine = music
     engine.remember("always start study sessions instrumental only", category="music")
     assert skill.rule_filters("study music")["instrumental_only"] is True
     assert skill.rule_filters("workout")["instrumental_only"] is False
@@ -441,7 +418,7 @@ def test_context_bound_rule_only_applies_to_that_context(music):
 
 def test_two_rules_do_not_bleed_into_each_other(music):
     """A time bound on one rule must not leak onto another."""
-    skill, _, engine, _ = music
+    skill, _, engine = music
     engine.remember("never queue explicit lyrics before 8am", category="music")
     engine.remember("always start study sessions instrumental only", category="music")
     skill._now = lambda: at_hour(9)                    # 9am: explicit rule is OUT of window
@@ -452,27 +429,38 @@ def test_two_rules_do_not_bleed_into_each_other(music):
 
 def test_music_skill_declares_the_music_category(music):
     """Phase 20 refused music rules because nothing read them — this closes that loop."""
-    skill, _, _, _ = music
+    skill, _, _ = music
     assert skill.contract().reads_categories == ["music"]
+    assert "never_claim_spotify_recommended" in skill.contract().hard_invariants
 
 
-# ================================================================= playlists
+# ================================================================= playlists (verified only)
 def test_playlist_created_on_calvins_own_account(music):
-    skill, sp, _, _ = music
+    skill, sp, _ = music
     skill.taste()
     res = skill.playlist(theme="late-night coding", count=3)
     assert res.ok and sp.created == ["late-night coding"]
     assert len(sp.playlist_uris) == 3
+    assert sp.searched                          # nothing added without a Search hit
 
 
 def test_playlist_needs_a_theme(music):
-    skill, _, _, _ = music
+    skill, _, _ = music
     assert skill.playlist().ok is False
+
+
+def test_unverifiable_tracks_are_never_added_to_a_playlist(music):
+    skill, sp, _ = music
+    skill._llm = _MusicLLM({"tracks": ["Nonexistent Band - Nonexistent Song"]})
+    res = skill.playlist(theme="whatever")
+    assert res.ok is False
+    assert sp.created == []
+    assert "couldn't assemble" in res.text.lower()
 
 
 # ================================================================= discovery
 def test_discovery_verifies_artists_and_never_claims_spotify_said_so(music):
-    skill, sp, _, _ = music
+    skill, sp, _ = music
     skill.taste()
     res = skill.discover()
     names = [a["name"] for a in res.data["artists"]]
@@ -482,48 +470,9 @@ def test_discovery_verifies_artists_and_never_claims_spotify_said_so(music):
     assert all(a["why"] for a in res.data["artists"])   # each has a one-line why
 
 
-# ================================================================= DJ mode
-def test_dj_sequences_and_says_it_is_not_mixing(music):
-    skill, sp, _, spoken = music
-    skill.taste()
-    res = skill.dj(cue="evening wind-down", count=3)
-    assert res.ok
-    assert len(sp.queued) == 3
-    assert "not audio mixing" in res.text       # honest about the API's limits
-    assert "can't crossfade" in res.text
-
-
-def test_dj_reorders_the_set(music):
-    skill, sp, _, _ = music
-    skill.taste()
-    res = skill.dj(cue="build energy", count=3)
-    # the fake LLM returns order [2,0,1]; the queue must follow that, not the original order
-    assert res.data["queued"][0].endswith("Malaika")
-
-
-def test_dj_narration_uses_the_voice_layer(music):
-    skill, _, _, spoken = music
-    skill.taste()
-    skill.dj(cue="chill", count=2, narrate=True)
-    assert spoken and "Easing in" in spoken[0]
-
-
-def test_dj_narration_can_be_off(music):
-    skill, _, _, spoken = music
-    skill.taste()
-    skill.dj(cue="chill", count=2, narrate=False)
-    assert spoken == []
-
-
-def test_no_voice_cloning_path_in_music(music):
-    skill, _, _, _ = music
-    assert "prebuilt_voices_only" in skill.contract().hard_invariants
-    assert "never_claim_spotify_recommended" in skill.contract().hard_invariants
-
-
 # ================================================================= transport (no approval gate)
 def test_transport_controls(music):
-    skill, sp, _, _ = music
+    skill, sp, _ = music
     assert skill.play().ok and sp.played
     assert skill.pause().ok and sp.paused
     assert skill.next_track().ok and sp.skipped
@@ -532,18 +481,18 @@ def test_transport_controls(music):
 
 
 def test_device_transfer(music):
-    skill, sp, _, _ = music
+    skill, sp, _ = music
     res = skill.devices(transfer_to="phone")
     assert res.ok and sp.transferred == "d2"
 
 
 def test_device_transfer_unknown(music):
-    skill, _, _, _ = music
+    skill, _, _ = music
     assert skill.devices(transfer_to="fridge").ok is False
 
 
 def test_now_playing(music):
-    skill, _, _, _ = music
+    skill, _, _ = music
     assert "Suzanna" in skill.now_playing().text
 
 
@@ -554,7 +503,7 @@ def test_playback_errors_surface_cleanly(music):
     specially (the laptop opens the app), so it no longer surfaces verbatim — see
     test_play_without_a_device_asks_the_laptop_to_open_spotify.
     """
-    skill, sp, _, _ = music
+    skill, sp, _ = music
 
     def boom():
         raise SpotifyError("Spotify 429: rate limited, try later.")
@@ -590,103 +539,9 @@ def test_is_premium_reads_the_product_field():
     assert c.is_premium() is False
 
 
-# ================================================================= continuous session (Phase 27)
-def test_session_starts_queues_and_plays(music):
-    skill, sp, _, _ = music
-    res = skill.start_session(cue="afrobeats")
-    assert res.data["session"] is True
-    assert sp.queued, "nothing was queued to start the session"
-    assert getattr(sp, "played", False) is True
-
-
-def test_session_survives_the_laptop_and_keeps_topping_up(music):
-    """The whole point of server-driven: the droplet tops the queue up on a timer."""
-    skill, sp, _, _ = music
-    skill.start_session(cue="focus")
-    before = len(sp.queued)
-    out = skill.session_tick()
-    assert out.data["topped_up"] > 0
-    assert len(sp.queued) > before
-
-
-def test_a_repeated_topup_never_requeues_the_same_track_twice(music):
-    """Regression: with a picker that keeps answering the same question the same way, one
-    song (e.g. "Day in a Life") kept re-queuing itself every 4-minute tick forever, and
-    clearing/skipping did nothing because the NEXT tick just added it right back. The
-    picker must remember what this session already queued and never repeat a URI."""
-    skill, sp, _, _ = music
-    skill.start_session(cue="focus")
-    for _ in range(5):
-        skill.session_tick()
-    assert len(sp.queued) == len(set(sp.queued)), f"a track was queued more than once: {sp.queued}"
-
-
-def test_tick_does_nothing_when_no_session_is_running(music):
-    """A timer that acts unasked is how music starts by itself at 3am."""
-    skill, sp, _, _ = music
-    out = skill.session_tick()
-    assert out.data["topped_up"] == 0
-    assert sp.queued == []
-
-
-def test_stop_ends_the_session_and_pauses(music):
-    skill, sp, _, _ = music
-    skill.start_session()
-    res = skill.stop_session()
-    assert res.data["session"] is False
-    assert getattr(sp, "paused", False) is True
-    # after stopping, the tick must not queue anything more
-    sp.queued.clear()
-    skill.session_tick()
-    assert sp.queued == []
-
-
-def test_stop_is_honest_that_queued_tracks_still_play(music):
-    """Spotify has no clear-queue API. Claiming silence would be a small lie."""
-    skill, _, _, _ = music
-    skill.start_session()
-    text = skill.stop_session().text.lower()
-    assert "already-queued" in text or "may still play" in text
-
-
-def test_session_status_reports_state(music):
-    skill, _, _, _ = music
-    assert skill.session_status().data["active"] is False
-    skill.start_session(cue="deep house")
-    st = skill.session_status()
-    assert st.data["active"] is True and "deep house" in st.text
-
-
-def test_a_device_that_disappears_does_not_kill_the_session(music):
-    """Laptop closes mid-session: keep it alive so reopening Spotify resumes."""
-    skill, sp, _, _ = music
-    skill.start_session()
-
-    def gone():
-        raise SpotifyError("No active Spotify device — open Spotify somewhere first.")
-
-    sp.now_playing = gone
-    out = skill.session_tick()
-    assert out.data["topped_up"] == 0
-    assert skill.session_status().data["active"] is True, "session was killed by a sleeping laptop"
-
-
-def test_starting_without_a_device_asks_the_laptop_to_open_spotify(music):
-    skill, sp, _, _ = music
-    sp.devices = lambda: []
-    res = skill.start_session()
-    assert res.ok is False and "open spotify" in res.text.lower()
-
-
-def test_the_session_tick_is_scheduled(music):
-    skill, _, _, _ = music
-    ids = {j.id for j in skill.scheduled_jobs()}
-    assert "music.session_tick" in ids, "nothing would ever top the queue up"
-
-
 # ================================================================= listening budget (Phase 29)
 def test_budget_starts_empty_with_the_monthly_target(music):
-    skill, _, _, _ = music
+    skill, _, _ = music
     b = skill.budget()
     assert b.data["target"] == 10_000
     assert b.data["minutes"] == 0
@@ -694,80 +549,14 @@ def test_budget_starts_empty_with_the_monthly_target(music):
 
 
 def test_budget_target_is_settable(music):
-    skill, _, _, _ = music
+    skill, _, _ = music
     assert skill.budget(target=6000).data["target"] == 6000
     assert skill.budget().data["target"] == 6000        # persisted
 
 
-def test_listening_time_accrues_only_while_something_plays(music):
-    """Time with the laptop shut or Spotify paused is not listening.
-
-    Counting it would make the budget a lie -- and a budget you cannot trust is worse than
-    no budget, because it silently tells you you are on track when you are not.
-    """
-    skill, sp, _, _ = music
-    skill.start_session()
-    t = skill._now()
-    skill._now = lambda: t + 600          # ten minutes pass
-
-    def nothing_playing():
-        return {}
-
-    sp.now_playing = nothing_playing
-    skill.session_tick()
-    assert skill.budget().data["minutes"] == 0, "credited minutes with nothing playing"
-
-
-def test_listening_time_accrues_while_playing(music):
-    skill, _, _, _ = music
-    skill.start_session()
-    t = skill._now()
-    skill._now = lambda: t + 300          # five minutes of actual playback
-    skill.session_tick()
-    assert 4 <= skill.budget().data["minutes"] <= 6
-
-
-def test_a_long_gap_is_capped_not_backfilled(music):
-    """Laptop closed for six hours: do not credit six hours of 'listening' on the next tick."""
-    skill, _, _, _ = music
-    skill.start_session()
-    t = skill._now()
-    skill._now = lambda: t + 6 * 3600
-    skill.session_tick()
-    assert skill.budget().data["minutes"] <= 15
-
-
 def test_budget_resets_when_the_month_rolls_over(music):
-    skill, _, _, _ = music
+    skill, _, _ = music
     skill._record_listening(500)
     assert skill.budget().data["minutes"] == 500
     skill._month_key = lambda: "2099-01"          # next month
     assert skill.budget().data["minutes"] == 0
-
-
-def test_sessions_mix_in_discovery(music):
-    """The 'help me discover more music' half — adjacent artists, not the same rotation."""
-    skill, sp, _, _ = music
-    skill.start_session()
-    seen = []
-    orig = skill._candidates
-    skill._candidates = (lambda cue, n=10, discover=False, avoid=None:
-                         seen.append(discover) or orig(cue, n, discover=discover, avoid=avoid))
-    for _ in range(3):
-        skill.session_tick()
-    assert any(seen), "no discovery pass in three top-ups"
-    assert not all(seen), "every pick was discovery — background listening became a test"
-
-
-def test_the_budget_is_never_a_reason_to_play_into_silence(music):
-    """Calvin asked the bot to 'ensure the limit is reached'.
-
-    Music played to an empty room to hit a number is artificial streaming: against Spotify's
-    terms, risks account termination, and distorts the royalties of the artists he wants to
-    support. Being behind target must never itself start playback.
-    """
-    skill, sp, _, _ = music
-    skill._record_listening(1)                    # far behind a 10,000 target
-    sp.queued.clear()
-    skill.session_tick()                          # no session running
-    assert sp.queued == [], "queued music purely to chase the monthly number"

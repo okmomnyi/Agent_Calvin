@@ -58,7 +58,7 @@ _ACTION_TIERS: dict[tuple[str, str], str] = {
 
 _PLAN_INTERNAL_ACTIONS = {
     "continue", "continue_refinement", "continue_send", "continue_trash", "continue_call",
-    "drill_check", "mock_answer", "mocklab_submit", "quiz_answer", "session_tick",
+    "drill_check", "mock_answer", "mocklab_submit", "quiz_answer",
 }
 
 

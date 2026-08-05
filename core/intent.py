@@ -92,9 +92,9 @@ INTENTS: dict[str, tuple[str, str]] = {
     "close_app":       ("desktop", "close"),
     "focus_app":       ("desktop", "focus"),
     "list_apps":       ("desktop", "apps"),
-    "music_start":     ("music", "start_session"),
-    "music_stop":      ("music", "stop_session"),
-    "music_status":    ("music", "session_status"),
+    "music_play":      ("music", "play"),
+    "music_pause":     ("music", "pause"),
+    "music_now_playing": ("music", "now_playing"),
     "music_budget":    ("music", "budget"),
     "music_playlist":  ("music", "playlist"),
     "music_pl_remove": ("music", "playlist_remove"),
@@ -243,20 +243,19 @@ _RULES: list[tuple[str, re.Pattern[str], str | None]] = [
     # and anchored to the end of the utterance: "start"/"open" are common verbs elsewhere
     # ("start a mock interview"), so these must never win ahead of a real skill. An app we
     # don't know still lands here and gets an honest "I don't have that set up".
-    # Music session (Phase 27). Ahead of the desktop open/close rules, whose generic verbs
-    # ("close ...", "start ...") would otherwise swallow "stop the music".
-    ("music_stop", re.compile(
-        r"\b(?:stop|kill|end|pause)\s+(?:the\s+)?music\b"
-        r"|\bstop\s+(?:the\s+)?(?:music\s+)?session\b|\bmusic\s+off\b", re.I), None),
+    # Music transport (Phase 22, repointed after Phase 27's continuous session was removed --
+    # see skills/music.py's module docstring). Ahead of the desktop open/close rules, whose
+    # generic verbs ("close ...", "start ...") would otherwise swallow "stop the music".
+    ("music_pause", re.compile(
+        r"\b(?:stop|kill|end|pause)\s+(?:the\s+)?music\b|\bmusic\s+off\b", re.I), None),
     ("music_budget", re.compile(
         r"\b(?:music|listening)\s+(?:budget|minutes|hours)\b"
         r"|\bhow\s+much\s+(?:music|have i listened)\b", re.I), None),
-    ("music_status", re.compile(
-        r"\b(?:music|listening)\s+session\s+status\b|\bwhat(?:'?s| is)\s+playing\b"
+    ("music_now_playing", re.compile(
+        r"\bwhat(?:'?s| is)\s+playing\b"
         r"|\bis\s+(?:the\s+)?music\s+(?:still\s+)?(?:on|running|playing)\b", re.I), None),
-    ("music_start", re.compile(
-        r"\b(?:start|play|put\s+on)\s+(?:some\s+|the\s+)?music\b"
-        r"|\bstart\s+(?:a\s+|the\s+)?(?:music\s+)?session\b"
+    ("music_play", re.compile(
+        r"\b(?:start|play|put\s+on|resume)\s+(?:some\s+|the\s+)?music\b"
         r"|\bkeep\s+(?:the\s+)?music\s+(?:going|playing)\b", re.I), None),
     ("list_apps", re.compile(r"\b(?:what|which) apps\b|\blist apps\b", re.I), None),
     ("open_app", re.compile(
@@ -304,7 +303,7 @@ _LLM_LABELS = [
 # Actions that exist for the machinery, not for Calvin -- passive logging, mid-session
 # continuations, callbacks. Routing a sentence to one of these would be worse than missing.
 _INTERNAL_ACTIONS = {
-    "log_signal", "drill_check", "quiz_answer", "mock_answer", "session_tick",
+    "log_signal", "drill_check", "quiz_answer", "mock_answer",
     "confirm_deadline", "reject_deadline", "score_one", "run", "tick",
 }
 
@@ -313,9 +312,6 @@ _INTERNAL_ACTIONS = {
 _ARG_NAMES = {
     ("music", "playlist"): "theme",
     ("music", "playlist_remove"): "track",
-    ("music", "auto_queue"): "cue",
-    ("music", "dj"): "cue",
-    ("music", "start_session"): "cue",
     ("cv_tailor", "tailor"): "target",
     ("cv_tailor", "refine"): "target",
     ("research", "search"): "query",

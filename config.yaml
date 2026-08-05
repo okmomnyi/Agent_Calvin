@@ -355,12 +355,6 @@ github:
 desktop:
   apps: [spotify, code, chrome, telegram, terminal]
 
-# --- Music companion (Phase 22) ---
-# Spotify removed Recommendations/Audio-Features/Related-Artists for new apps, and the Web
-# API cannot mix audio — so "DJ mode" is sequencing + narration, never beatmatching.
-music:
-  dj_narration: true          # speak a short line to open a set (stock voice only, §0 P9)
-
 # --- Adaptive behavior layer (Phase 20) ---
 adaptive:
   threshold: 4        # times a pattern must repeat (with NO contradicting instance) to propose

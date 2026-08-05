@@ -84,7 +84,7 @@ def _spotify_authorize(redirect_uri: str) -> int:
 
 
 def cmd_music(args: argparse.Namespace) -> int:
-    """Spotify control. DJ mode = smart sequencing + narration, not audio mixing."""
+    """Spotify control -- explicit-ask only (no auto-queue/session/DJ, see skills/music.py)."""
     import os
 
     from skills.music import SKILL
@@ -97,14 +97,10 @@ def cmd_music(args: argparse.Namespace) -> int:
         r = SKILL.connect()
     elif a == "taste":
         r = SKILL.taste()
-    elif a == "queue":
-        r = SKILL.auto_queue(cue=args.cue or "")
     elif a == "playlist":
         r = SKILL.playlist(theme=args.cue or "")
     elif a == "discover":
         r = SKILL.discover()
-    elif a == "dj":
-        r = SKILL.dj(cue=args.cue or "")
     elif a == "devices":
         r = SKILL.devices(transfer_to=args.cue or "")
     elif a == "volume":
@@ -1013,9 +1009,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_inf.set_defaults(func=cmd_infra)
 
     # --- Phase 22: music companion ---
-    p_mus = sub.add_parser("music", help="Spotify: taste/queue/playlist/discover/dj/transport")
-    p_mus.add_argument("action", choices=["connect", "taste", "queue", "playlist", "discover",
-                                          "dj", "play", "pause", "next", "previous", "volume",
+    p_mus = sub.add_parser("music", help="Spotify: taste/playlist/discover/transport")
+    p_mus.add_argument("action", choices=["connect", "taste", "playlist", "discover",
+                                          "play", "pause", "next", "previous", "volume",
                                           "devices", "now"])
     p_mus.add_argument("cue", nargs="?", default=None, help="mood/theme/device/volume")
     p_mus.add_argument("--redirect", default="http://127.0.0.1:8888/callback",

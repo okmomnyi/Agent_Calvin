@@ -558,18 +558,22 @@ Honest about a restricted API. Spotify removed **Recommendations, Audio Features
 Related Artists and Featured Playlists for new apps**, and the Web API **cannot mix audio at any
 tier**; the account must be **Premium**. So: the taste model is built from what *does* exist
 (recently played, top tracks/artists over three ranges, saved library); song choices come from
-the model's own knowledge and are then **resolved to real tracks via Search**, so nothing is
-suggested that wasn't verified to exist; and "DJ mode" is **smart sequencing plus narrated
-transitions**, not beatmatching. Discovery is framed as AgentOS's suggestion with a one-line
-"why" — **never** as Spotify's recommendation, because it isn't.
+the model's own knowledge and are then **resolved to real tracks via Search**, so nothing lands
+in a playlist that wasn't verified to exist. Discovery is framed as AgentOS's suggestion with a
+one-line "why" — **never** as Spotify's recommendation, because it isn't.
 
 **Achieved:** that honesty is enforced in code — `core/spotify.py` doesn't define the dead
 endpoints at all, and `_call()` refuses them anyway as belt-and-braces. Those patterns are
 compiled to a regex (`{id}` → `[^/]+`); compared literally, `/artists/{id}/related-artists`
-would never match a real artist id and the guard would silently pass. Narration uses a **stock
-edge-tts voice** (§0 P9). Standing rules are evaluated **per rule** — joining them lets one
-rule's time window leak onto another — and `_local_hour()` resolves through `zoneinfo` +
-`settings.tz`, because "before 8am" means 8am in **Nairobi**, not on a UTC droplet.
+would never match a real artist id and the guard would silently pass. Standing rules are
+evaluated **per rule** — joining them lets one rule's time window leak onto another — and
+`_local_hour()` resolves through `zoneinfo` + `settings.tz`, because "before 8am" means 8am in
+**Nairobi**, not on a UTC droplet.
+
+**The auto-queue picker and "DJ mode" (smart sequencing + narrated transitions) were removed**
+(2026-08, Calvin's call — see Phase 27 below for why). What remains only ever acts on an
+explicit ask: play/pause/skip/volume, creating or editing a **named** playlist (a distinct
+object from the live queue), taste/discover, and the listening budget display.
 
 ### Phase 23 — Desktop app control (`desktop.py` + `client/apps.py`)
 Open, close and focus apps on Calvin's laptop by voice. The droplet **cannot reach the laptop**
@@ -644,16 +648,17 @@ overflow is enqueued and drained, deduped by job id.
 the scheduler enqueues, a generic `skill.run` handler dispatches by name in the worker. Light
 jobs stay inline: a 2-second no-op gains nothing from a queue hop.
 
-### Phase 27 — Continuous music session (`music.start_session` / `session_tick`)
-Music that keeps playing until told to stop, driven from the **server** so it survives the
-laptop sleeping. **Achieved:** session state in `kv`, plus a 4-minute tick that tops the queue
-up — under the length of most tracks, so it never runs dry. The droplet is the DJ, not the
-stereo: audio comes out of whichever Spotify device is active.
-Honest about the limits: Spotify has **no clear-queue API**, so `stop` says plainly that up to
-`SESSION_LOOKAHEAD` already-queued tracks may still play rather than claiming silence. The tick
-no-ops unless a session is active (a timer that acts unasked is how music starts by itself at
-3am), and a device disappearing mid-session does *not* kill the session — he'll reopen Spotify
-and expect it to resume.
+### Phase 27 — Continuous music session — **removed 2026-08**
+Originally: music that kept playing until told to stop, driven from the **server** so it
+survived the laptop sleeping, with a 4-minute tick that topped the queue up. **Removed at
+Calvin's request**: it kept interfering with his Spotify queue, re-queuing songs on a loop even
+after a dedup fix (the picker's "avoid what we already queued" memory helped but never fully
+closed the hole). The structural problem was that Spotify's Web API has **no clear-queue call**
+— anything the tick pushed onto the live queue stayed there regardless of skipping or stopping,
+so a session that misbehaved couldn't be cleanly undone. `music.py` now only ever queues in
+response to an explicit ask (play/pause/skip, or building a *named* playlist, which is a
+separate object from the live queue). DJ-set sequencing was removed for the same reason — it
+queued a whole set on its own initiative.
 
 
 ### Phase 28 — Service-by-service self-test (`core/selftest.py`)
@@ -670,9 +675,11 @@ always ends in a duration. A self-test whose numbers can't be trusted is worse t
 because it is believed.
 
 ### Phase 29 — Listening budget (`music.budget`)
-A monthly minutes cap (default 10k) for the continuous session, so "play music until I say
-stop" can't quietly run all month. Spent minutes accrue on each `session_tick`; the session
-stops itself at the cap rather than being silently throttled.
+A monthly minutes target (default 10k) — deliberately a **budget he can spend, not a quota the
+bot must hit**: playing to an empty room to reach a number is what Spotify calls artificial
+streaming, and it distorts artist royalties. Originally accrued on each Phase 27 `session_tick`;
+with that removed, `_record_listening()` has no caller left, so the display now reads 0 until
+something else feeds it real listening time.
 
 ### Phase 30 — Tiered actions & learned permissions (`core/approvals.py`)
 The approval gate used to be all-or-nothing, which trains you to rubber-stamp. Actions now

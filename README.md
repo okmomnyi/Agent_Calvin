@@ -37,7 +37,7 @@ infrastructure, and doubles as a full study companion — reachable by **voice**
 | **Adaptive layer** | Notices repeated patterns and *proposes* a rule for you to confirm — never self-modifies. Skill Contracts bound which rules can reach which skill |
 | **Continuity** | One session across phone/laptop/browser/CLI — hand off mid-task, see every pending approval in one place |
 | **Self-audit** | Weekly report-only scan of infrastructure *you enrol*: open ports, TLS expiry, exposed config, CVEs via OSV, container health. **Never acts** |
-| **Music** | Spotify taste model, playlists, transport control, narrated DJ mode (stock voice only) · **continuous session** driven from the server, so it keeps playing while your laptop sleeps |
+| **Music** | Spotify taste model, named playlists, transport control, listening budget. Explicit-ask only — no auto-queue, no continuous session, no DJ mode (removed: Spotify has no clear-queue API, so anything queued unasked couldn't be cleanly undone) |
 | **Memory** | pgvector semantic recall over your facts, notes and CV — retrieves what's relevant instead of stuffing the context window (**~71% context reduction** measured on CV tailoring) |
 | **Approvals** | Actions carry a tier (`trivial`/`low`/`medium`/`high`) and remember your answers per action. **`high` can never be learned into auto-approval** — anything sent in your name asks every time |
 | **Proactive** | Triages the inbox at 05:30, before your briefing, so the briefing reports an inbox already cleaned. Confined to archive/trash/label, and an action it doesn't recognise is dropped rather than escalated |

@@ -216,7 +216,6 @@ def test_light_jobs_still_run_inline():
     registry = SkillRegistry()
     registry.discover()
     inline = {j.id for j in registry.all_scheduled_jobs() if not getattr(j, "queued", False)}
-    assert "music.session_tick" in inline
     assert "planner.briefing" in inline
 
 

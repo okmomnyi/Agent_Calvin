@@ -7,18 +7,21 @@ Honest about what the Web API can and can't do (see core/spotify.py):
     tracks/artists over three ranges, and the saved library — and the actual song choices
     come from the model's own knowledge, then get RESOLVED to real tracks via Search. Nothing
     is suggested that wasn't verified to exist.
-  * There is no BPM/key/energy data, and the API cannot mix audio at any tier. So "DJ mode"
-    here is **smart sequencing plus narrated transitions**, not beatmatching — ordering a set
-    for flow using metadata we can actually see (genre, era, listening patterns), with an
-    optional spoken line between tracks through the Phase 7 voice layer.
-  * Any transition line is spoken by a **stock edge-tts voice** — never a clone of Calvin's
-    voice (§0 Principle 9).
 
 Discovery is framed as AgentOS's suggestion with a one-line "why" — never presented as
 Spotify's own recommendation, because it isn't.
 
 Playback is personal, not an action taken in Calvin's name to anyone else, so §0 Principle 3
-(approval gates) doesn't apply to play/pause/skip/queue.
+(approval gates) doesn't apply to play/pause/skip.
+
+Removed (Calvin: it kept interfering with his Spotify queue, re-queuing songs on a loop even
+after a dedup fix): the auto-queue picker, the continuous "session" (start/stop/status + the
+4-minute server-side top-up timer), and DJ-set sequencing. Those all worked by pushing tracks
+onto Spotify's live queue on their own initiative, without being asked track-by-track — and
+the Web API has no "clear queue" call, so anything they added stayed queued regardless of
+skipping or stopping. What remains only ever acts on an explicit ask: play/pause/skip/volume,
+creating or editing a NAMED playlist (a distinct object, never the live queue), taste/discover,
+and the listening budget display.
 """
 
 from __future__ import annotations
@@ -41,20 +44,12 @@ from core.spotify import SpotifyClient, SpotifyError
 log = get_logger("skills.music")
 
 _TASTE_KV = "music.taste"
-_SESSION_KV = "music.session"
 _BUDGET_KV = "music.budget"
 # Calvin's monthly listening target, in minutes (~5.5h/day). A BUDGET he can spend, not a
-# quota the bot must hit: see _budget_state() for why that distinction matters.
+# quota the bot must hit: see _budget_state() for why that distinction matters. Note: with
+# the continuous session removed, nothing calls _record_listening() anymore, so this will
+# read 0 until something else feeds it real listening time.
 DEFAULT_MONTHLY_MINUTES = 10_000
-# Share of a session's picks that should be NEW to him -- the "help me discover more music"
-# ask. The rest stay in his known lane so a work session doesn't turn into a listening test.
-DISCOVERY_RATIO = 0.35
-# How many tracks to keep queued ahead. Small enough that a "stop" takes effect within a
-# track or two -- Spotify has no API to clear a queue, so anything already queued WILL play.
-SESSION_LOOKAHEAD = 4
-# How many recently-queued tracks a session remembers and tells the picker to avoid. Capped
-# so the kv row and the "don't repeat" prompt line stay small, not for any musical reason.
-SESSION_MEMORY = 30
 TIME_RANGES = ("short_term", "medium_term", "long_term")
 
 # Substring of core.spotify's 404 message. Matched rather than typed as its own exception
@@ -80,12 +75,10 @@ class MusicSkill(BaseSkill):
 
     def __init__(self, memory: Memory | None = None, llm: LLMClient | None = None,
                  spotify: SpotifyClient | None = None,
-                 speak: Callable[[str], None] | None = None,
                  clock: Callable[[], float] = time.time) -> None:
         self._mem = memory
         self._llm = llm
         self._sp = spotify
-        self._speak = speak
         self._now = clock
 
     @property
@@ -108,13 +101,12 @@ class MusicSkill(BaseSkill):
 
     def commands(self) -> dict[str, Callable[..., CommandResult]]:
         return {
-            "connect": self.connect, "taste": self.taste, "queue": self.auto_queue,
-            "playlist": self.playlist, "playlist_remove": self.playlist_remove, "discover": self.discover, "dj": self.dj,
+            "connect": self.connect, "taste": self.taste,
+            "playlist": self.playlist, "playlist_remove": self.playlist_remove,
+            "discover": self.discover,
             "play": self.play, "pause": self.pause, "next": self.next_track,
             "previous": self.previous_track, "volume": self.volume, "devices": self.devices,
             "now_playing": self.now_playing,
-            "start_session": self.start_session, "stop_session": self.stop_session,
-            "session_status": self.session_status, "session_tick": self.session_tick,
             "budget": self.budget,
         }
 
@@ -122,18 +114,12 @@ class MusicSkill(BaseSkill):
         return [
             ScheduledJob(id="music.taste", func=self.taste, trigger="cron",
                          kwargs={"day_of_week": "sun", "hour": 4}),
-            # The heartbeat that makes a session continuous. It no-ops unless one is running,
-            # so this is cheap; 4 minutes is under the length of most tracks, so the queue
-            # never actually runs dry between ticks.
-            ScheduledJob(id="music.session_tick", func=self.session_tick, trigger="interval",
-                         kwargs={"minutes": 4}),
         ]
 
     def contract(self) -> SkillContract:
         """Declares 'music', so rules like 'no explicit before 8am' finally have a reader."""
         return SkillContract(reads_categories=["music"],
-                             hard_invariants=["prebuilt_voices_only",
-                                              "never_claim_spotify_recommended"])
+                             hard_invariants=["never_claim_spotify_recommended"])
 
     # ------------------------------------------------------------- connect
     def connect(self, **_: Any) -> CommandResult:
@@ -275,25 +261,9 @@ class MusicSkill(BaseSkill):
         return kept, dropped
 
     # ------------------------------------------------------------- candidate generation
-    def _candidates(self, cue: str, n: int = 10, discover: bool = False,
-                    avoid: list[str] | None = None) -> list[str]:
-        """Ask the model for track ideas from the taste picture — NOT Spotify's recommender.
-
-        `discover` biases toward artists ADJACENT to his taste rather than the ones already on
-        repeat: same scene, era or lane, but names he is unlikely to have saved. That is the
-        "help me discover more music" half of a session; the rest stays familiar so background
-        listening does not become a listening test.
-
-        `avoid` is what a continuous session already queued recently. Without it, every tick
-        asks the model the same question from the same taste snapshot and gets the same
-        "obvious" answer back (typically the artist's biggest single) — a real bug that showed
-        up as one song re-queuing itself every 4 minutes for as long as the session ran.
-        """
+    def _candidates(self, cue: str, n: int = 10) -> list[str]:
+        """Ask the model for track ideas from the taste picture — NOT Spotify's recommender."""
         model = self._taste()
-        avoid_line = ""
-        if avoid:
-            avoid_line = ("\nAlready queued recently in this session -- do NOT suggest any of "
-                          "these again: " + "; ".join(avoid[-20:]))
         try:
             data = self.llm.chat_json(
                 "write",
@@ -304,57 +274,24 @@ class MusicSkill(BaseSkill):
                  {"role": "user", "content":
                     f"Cue: {cue or 'keep it going'}\nGenres: {model.get('top_genres')}\n"
                     f"Artists: {model.get('top_artists')}\nEras: {model.get('eras')}\n"
-                    f"Give {n} tracks.{avoid_line}"}],
+                    f"Give {n} tracks."}],
                 schema_hint='{"tracks": [string]}', temperature=0.7, max_tokens=500)
             return [t for t in data.get("tracks", []) if isinstance(t, str)][:n]
         except LLMError:
             return [a for a in (self._taste().get("top_artists") or [])[:n]]
 
-    def _resolve(self, queries: list[str], filters: dict[str, bool],
-                avoid_uris: set[str] | None = None) -> list[dict[str, Any]]:
-        """Every idea must resolve to a REAL Spotify track before it goes anywhere near a queue.
-
-        `avoid_uris` is a hard backstop, not just the prompt-level ask above: if the model
-        ignores the "don't repeat" instruction (or a query happens to resolve to the same
-        track another way), a track already queued this session is dropped here regardless.
-        """
+    def _resolve(self, queries: list[str], filters: dict[str, bool]) -> list[dict[str, Any]]:
+        """Every idea must resolve to a REAL Spotify track before it goes anywhere near a playlist."""
         found = []
         for q in queries:
             try:
                 track = self.sp.search_track(q)
             except SpotifyError:
                 continue
-            if track and (not avoid_uris or track.get("uri") not in avoid_uris):
+            if track:
                 found.append(track)
         found, _ = self._apply_filters(found, filters)
         return found
-
-    # ------------------------------------------------------------- auto-queue
-    def auto_queue(self, cue: str = "", count: int = 8, discover: bool = False,
-                   avoid: list[dict[str, str]] | None = None, **_: Any) -> CommandResult:
-        avoid = avoid or []
-        avoid_uris = {a["uri"] for a in avoid if a.get("uri")}
-        avoid_labels = [a["label"] for a in avoid if a.get("label")]
-        filters = self.rule_filters(cue)
-        tracks = self._resolve(
-            self._candidates(cue, count * 2, discover=discover, avoid=avoid_labels),
-            filters, avoid_uris=avoid_uris)[:count]
-        if not tracks:
-            return CommandResult(text="Couldn't find anything that fits (and I won't queue "
-                                      "songs I can't verify exist).", ok=False)
-        queued, queued_ids = [], []
-        for t in tracks:
-            try:
-                self.sp.queue(t["uri"])
-                queued.append(f"{t['artists'][0]['name']} — {t['name']}")
-                queued_ids.append({"uri": t["uri"], "label": queued[-1]})
-            except SpotifyError as exc:
-                return CommandResult(text=f"Queued {len(queued)} then hit: {exc}",
-                                     ok=False, data={"queued": queued, "queued_ids": queued_ids})
-        note = " (explicit filtered per your rule)" if filters["no_explicit"] else ""
-        return CommandResult(text=f"▶️ Queued {len(queued)} track(s){note}:\n" +
-                                  "\n".join(f"  • {q}" for q in queued),
-                             data={"queued": queued, "queued_ids": queued_ids, "filters": filters})
 
     # ------------------------------------------------------------- listening budget
     def _month_key(self) -> str:
@@ -412,127 +349,8 @@ class MusicSkill(BaseSkill):
         return CommandResult(
             text=(f"🎧 Listening budget — {state['month']}\n"
                   f"  {int(used)} / {goal} min ({pct}%) · {state['tracks']} tracks\n"
-                  f"  {int(left)} min left · {pace}\n"
-                  f"Sessions count toward this automatically while you're listening."),
+                  f"  {int(left)} min left · {pace}"),
             data=state)
-
-    # ------------------------------------------------------------- continuous session
-    def start_session(self, cue: str = "", **_: Any) -> CommandResult:
-        """Keep music going until told to stop, driven from the SERVER.
-
-        The point is that it survives Calvin's laptop sleeping: the droplet holds the session
-        and tops the queue up on a timer, so playback continues on whichever Spotify device is
-        active. The droplet has no speakers and is not a playback device -- it is the DJ, not
-        the stereo.
-        """
-        cue = (cue or "").strip()
-        try:
-            devices = self.sp.devices()
-        except SpotifyError as exc:
-            return self._no_device(exc) if _NO_DEVICE in str(exc) else CommandResult(
-                text=str(exc), ok=False)
-        if not devices:
-            return CommandResult(
-                text="No active Spotify device. Open Spotify on your laptop or phone and play "
-                     "anything for a second, then say 'start the session' again.", ok=False)
-
-        state = {"active": True, "cue": cue, "started_at": self._now(),
-                "last_topup": 0.0, "queued_total": 0, "recent": []}
-        self.mem.kv_set(_SESSION_KV, json.dumps(state))
-        first = self.auto_queue(cue=cue, count=SESSION_LOOKAHEAD)
-        state["recent"] = first.data.get("queued_ids", [])[-SESSION_MEMORY:]
-        self.mem.kv_set(_SESSION_KV, json.dumps(state))
-        try:
-            self.sp.play()
-        except SpotifyError:
-            pass                      # already playing is fine
-        where = devices[0].get("name", "your device")
-        return CommandResult(
-            text=(f"🎵 Session started on {where}"
-                  + (f" — {cue}" if cue else "") + ".\n"
-                  "I'll keep the queue topped up until you say 'stop music'."),
-            data={"session": True, "cue": cue, "device": where,
-                  "queued": first.data.get("queued", [])})
-
-    def stop_session(self, **_: Any) -> CommandResult:
-        """End the session and pause. Honest about what Spotify cannot do."""
-        raw = self.mem.kv_get(_SESSION_KV)
-        was_active = bool(json.loads(raw).get("active")) if raw else False
-        self.mem.kv_set(_SESSION_KV, json.dumps({"active": False, "stopped_at": self._now()}))
-        paused = True
-        try:
-            self.sp.pause()
-        except SpotifyError:
-            paused = False
-        if not was_active:
-            return CommandResult(text="No session was running." +
-                                      ("" if paused else " (Couldn't pause — nothing playing?)"))
-        # The Web API has no "clear queue" call, so tracks already queued still exist. Saying
-        # "stopped" while 4 more songs play would be a small lie.
-        return CommandResult(
-            text=("⏹ Session stopped — I won't queue anything more."
-                  + ("" if paused else " (Couldn't pause playback.)")
-                  + f"\nUp to {SESSION_LOOKAHEAD} already-queued track(s) may still play: "
-                    "Spotify has no API to clear a queue, so skip them if you want silence."),
-            data={"session": False})
-
-    def session_status(self, **_: Any) -> CommandResult:
-        raw = self.mem.kv_get(_SESSION_KV)
-        state = json.loads(raw) if raw else {}
-        if not state.get("active"):
-            return CommandResult(text="🔇 No music session running.", data={"active": False})
-        mins = int((self._now() - float(state.get("started_at", self._now()))) / 60)
-        cue = state.get("cue") or "your taste"
-        return CommandResult(
-            text=f"🎵 Session running {mins} min — {cue}. "
-                 f"{state.get('queued_total', 0)} track(s) queued so far. Say 'stop music' to end.",
-            data={"active": True, **state})
-
-    def session_tick(self, **_: Any) -> CommandResult:
-        """Scheduled top-up. The thing that makes the session CONTINUOUS.
-
-        Runs on the droplet, so it keeps working while the laptop is closed. Does nothing
-        unless a session is active -- this is on a timer, and a timer that acts without being
-        asked is how you get music starting by itself at 3am.
-        """
-        raw = self.mem.kv_get(_SESSION_KV)
-        state = json.loads(raw) if raw else {}
-        if not state.get("active"):
-            return CommandResult(text="No session active.", data={"topped_up": 0})
-        try:
-            playing = self.sp.now_playing()
-        except SpotifyError as exc:
-            # Device went away (laptop closed, phone off). Keep the session ALIVE rather than
-            # killing it: he'll reopen Spotify and expect it to resume.
-            return CommandResult(text=f"Session paused — {exc}", data={"topped_up": 0}, ok=False)
-        if not playing or not playing.get("item"):
-            return CommandResult(text="Nothing playing right now; leaving the session alone.",
-                                 data={"topped_up": 0})
-
-        # Credit the minutes actually elapsed since the last tick, but only while something
-        # was genuinely playing (checked above). Time with the laptop shut or Spotify paused
-        # is not listening, and counting it would make the budget a lie.
-        last = float(state.get("last_topup") or state.get("started_at") or self._now())
-        elapsed_min = max(0.0, min((self._now() - last) / 60.0, 15.0))
-        budget = self._record_listening(elapsed_min)
-
-        # Alternate: keep most of the session in his lane, but bias some picks toward
-        # adjacent artists so the "discover more music" ask actually happens.
-        discover = (int(state.get("topups", 0)) % 3 == 2)
-        res = self.auto_queue(cue=state.get("cue", ""), count=SESSION_LOOKAHEAD,
-                              discover=discover, avoid=state.get("recent", []))
-        n = len(res.data.get("queued", []))
-        state["last_topup"] = self._now()
-        state["topups"] = int(state.get("topups", 0)) + 1
-        state["queued_total"] = int(state.get("queued_total", 0)) + n
-        # Roll the "avoid" memory forward -- without this, the exact same picker call every
-        # 4 minutes was how one song (e.g. "Day in a Life") kept re-queuing itself on a loop.
-        state["recent"] = (state.get("recent", []) + res.data.get("queued_ids", []))[-SESSION_MEMORY:]
-        self.mem.kv_set(_SESSION_KV, json.dumps(state))
-        return CommandResult(
-            text=f"Topped up {n} track(s)" + (" (discovery mix)" if discover else "")
-                 + f"; {int(budget['minutes'])}/{budget['target']} min this month.",
-            data={"topped_up": n, "discover": discover, "minutes": budget["minutes"]})
 
     # ------------------------------------------------------------- playlists
     def playlist(self, theme: str = "", count: int = 20, **_: Any) -> CommandResult:
@@ -638,64 +456,6 @@ class MusicSkill(BaseSkill):
                  "to new apps):"]
         lines += [f"  • {a['name']} — {a['why']}" for a in out]
         return CommandResult(text="\n".join(lines), data={"artists": out})
-
-    # ------------------------------------------------------------- DJ mode (sequencing)
-    def dj(self, cue: str = "", count: int = 8, narrate: bool | None = None,
-           **_: Any) -> CommandResult:
-        """Order a set for flow and queue it. Sequencing + narration — NOT audio mixing."""
-        filters = self.rule_filters(cue)
-        tracks = self._resolve(self._candidates(cue, count * 2), filters)[:count]
-        if not tracks:
-            return CommandResult(text="Nothing to work with for that set.", ok=False)
-
-        ordered, intro = self._sequence(tracks, cue)
-        queued = []
-        for t in ordered:
-            try:
-                self.sp.queue(t["uri"])
-                queued.append(f"{t['artists'][0]['name']} — {t['name']}")
-            except SpotifyError as exc:
-                return CommandResult(text=f"Queued {len(queued)} then hit: {exc}", ok=False)
-
-        if narrate is None:
-            narrate = bool(get_settings().get("music", "dj_narration", default=True))
-        if narrate and intro:
-            self._say(intro)      # stock voice only — never a clone (§0 P9)
-        return CommandResult(
-            text=(f"🎚 DJ set queued ({len(queued)} tracks, sequenced for flow — this is "
-                  f"ordering + narration, not audio mixing; the Web API can't crossfade):\n"
-                  + "\n".join(f"  {i+1}. {q}" for i, q in enumerate(queued))
-                  + (f"\n\n🎙 “{intro}”" if intro and narrate else "")),
-            data={"queued": queued, "intro": intro if narrate else None})
-
-    def _sequence(self, tracks: list[dict[str, Any]], cue: str) -> tuple[list[dict[str, Any]], str]:
-        """Order by flow using metadata we can actually see (genre/era/popularity)."""
-        listing = [f"{i}: {t['artists'][0]['name']} — {t['name']} "
-                   f"({t.get('album', {}).get('release_date', '?')[:4]}, "
-                   f"pop {t.get('popularity', '?')})" for i, t in enumerate(tracks)]
-        try:
-            data = self.llm.chat_json(
-                "write",
-                [{"role": "system", "content":
-                    "Order these tracks into a set that flows: build or cool energy to suit the "
-                    "cue and avoid jarring genre jumps. You have no tempo/key data — use genre, "
-                    "era and popularity. Return JSON: order = [indices], intro = one short "
-                    "spoken line to open the set."},
-                 {"role": "user", "content": f"Cue: {cue}\n" + "\n".join(listing)}],
-                schema_hint='{"order": [int], "intro": string}', temperature=0.5, max_tokens=300)
-            order = [i for i in data.get("order", []) if isinstance(i, int) and 0 <= i < len(tracks)]
-            seen: set[int] = set()
-            order = [i for i in order if not (i in seen or seen.add(i))]
-            order += [i for i in range(len(tracks)) if i not in seen]
-            return [tracks[i] for i in order], str(data.get("intro", "")).strip()
-        except LLMError:
-            return tracks, ""
-
-    def _say(self, text: str) -> None:
-        if self._speak:
-            self._speak(text)
-            return
-        log.info("DJ line (spoken by the laptop client in a stock voice): %s", text)
 
     # ------------------------------------------------------------- transport (no approval gate)
     def _simple(self, fn: Callable[[], None], ok_text: str) -> CommandResult:

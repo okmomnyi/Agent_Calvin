@@ -160,16 +160,32 @@ try {
         if ($Mode -eq "window") { $out = & $Python -u hud_window.py --tray 2>&1 }
         elseif ($Mode -eq "voice") { $out = & $Python -u voice_client.py 2>&1 }  # opt-in wake word
         else { $out = & $Python -u voice_client.py $Mode 2>&1 }                  # --text / --ptt
+        $exitCode = $LASTEXITCODE
         $out | ForEach-Object { Add-Content -Path $LogFile -Value ("    " + $_) -Encoding utf8 }
         Pop-Location
 
         $ranForSeconds = ((Get-Date) - $launchedAt).TotalSeconds
+
+        # hud_window.py has no OS close box -- the tray's own "Quit" (or the page's quit()
+        # bridge call) is the ONLY way to close it, and both return cleanly (exit 0). Without
+        # this check, quitting looked identical to a crash: the window came right back a few
+        # seconds later, forever, because nothing here ever distinguished "the user asked to
+        # quit" from "it died unexpectedly". Scoped to window mode only -- voice_client.py's
+        # own loops can plausibly return 0 after a recoverable network blip (not just
+        # Ctrl+C), and this supervisor exists specifically so THAT case keeps retrying rather
+        # than going silently, permanently dark.
+        if ($Mode -eq "window" -and $exitCode -eq 0) {
+            Log ("client exited cleanly after {0:N0}s (exit 0) -- treating as an intentional " +
+                "quit, supervisor stopping. Re-run this script (or log back in) to bring it back.")
+            break
+        }
+
         if ($ranForSeconds -lt $MinHealthyRunSeconds) {
             $RestartDelay = [Math]::Min($RestartDelay * 2, 60)
-            Log ("client exited after {0:N0}s -- crash-loop backoff, waiting {1}s" -f $ranForSeconds, $RestartDelay)
+            Log ("client exited after {0:N0}s (exit {1}) -- crash-loop backoff, waiting {2}s" -f $ranForSeconds, $exitCode, $RestartDelay)
         } else {
             $RestartDelay = 5
-            Log ("client exited after {0:N0}s, restarting in {1}s" -f $ranForSeconds, $RestartDelay)
+            Log ("client exited after {0:N0}s (exit {1}), restarting in {2}s" -f $ranForSeconds, $exitCode, $RestartDelay)
         }
         Start-Sleep -Seconds $RestartDelay
     }
